@@ -2581,8 +2581,17 @@ function renderTargetPane() {
 
 // FieldExpression helpers
 function getCollectionEntry(targetCollName) {
+  // Resolve by EITHER namespace: the target-collection name (what target-name
+  // callers pass) OR the collection key / source-table name (what FK-inferred
+  // edges store in from_collection/to_collection). Under a naming convention
+  // that transforms names (e.g. CC-12 PascalCase: source `film_actor` ->
+  // target `FilmActor`) these two diverge; matching target-name only silently
+  // dropped every FK-inferred edge from the canvas.
   return Object.entries(editState.collections).find(
-    ([k, c]) => (c.targetCollection || k) === targetCollName
+    ([k, c]) =>
+      (c.targetCollection || k) === targetCollName ||
+      (c.sourceTable || k) === targetCollName ||
+      k === targetCollName
   );
 }
 
