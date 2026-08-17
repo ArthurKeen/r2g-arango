@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from r2g.log import get_logger
 from r2g.security import CredentialCipher, load_secret_key
@@ -102,6 +102,10 @@ class Project(BaseModel):
     name: str
     source_name: str
     schema_snapshot_id: str
+    #: Absolute path to the project's mapping YAML. A leading ``~`` is expanded
+    #: on the way in (see :meth:`_expand_mapping_path`) — storing it unexpanded
+    #: made the path resolve *relative to the process cwd*, which silently wrote
+    #: projects into a literal ``~`` directory wherever r2g happened to be run.
     mapping_config_path: str
     arango_endpoint: str = "http://localhost:8529"
     arango_database: str = "_system"
@@ -115,6 +119,20 @@ class Project(BaseModel):
     loaded_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("mapping_config_path")
+    @classmethod
+    def _expand_mapping_path(cls, value: str) -> str:
+        """Expand a leading ``~`` however the path reached us.
+
+        Applied on the model rather than only at creation so that catalogs
+        written before this validator existed are corrected the moment they are
+        loaded — no migration step, and no window where half the entries are
+        expanded. Non-tilde paths (absolute or relative) are returned untouched.
+        """
+        if value.startswith("~"):
+            return str(Path(value).expanduser())
+        return value
 
 
 class LoadRecord(BaseModel):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -315,3 +316,49 @@ class TestCatalogPersistence:
         data = json.loads(catalog_path.read_text(encoding="utf-8"))
         assert "sources" in data
         assert "pg1" in data["sources"]
+
+
+class TestMappingPathExpansion:
+    """A leading `~` must never reach disk unexpanded.
+
+    Storing it raw made the path resolve relative to the process cwd, so r2g
+    wrote projects into a literal `~` directory wherever it happened to be run
+    — and the CLI then failed with FileNotFoundError while in-process callers
+    (whose cwd happened to contain that directory) kept working.
+    """
+
+    def _mk(self, tmp_path):
+        mgr = CatalogManager(str(tmp_path / "catalog"))
+        mgr.add_source("src", "postgresql", "postgresql://localhost/db")
+        return mgr
+
+    def test_tilde_is_expanded_on_create(self, tmp_path):
+        mgr = self._mk(tmp_path)
+        project = mgr.create_project("p", "src", "~/.r2g/projects/p/mapping.yaml")
+        assert not project.mapping_config_path.startswith("~")
+        assert project.mapping_config_path == str(
+            Path("~/.r2g/projects/p/mapping.yaml").expanduser()
+        )
+
+    def test_tilde_in_an_existing_catalog_is_expanded_on_load(self, tmp_path):
+        """Catalogs written before the validator existed self-heal."""
+        mgr = self._mk(tmp_path)
+        mgr.create_project("p", "src", "/tmp/p/mapping.yaml")
+        catalog_file = Path(mgr.catalog_path) if hasattr(mgr, "catalog_path") else None
+        if catalog_file is None or not catalog_file.exists():
+            candidates = list((tmp_path / "catalog").rglob("catalog.json"))
+            assert candidates, "catalog.json not found"
+            catalog_file = candidates[0]
+        raw = json.loads(catalog_file.read_text())
+        raw["projects"]["p"]["mapping_config_path"] = "~/.r2g/projects/p/mapping.yaml"
+        catalog_file.write_text(json.dumps(raw))
+
+        reloaded = CatalogManager(str(tmp_path / "catalog")).get_project("p")
+        assert reloaded.mapping_config_path == str(
+            Path("~/.r2g/projects/p/mapping.yaml").expanduser()
+        )
+
+    def test_absolute_and_relative_paths_are_untouched(self, tmp_path):
+        mgr = self._mk(tmp_path)
+        assert mgr.create_project("a", "src", "/abs/x.yaml").mapping_config_path == "/abs/x.yaml"
+        assert mgr.create_project("r", "src", "rel/x.yaml").mapping_config_path == "rel/x.yaml"
