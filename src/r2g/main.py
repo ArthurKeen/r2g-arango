@@ -545,6 +545,18 @@ def export_csi(
         "", "--source-ref", help="provenance.source.ref (database/schema pointer; defaults to config source_schema)"
     ),
     validate: bool = typer.Option(True, "--validate/--no-validate", help="Validate output against the CSI v1 schema"),
+    label_policy: str = typer.Option(
+        "qualify",
+        "--label-policy",
+        help=(
+            "Attribute labels shared by two entities: 'qualify' renames every "
+            "occurrence to <entity><Label>; 'roles' classifies each collision by "
+            "the role of its column (semantic -> qualify, primary key -> emit as "
+            "identity, foreign key -> the owning entity keeps the bare label); "
+            "'warn' reports them untouched; 'off' skips the check. Collisions are "
+            "always recorded in provenance.labelCollisions."
+        ),
+    ),
 ) -> None:
     """Emit a forward CSI v1 interchange document from an r2g mapping.
 
@@ -552,10 +564,25 @@ def export_csi(
     physical mapping so downstream tools (Ontop R2RML, arango-sparql-py) can
     partition a conceptual query by source. r2g is the forward producer.
 
+    Two entities emitting the same attribute label (``Contract.renewalDate`` and
+    ``Opportunity.renewalDate``) make that word ambiguous for every consumer that
+    derives a flat vocabulary from the document, and no consumer can recover the
+    distinction afterwards. ``--label-policy`` decides what happens; the default
+    qualifies them.
     """
     from datetime import datetime, timezone
 
     from r2g.csi import mapping_to_csi, validate_csi
+
+    # Validated before the try: typer.Exit is an Exception, so raising it inside
+    # would be swallowed by the generic handler below and reported as an empty
+    # "Failed to export CSI:".
+    if label_policy not in {"qualify", "roles", "warn", "off"}:
+        console.print(
+            f"[red]--label-policy must be one of qualify|roles|warn|off "
+            f"(got '{label_policy}').[/red]"
+        )
+        raise typer.Exit(code=2)
 
     try:
         mapping = ConfigManager.load_config(config_path)
@@ -567,6 +594,7 @@ def export_csi(
             source_type=source_type,
             source_ref=source_ref,
             generated_at=generated_at,
+            label_policy=label_policy,
         )
         if validate:
             validate_csi(doc)
@@ -578,6 +606,47 @@ def export_csi(
             f"{' (schema-validated)' if validate else ''}[/dim]"
         )
 
+        # Shared attribute labels are silent corruption downstream, so they are
+        # always reported — never left for a consumer to trip over.
+        collisions = doc["provenance"].get("labelCollisions", [])
+        qualified = [c for c in collisions if c["resolution"] == "qualified"]
+        unresolved = [c for c in collisions if c["resolution"] == "unresolved"]
+        reported = [c for c in collisions if c["resolution"] == "reported"]
+        identity = [c for c in collisions if c["resolution"] == "identity"]
+        if qualified:
+            console.print(
+                f"[yellow]Qualified {len(qualified)} colliding attribute label(s):[/yellow]"
+            )
+            for c in qualified:
+                pairs = ", ".join(f"{e}.{n}" for e, n in sorted(c["renamedTo"].items()))
+                keeps = f" [{c['owner']} keeps '{c['label']}']" if c.get("owner") else ""
+                console.print(f"  [dim]{c['label']} -> {pairs}{keeps}[/dim]")
+        if identity:
+            console.print(
+                f"[yellow]{len(identity)} key label(s) emitted as identity rather than "
+                f"as an attribute:[/yellow]"
+            )
+            for c in identity:
+                console.print(
+                    f"  [dim]{c['label']} on {', '.join(c['entities'])} "
+                    f"— carried by _key in the physical mapping[/dim]"
+                )
+        if reported:
+            console.print(
+                f"[yellow]{len(reported)} colliding attribute label(s) left as-is "
+                f"(--label-policy warn):[/yellow]"
+            )
+            for c in reported:
+                console.print(f"  [dim]{c['label']} on {', '.join(c['entities'])}[/dim]")
+        if unresolved:
+            console.print(
+                f"[red]{len(unresolved)} collision(s) could NOT be auto-qualified "
+                f"— a curator must rename these:[/red]"
+            )
+            for c in unresolved:
+                console.print(
+                    f"  [dim]{c['label']} on {', '.join(c['entities'])} — {c['reason']}[/dim]"
+                )
     except Exception as e:
         log.exception("export_csi_failed", output=output)
         console.print(f"[red]Failed to export CSI:[/red] {e}")

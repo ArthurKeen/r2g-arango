@@ -64,6 +64,301 @@ def owl_property_name(name: str) -> str:
     return convert_identifier(name, "camel") or name
 
 
+def _qualified_label(entity_name: str, label: str, *, collapse_seam: bool = False) -> str:
+    """``Contract`` + ``renewalDate`` → ``contractRenewalDate`` (CC-12 lowerCamel).
+
+    With ``collapse_seam``, a word repeated across the join is dropped:
+    ``FilmCategory`` + ``categoryId`` → ``filmCategoryId``, not
+    ``filmCategoryCategoryId``. Only the ``roles`` policy collapses; the blunt
+    ``qualify`` policy keeps its literal, wholly predictable concatenation.
+    """
+    from .naming import convert_identifier, split_identifier
+
+    prefix = entity_name[:1].lower() + entity_name[1:]
+    if collapse_seam:
+        entity_words = split_identifier(entity_name)
+        label_words = split_identifier(label)
+        if (
+            entity_words
+            and len(label_words) > 1
+            and entity_words[-1].lower() == label_words[0].lower()
+        ):
+            label_words = label_words[1:]
+            return convert_identifier(
+                "_".join(entity_words + label_words), "camel"
+            ) or (prefix + label[:1].upper() + label[1:])
+    return prefix + label[:1].upper() + label[1:]
+
+
+def _structural_columns(config: MappingConfig, schema: Optional[Schema]):
+    """``(pk_columns, fk_columns)`` as ``{(source_table, column)}``.
+
+    A column is *structural* when the relational model — not the business
+    domain — is the reason it exists: a primary key, a declared foreign key, or
+    a column already carried by an edge in this mapping. Everything r2g needs to
+    decide this is data it already holds, so the classification is mechanical
+    rather than a heuristic that needs tuning.
+    """
+    pk_columns: set = set()
+    fk_columns: set = set()
+    if schema is not None:
+        for table_name, table in schema.tables.items():
+            for col in table.primary_key or []:
+                pk_columns.add((table_name, col))
+            for fk in table.foreign_keys or []:
+                for col in fk.columns:
+                    fk_columns.add((table_name, col))
+    # Edges reference *source-table* names on both endpoints (see the resolver
+    # in mapping_to_csi), so they key identically to the schema lookups above.
+    for edge in config.edges:
+        for col in edge.from_fields:
+            fk_columns.add((edge.from_collection, col))
+        for col in edge.to_fields:
+            fk_columns.add((edge.to_collection, col))
+    return pk_columns, fk_columns
+
+
+def _property_roles(
+    cm: CollectionMapping,
+    entity: str,
+    prop_names: List[str],
+    pk_columns: set,
+    fk_columns: set,
+) -> Dict[tuple, str]:
+    """``{(entity, label): "pk" | "fk" | "plain"}`` for one collection.
+
+    Built here, at emit time, because this is the only point where a conceptual
+    label's **source column** is still known. The physical mapping's ``field``
+    is the *stored ArangoDB attribute*, which diverges from the source column
+    whenever ``field_mappings`` renames one (pagila stores ``actorId`` for
+    ``actor_id``), so classifying from ``field`` silently marks every renamed
+    key as a plain attribute.
+    """
+    inverse = {target: source for source, target in cm.field_mappings.items()}
+    computed = {fe.target for fe in cm.field_expressions}
+    roles: Dict[tuple, str] = {}
+    for prop in prop_names:
+        label = owl_property_name(prop)
+        if prop in computed:
+            # A computed/fan-in property has no single source column, so it is
+            # never a key however its inputs are shaped.
+            roles[(entity, label)] = "plain"
+            continue
+        column = inverse.get(prop, prop)
+        key = (cm.source_table, column)
+        roles[(entity, label)] = (
+            "pk" if key in pk_columns else "fk" if key in fk_columns else "plain"
+        )
+    return roles
+
+
+def _resolve_label_collisions(
+    conceptual_entities: List[Dict[str, Any]],
+    physical_entities: Dict[str, Dict[str, Any]],
+    policy: str,
+    *,
+    property_roles: Optional[Dict[tuple, str]] = None,
+) -> List[Dict[str, Any]]:
+    """Find (and optionally fix) attribute labels shared by two or more entities.
+
+    A CSI document scopes each property to its entity, but consumers that derive
+    a flat vocabulary from the labels — a generated question language, say —
+    cannot recover that scoping. Two entities emitting ``renewalDate`` make every
+    question mentioning it ambiguous *by construction*, and nothing downstream can
+    undo it because the distinction was discarded here, at extraction time.
+
+    ``policy``:
+        ``"qualify"``
+            Rename **every** occurrence to ``<entity><Label>``. Blunt and wholly
+            predictable; the historical default.
+        ``"roles"``
+            Classify each collision by the *role* of the column behind it, then
+            apply the remedy that fits (see below).
+        ``"warn"``
+            Record only. ``"off"`` skips the check entirely.
+
+    Under ``qualify`` every occurrence is renamed, not just the second one, for
+    two reasons: the result cannot depend on mapping insertion order, and leaving
+    one entity holding the bare label would preserve exactly the false confidence
+    this fixes — a consumer asking for "renewal date" would still be silently
+    routed to whichever entity happened to come first.
+
+    ``roles`` splits collisions that are *not* the same kind of problem:
+
+    - **semantic** (every occurrence a plain column — ``renewalDate``, ``city``):
+      genuinely ambiguous business attributes. Qualified exactly as above.
+    - **identity** (every occurrence a primary key — ``id``): not N ambiguous
+      attributes but each entity's identity, already carried by ``_key`` in the
+      physical mapping. Dropped as a conceptual attribute, which *removes* the
+      ambiguity rather than renaming it.
+    - **reference** (a foreign key is involved — ``accountId``): the entity that
+      owns the key keeps the bare label; the entities that merely *reference* it
+      are qualified. ``Account`` keeps ``accountId``; ``Contact`` becomes
+      ``contactAccountId`` — never ``accountAccountId``, which reads as a
+      business attribute rather than a join and stutters.
+
+    Qualification is cascade-checked under every policy: a rename that would
+    itself collide with another label (``Account.id`` → ``accountId``, already
+    taken by ``Account.accountId``) is refused, and that group is recorded
+    ``unresolved`` rather than traded for a fresh ambiguity. Returns one record
+    per collision; the caller surfaces them. Mutates the entities in place.
+    """
+    if policy == "off":
+        return []
+
+    property_roles = property_roles or {}
+
+    owners: Dict[str, List[str]] = {}
+    for entity in conceptual_entities:
+        for prop in entity["properties"]:
+            owners.setdefault(prop["name"], []).append(entity["name"])
+
+    colliding = {label: names for label, names in owners.items() if len(names) > 1}
+    if not colliding:
+        return []
+
+    # Labels held by exactly one entity are already unambiguous and stay put, so
+    # they permanently occupy their name; a qualified label may never take one.
+    occupied = {label for label, names in owners.items() if len(names) == 1}
+
+    records: List[Dict[str, Any]] = []
+    renames: Dict[str, Dict[str, str]] = {}  # entity -> {old: new}
+    drops: Dict[str, set] = {}  # entity -> {label, ...}
+
+    def _apply(record, candidates, label, *, keeper=None):
+        """Cascade-check ``candidates`` and either accept or refuse the group."""
+        values = list(candidates.values())
+        clashes = sorted(
+            {c for c in values if c in occupied} | {c for c in values if values.count(c) > 1}
+        )
+        if clashes:
+            record["resolution"] = "unresolved"
+            record["reason"] = (
+                "qualifying would collide with an existing label: " + ", ".join(clashes)
+            )
+            occupied.add(label)
+            return
+        record["resolution"] = "qualified"
+        record["renamedTo"] = candidates
+        if keeper is not None:
+            record["owner"] = keeper
+            occupied.add(label)  # the owner keeps it
+        for entity_name, new_label in candidates.items():
+            renames.setdefault(entity_name, {})[label] = new_label
+            occupied.add(new_label)
+
+    for label in sorted(colliding):
+        entities = sorted(colliding[label])
+        record: Dict[str, Any] = {"label": label, "entities": entities}
+
+        if policy in {"warn", "reported"}:
+            record["resolution"] = "reported"
+            records.append(record)
+            occupied.add(label)
+            continue
+
+        if policy == "qualify":
+            _apply(record, {n: _qualified_label(n, label) for n in entities}, label)
+            records.append(record)
+            continue
+
+        # ── policy == "roles" ──
+        roles = {name: property_roles.get((name, label), "plain") for name in entities}
+        kinds = set(roles.values())
+
+        if kinds == {"plain"}:
+            record["kind"] = "semantic"
+            _apply(
+                record,
+                {n: _qualified_label(n, label, collapse_seam=True) for n in entities},
+                label,
+            )
+            records.append(record)
+            continue
+
+        if kinds == {"pk"}:
+            # Identity, not an attribute: ``_key`` already carries it, so the
+            # collision disappears instead of being renamed into six variants.
+            record["kind"] = "structural"
+            record["resolution"] = "identity"
+            record["detail"] = (
+                "primary key on every entity carrying it — emitted as identity "
+                "(_key in the physical mapping), not as a conceptual attribute"
+            )
+            for name in entities:
+                drops.setdefault(name, set()).add(label)
+            records.append(record)
+            continue
+
+        # A foreign key is involved. Whoever owns the key keeps the bare label.
+        record["kind"] = "structural"
+        keeper = _key_owner(label, entities, roles)
+        if keeper is None:
+            record["detail"] = "no entity in this document owns the key; qualifying all"
+            _apply(
+                record,
+                {n: _qualified_label(n, label, collapse_seam=True) for n in entities},
+                label,
+            )
+        else:
+            _apply(
+                record,
+                {
+                    n: _qualified_label(n, label, collapse_seam=True)
+                    for n in entities
+                    if n != keeper
+                },
+                label,
+                keeper=keeper,
+            )
+        records.append(record)
+
+    for entity in conceptual_entities:
+        name = entity["name"]
+        mapping = renames.get(name)
+        dropped = drops.get(name, set())
+        if not mapping and not dropped:
+            continue
+        mapping = mapping or {}
+        entity["properties"] = [
+            {**prop, "name": mapping.get(prop["name"], prop["name"])}
+            for prop in entity["properties"]
+            if prop["name"] not in dropped
+        ]
+        physical = physical_entities.get(name)
+        if physical is not None:
+            # Rebuild rather than mutate so property order is preserved; the
+            # value (the physical field) is untouched, so the conceptual rename
+            # never breaks the mapping back to the stored column.
+            physical["properties"] = {
+                mapping.get(prop_name, prop_name): spec
+                for prop_name, spec in physical["properties"].items()
+                if prop_name not in dropped
+            }
+
+    return records
+
+
+def _key_owner(label: str, entities: List[str], roles: Dict[str, str]) -> Optional[str]:
+    """The entity a shared key *belongs to*, or ``None``.
+
+    Preference: the entity holding it as a primary key, else the entity whose
+    name matches the key's entity prefix (``accountId`` → ``Account``). Both
+    tiers are resolved in sorted order so the answer never depends on mapping
+    insertion order. Reuses the P6.7 hub heuristics rather than restating them.
+    """
+    from r2g.xsk import _table_matches_entity, entity_of
+
+    pk_holders = sorted(n for n in entities if roles.get(n) == "pk")
+    if pk_holders:
+        return pk_holders[0]
+    prefix = entity_of(label.lower())
+    if not prefix:
+        return None
+    named = sorted(n for n in entities if _table_matches_entity(n, prefix))
+    return named[0] if named else None
+
+
 def _entity_property_names(cm: CollectionMapping, table: Optional[Table]) -> List[str]:
     """Ordered, de-duplicated target-property names for one collection.
 
@@ -111,6 +406,7 @@ def mapping_to_csi(
     producer_version: Optional[str] = None,
     generated_at: Optional[str] = None,
     confidence: Optional[float] = None,
+    label_policy: str = "qualify",
 ) -> Dict[str, Any]:
     """Emit a forward ``CSI v1`` document from an r2g :class:`MappingConfig`.
 
@@ -129,6 +425,15 @@ def mapping_to_csi(
             (kept out of the pure path so callers control determinism).
         confidence: optional 0..1 confidence; r2g's mapping is a deterministic
             mechanical translation, so callers typically leave this unset.
+        label_policy: what to do when two entities emit the same attribute
+            label — ``"qualify"`` (default) renames every occurrence to
+            ``<entity><Label>``; ``"roles"`` classifies each collision by the
+            role of the column behind it and applies the fitting remedy
+            (semantic → qualify, primary key → emit as identity, foreign key →
+            the owning entity keeps the bare label); ``"warn"`` records them
+            untouched; ``"off"`` skips the check. Whatever the policy, every
+            collision is recorded in ``provenance.labelCollisions``; see
+            :func:`_resolve_label_collisions`.
 
     Returns:
         A ``CSI v1``-valid ``dict`` (validate with :func:`validate_csi`).
@@ -142,6 +447,10 @@ def mapping_to_csi(
     conceptual_entities: List[Dict[str, Any]] = []
     physical_entities: Dict[str, Dict[str, Any]] = {}
     entity_name_by_collection: Dict[str, str] = {}
+    # {(entity, label): "pk"|"fk"|"plain"} — the structural role of the column
+    # behind each conceptual property, used by the "roles" label policy.
+    pk_columns, fk_columns = _structural_columns(config, schema)
+    property_roles: Dict[tuple, str] = {}
     for cm in config.collections.values():
         if cm.collection_type == "edge" or cm.is_join_table:
             # Join tables / edge collections are relationships, not entities.
@@ -151,6 +460,7 @@ def mapping_to_csi(
         name = owl_entity_name(cm.target_collection)
         entity_name_by_collection[cm.target_collection] = name
         prop_names = _entity_property_names(cm, tables.get(cm.source_table))
+        property_roles.update(_property_roles(cm, name, prop_names, pk_columns, fk_columns))
         conceptual_entities.append(
             {
                 "name": name,
@@ -165,6 +475,16 @@ def mapping_to_csi(
             # OWL-style names back to physical attributes (CC-12).
             "properties": {owl_property_name(p): {"field": p} for p in prop_names},
         }
+
+    # Resolve attribute labels shared by two or more entities *before* anything
+    # downstream sees them: this is the only place with the whole document in
+    # view, so a collision left here is unrecoverable for every consumer.
+    label_collisions = _resolve_label_collisions(
+        conceptual_entities,
+        physical_entities,
+        label_policy,
+        property_roles=property_roles,
+    )
 
     # --- Conceptual + physical relationships: one per edge definition. ---
     # EdgeDefinition.from_collection / to_collection reference *source-table*
@@ -260,6 +580,13 @@ def mapping_to_csi(
     }
     if confidence is not None:
         provenance["confidence"] = confidence
+    # Recorded even when every collision was auto-qualified: a consumer (or a
+    # curator) must be able to see that two entities meant the same word, and
+    # which rename resolved it. Omitted entirely when there were none, so
+    # collision-free documents keep their historical bytes.
+    if label_collisions:
+        provenance["labelCollisions"] = label_collisions
+
     conceptual_model: Dict[str, Any] = {
         "entities": conceptual_entities,
         "relationships": conceptual_relationships,

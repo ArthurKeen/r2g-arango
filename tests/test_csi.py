@@ -253,3 +253,512 @@ def test_export_csi_cli(tmp_path):
     validate_csi(doc)
     assert doc["provenance"]["source"]["kind"] == "postgresql"
     assert {e["name"] for e in doc["conceptualModel"]["entities"]} == {"User", "Order"}
+
+
+# ── Attribute-label collisions ───────────────────────────────────────
+#
+# Two entities in ONE document emitting the same attribute label make that word
+# ambiguous for any consumer deriving a flat vocabulary from it, and the
+# distinction cannot be recovered downstream because it was discarded here.
+
+
+def _colliding_config(**overrides) -> MappingConfig:
+    """Contract + Opportunity, both carrying renewal_date / product_scope."""
+    return MappingConfig(
+        source_schema="crm",
+        collections={
+            "contracts": CollectionMapping(
+                source_table="contracts", target_collection="Contract"
+            ),
+            "opportunities": CollectionMapping(
+                source_table="opportunities", target_collection="Opportunity"
+            ),
+        },
+        **overrides,
+    )
+
+
+def _colliding_schema() -> Schema:
+    shared = ["renewal_date", "product_scope"]
+    return Schema(
+        tables={
+            "contracts": Table(
+                name="contracts",
+                columns=[Column(name="id", data_type="integer", is_primary_key=True)]
+                + [Column(name=c, data_type="text") for c in shared]
+                + [Column(name="auto_renew", data_type="boolean")],
+                primary_key=["id"],
+            ),
+            "opportunities": Table(
+                name="opportunities",
+                columns=[Column(name="id", data_type="integer", is_primary_key=True)]
+                + [Column(name=c, data_type="text") for c in shared]
+                + [Column(name="amount_usd", data_type="numeric")],
+                primary_key=["id"],
+            ),
+        }
+    )
+
+
+def _labels_by_entity(doc):
+    return {e["name"]: [p["name"] for p in e["properties"]] for e in doc["conceptualModel"]["entities"]}
+
+
+def _all_labels(doc):
+    out = []
+    for e in doc["conceptualModel"]["entities"]:
+        out += [p["name"] for p in e["properties"]]
+    return out
+
+
+class TestLabelCollisions:
+    def test_default_policy_qualifies_every_occurrence(self):
+        doc = mapping_to_csi(_colliding_config(), _colliding_schema())
+        labels = _labels_by_entity(doc)
+        assert "contractRenewalDate" in labels["Contract"]
+        assert "opportunityRenewalDate" in labels["Opportunity"]
+        # Neither entity keeps the bare label: leaving one behind would preserve
+        # exactly the false confidence this fixes.
+        assert "renewalDate" not in _all_labels(doc)
+
+    def test_no_duplicate_labels_remain(self):
+        doc = mapping_to_csi(_colliding_config(), _colliding_schema())
+        labels = _all_labels(doc)
+        dupes = {n for n in labels if labels.count(n) > 1}
+        # Nothing survives here: 'id' qualifies cleanly to contractId /
+        # opportunityId because neither name is otherwise taken. (When one IS
+        # taken the group is refused instead — see the cascade test.)
+        assert dupes == set()
+        assert {"contractId", "opportunityId"} <= set(labels)
+
+    def test_physical_mapping_still_resolves_to_the_source_column(self):
+        """The rename is conceptual only — the stored field must not move."""
+        doc = mapping_to_csi(_colliding_config(), _colliding_schema())
+        phys = doc["arangoPhysicalMapping"]["entities"]
+        assert phys["Contract"]["properties"]["contractRenewalDate"]["field"] == "renewal_date"
+        assert phys["Opportunity"]["properties"]["opportunityRenewalDate"]["field"] == "renewal_date"
+        assert phys["Contract"]["collectionName"] == "Contract"
+
+    def test_every_conceptual_property_has_a_physical_field(self):
+        doc = mapping_to_csi(_colliding_config(), _colliding_schema())
+        phys = doc["arangoPhysicalMapping"]["entities"]
+        for entity in doc["conceptualModel"]["entities"]:
+            mapped = phys[entity["name"]]["properties"]
+            for prop in entity["properties"]:
+                assert prop["name"] in mapped, (entity["name"], prop["name"])
+
+    def test_collisions_are_recorded_in_provenance(self):
+        doc = mapping_to_csi(_colliding_config(), _colliding_schema())
+        recs = {r["label"]: r for r in doc["provenance"]["labelCollisions"]}
+        assert recs["renewalDate"]["resolution"] == "qualified"
+        assert recs["renewalDate"]["entities"] == ["Contract", "Opportunity"]
+        assert recs["renewalDate"]["renamedTo"] == {
+            "Contract": "contractRenewalDate",
+            "Opportunity": "opportunityRenewalDate",
+        }
+
+    def test_warn_policy_records_without_renaming(self):
+        doc = mapping_to_csi(_colliding_config(), _colliding_schema(), label_policy="warn")
+        assert "renewalDate" in _labels_by_entity(doc)["Contract"]
+        assert "renewalDate" in _labels_by_entity(doc)["Opportunity"]
+        recs = {r["label"]: r for r in doc["provenance"]["labelCollisions"]}
+        assert recs["renewalDate"]["resolution"] == "reported"
+        assert "renamedTo" not in recs["renewalDate"]
+
+    def test_off_policy_skips_the_check_entirely(self):
+        doc = mapping_to_csi(_colliding_config(), _colliding_schema(), label_policy="off")
+        assert "renewalDate" in _labels_by_entity(doc)["Contract"]
+        assert "labelCollisions" not in doc["provenance"]
+
+    def test_qualification_that_would_create_a_new_collision_is_refused(self):
+        """``Account.id`` must not become ``accountId`` when that is taken.
+
+        Trading one ambiguity for another is worse than reporting it, because
+        the new one looks deliberate.
+        """
+        config = MappingConfig(
+            collections={
+                "accounts": CollectionMapping(source_table="accounts", target_collection="Account"),
+                "contacts": CollectionMapping(source_table="contacts", target_collection="Contact"),
+            }
+        )
+        schema = Schema(
+            tables={
+                "accounts": Table(
+                    name="accounts",
+                    columns=[
+                        Column(name="id", data_type="integer", is_primary_key=True),
+                        # The business key already owns the qualified form.
+                        Column(name="account_id", data_type="text"),
+                    ],
+                    primary_key=["id"],
+                ),
+                "contacts": Table(
+                    name="contacts",
+                    columns=[Column(name="id", data_type="integer", is_primary_key=True)],
+                    primary_key=["id"],
+                ),
+            }
+        )
+        doc = mapping_to_csi(config, schema)
+        rec = next(r for r in doc["provenance"]["labelCollisions"] if r["label"] == "id")
+        assert rec["resolution"] == "unresolved"
+        assert "accountId" in rec["reason"]
+        # Left untouched rather than mangled.
+        assert _labels_by_entity(doc)["Account"].count("id") == 1
+
+    def test_collision_free_document_records_nothing(self):
+        """Documents with no shared label keep their historical bytes."""
+        config = MappingConfig(
+            collections={
+                "books": CollectionMapping(source_table="books", target_collection="Book"),
+                "shelves": CollectionMapping(source_table="shelves", target_collection="Shelf"),
+            }
+        )
+        schema = Schema(
+            tables={
+                "books": Table(
+                    name="books", columns=[Column(name="isbn", data_type="text")], primary_key=[]
+                ),
+                "shelves": Table(
+                    name="shelves", columns=[Column(name="aisle", data_type="text")], primary_key=[]
+                ),
+            }
+        )
+        doc = mapping_to_csi(config, schema)
+        assert "labelCollisions" not in doc["provenance"]
+
+    def test_output_is_independent_of_collection_insertion_order(self):
+        forward = mapping_to_csi(_colliding_config(), _colliding_schema())
+        reversed_config = MappingConfig(
+            source_schema="crm",
+            collections={
+                "opportunities": CollectionMapping(
+                    source_table="opportunities", target_collection="Opportunity"
+                ),
+                "contracts": CollectionMapping(
+                    source_table="contracts", target_collection="Contract"
+                ),
+            },
+        )
+        backward = mapping_to_csi(reversed_config, _colliding_schema())
+        assert _labels_by_entity(forward) == _labels_by_entity(backward)
+        assert forward["provenance"]["labelCollisions"] == backward["provenance"]["labelCollisions"]
+
+    def test_document_still_validates_against_the_csi_schema(self):
+        doc = mapping_to_csi(_colliding_config(), _colliding_schema(), source_type="postgresql")
+        validate_csi(doc)
+
+    def test_contested_qualified_name_is_resolved_deterministically(self):
+        """Two collision groups can want the SAME qualified name.
+
+        ``User.nameId`` and ``UserName.id`` both qualify to ``userNameId``.
+        Which group wins must not depend on mapping insertion order, so groups
+        are processed in sorted label order: ``id`` claims it, ``nameId`` is
+        then refused rather than silently overwriting it.
+        """
+        tables = {
+            "users": Table(
+                name="users",
+                columns=[
+                    Column(name="id", data_type="integer", is_primary_key=True),
+                    Column(name="name_id", data_type="integer"),
+                ],
+                primary_key=["id"],
+            ),
+            "user_names": Table(
+                name="user_names",
+                columns=[
+                    Column(name="id", data_type="integer", is_primary_key=True),
+                    Column(name="label", data_type="text"),
+                ],
+                primary_key=["id"],
+            ),
+            "audits": Table(
+                name="audits",
+                columns=[
+                    Column(name="name_id", data_type="integer"),
+                    Column(name="note", data_type="text"),
+                ],
+                primary_key=[],
+            ),
+        }
+        names = {"users": "User", "user_names": "UserName", "audits": "Audit"}
+
+        def build(order):
+            return mapping_to_csi(
+                MappingConfig(
+                    collections={
+                        t: CollectionMapping(source_table=t, target_collection=names[t])
+                        for t in order
+                    }
+                ),
+                Schema(tables=tables),
+            )
+
+        forward = build(["users", "user_names", "audits"])
+        backward = build(["audits", "user_names", "users"])
+
+        recs = {r["label"]: r for r in forward["provenance"]["labelCollisions"]}
+        assert recs["id"]["resolution"] == "qualified"
+        assert recs["id"]["renamedTo"]["UserName"] == "userNameId"
+        assert recs["nameId"]["resolution"] == "unresolved"
+        assert "userNameId" in recs["nameId"]["reason"]
+
+        # The contested name is claimed by exactly one entity, either way round.
+        assert _labels_by_entity(forward) == _labels_by_entity(backward)
+        assert _all_labels(forward).count("userNameId") == 1
+
+
+class TestRolesPolicy:
+    """`--label-policy roles`: classify a collision, then fit the remedy to it.
+
+    A collision on a plain column (`renewalDate`) and one on a foreign key
+    (`accountId`) are not the same problem, and qualifying both alike produces
+    `accountAccountId` — a name that reads as a business attribute when the
+    thing it describes is a join.
+    """
+
+    def _crm(self):
+        """Account owns account_id; three others reference it. All share `id`."""
+        config = MappingConfig(
+            collections={
+                "accounts": CollectionMapping(source_table="accounts", target_collection="Account"),
+                "contacts": CollectionMapping(source_table="contacts", target_collection="Contact"),
+                "contracts": CollectionMapping(source_table="contracts", target_collection="Contract"),
+            },
+            edges=[
+                EdgeDefinition(
+                    edge_collection="contacts_of_account",
+                    from_collection="contacts", to_collection="accounts",
+                    from_fields=["account_id"], to_fields=["account_id"],
+                ),
+                EdgeDefinition(
+                    edge_collection="contracts_of_account",
+                    from_collection="contracts", to_collection="accounts",
+                    from_fields=["account_id"], to_fields=["account_id"],
+                ),
+            ],
+        )
+        schema = Schema(
+            tables={
+                "accounts": Table(
+                    name="accounts",
+                    columns=[
+                        Column(name="id", data_type="integer", is_primary_key=True),
+                        Column(name="account_id", data_type="text"),
+                        Column(name="account_name", data_type="text"),
+                    ],
+                    primary_key=["id"],
+                ),
+                "contacts": Table(
+                    name="contacts",
+                    columns=[
+                        Column(name="id", data_type="integer", is_primary_key=True),
+                        Column(name="account_id", data_type="text"),
+                        # A single-owner business key that blocks `id` from
+                        # qualifying to `contactId` — exactly the situation in
+                        # the real CRM catalog.
+                        Column(name="contact_id", data_type="text"),
+                        Column(name="renewal_date", data_type="date"),
+                    ],
+                    primary_key=["id"],
+                ),
+                "contracts": Table(
+                    name="contracts",
+                    columns=[
+                        Column(name="id", data_type="integer", is_primary_key=True),
+                        Column(name="account_id", data_type="text"),
+                        Column(name="renewal_date", data_type="date"),
+                    ],
+                    primary_key=["id"],
+                ),
+            }
+        )
+        return config, schema
+
+    def test_foreign_key_owner_keeps_the_bare_label(self):
+        doc = mapping_to_csi(*self._crm(), label_policy="roles")
+        labels = _labels_by_entity(doc)
+        assert "accountId" in labels["Account"]
+        assert "contactAccountId" in labels["Contact"]
+        assert "contractAccountId" in labels["Contract"]
+        # The stutter this policy exists to prevent.
+        assert "accountAccountId" not in _all_labels(doc)
+
+    def test_primary_key_becomes_identity_not_an_attribute(self):
+        doc = mapping_to_csi(*self._crm(), label_policy="roles")
+        assert "id" not in _all_labels(doc)
+        rec = next(r for r in doc["provenance"]["labelCollisions"] if r["label"] == "id")
+        assert rec["resolution"] == "identity"
+        assert rec["kind"] == "structural"
+        # Dropped from the physical mapping too, so the two stay in step.
+        assert "id" not in doc["arangoPhysicalMapping"]["entities"]["Account"]["properties"]
+
+    def test_semantic_collision_still_qualifies_every_occurrence(self):
+        doc = mapping_to_csi(*self._crm(), label_policy="roles")
+        labels = _labels_by_entity(doc)
+        assert "contactRenewalDate" in labels["Contact"]
+        assert "contractRenewalDate" in labels["Contract"]
+        assert "renewalDate" not in _all_labels(doc)
+        rec = next(r for r in doc["provenance"]["labelCollisions"] if r["label"] == "renewalDate")
+        assert rec["kind"] == "semantic"
+
+    def test_roles_leaves_no_duplicate_labels_where_qualify_does(self):
+        config, schema = self._crm()
+        q = _all_labels(mapping_to_csi(config, schema, label_policy="qualify"))
+        r = _all_labels(mapping_to_csi(config, schema, label_policy="roles"))
+        assert {n for n in q if q.count(n) > 1} == {"id"}  # qualify cannot fix it
+        assert {n for n in r if r.count(n) > 1} == set()
+
+    def test_owner_is_recorded(self):
+        doc = mapping_to_csi(*self._crm(), label_policy="roles")
+        rec = next(r for r in doc["provenance"]["labelCollisions"] if r["label"] == "accountId")
+        assert rec["owner"] == "Account"
+        assert rec["kind"] == "structural"
+        assert "Account" not in rec["renamedTo"]
+
+    def test_role_is_read_through_field_mappings(self):
+        """A renamed key column must still classify as a key.
+
+        The physical `field` is the *stored* attribute, which diverges from the
+        source column whenever field_mappings renames one (pagila stores
+        `actorId` for `actor_id`). Classifying off `field` would silently mark
+        every renamed key as a plain attribute.
+        """
+        config = MappingConfig(
+            collections={
+                "actors": CollectionMapping(
+                    source_table="actors", target_collection="Actor",
+                    field_mappings={"actor_id": "actorId"},
+                ),
+                "film_actors": CollectionMapping(
+                    source_table="film_actors", target_collection="FilmActor",
+                    field_mappings={"actor_id": "actorId"},
+                ),
+            }
+        )
+        schema = Schema(
+            tables={
+                "actors": Table(
+                    name="actors",
+                    columns=[Column(name="actor_id", data_type="integer", is_primary_key=True)],
+                    primary_key=["actor_id"],
+                ),
+                "film_actors": Table(
+                    name="film_actors",
+                    columns=[
+                        Column(name="actor_id", data_type="integer", is_primary_key=True),
+                        Column(name="film_id", data_type="integer", is_primary_key=True),
+                    ],
+                    primary_key=["actor_id", "film_id"],
+                ),
+            }
+        )
+        doc = mapping_to_csi(config, schema, label_policy="roles")
+        rec = next(r for r in doc["provenance"]["labelCollisions"] if r["label"] == "actorId")
+        assert rec["kind"] == "structural", "renamed key column misclassified as semantic"
+
+    def test_seam_word_is_not_repeated(self):
+        """`FilmCategory` + `categoryId` must not become `filmCategoryCategoryId`."""
+        config = MappingConfig(
+            collections={
+                "categories": CollectionMapping(
+                    source_table="categories", target_collection="Category"
+                ),
+                "film_categories": CollectionMapping(
+                    source_table="film_categories", target_collection="FilmCategory"
+                ),
+            }
+        )
+        schema = Schema(
+            tables={
+                "categories": Table(
+                    name="categories",
+                    columns=[Column(name="category_id", data_type="integer", is_primary_key=True)],
+                    primary_key=["category_id"],
+                ),
+                "film_categories": Table(
+                    name="film_categories",
+                    columns=[
+                        Column(name="category_id", data_type="integer"),
+                        Column(name="note", data_type="text"),
+                    ],
+                    primary_key=[],
+                ),
+            }
+        )
+        doc = mapping_to_csi(config, schema, label_policy="roles")
+        labels = _all_labels(doc)
+        assert "filmCategoryCategoryId" not in labels
+        assert "filmCategoryId" in labels
+        assert "categoryId" in _labels_by_entity(doc)["Category"]
+
+    def test_physical_fields_are_never_invented_or_moved(self):
+        config, schema = self._crm()
+        base = mapping_to_csi(config, schema, label_policy="off")
+        doc = mapping_to_csi(config, schema, label_policy="roles")
+        for entity in doc["conceptualModel"]["entities"]:
+            name = entity["name"]
+            after = doc["arangoPhysicalMapping"]["entities"][name]["properties"]
+            before = base["arangoPhysicalMapping"]["entities"][name]["properties"]
+            assert {v["field"] for v in after.values()} <= {v["field"] for v in before.values()}
+            # Conceptual and physical property sets stay in step.
+            assert {p["name"] for p in entity["properties"]} == set(after)
+
+    def test_document_still_validates(self):
+        doc = mapping_to_csi(*self._crm(), source_type="postgresql", label_policy="roles")
+        validate_csi(doc)
+
+    def test_qualify_policy_is_unchanged_by_the_new_code(self):
+        """The historical default must stay byte-identical and stutter-free-free."""
+        doc = mapping_to_csi(*self._crm(), label_policy="qualify")
+        assert "accountAccountId" in _all_labels(doc)  # blunt, as documented
+        rec = next(r for r in doc["provenance"]["labelCollisions"] if r["label"] == "accountId")
+        assert "kind" not in rec and "owner" not in rec
+
+    def test_owner_found_by_primary_key_when_the_name_does_not_match(self):
+        """The PK tier of owner selection, isolated.
+
+        `ownerId` lives on a table called `people`, so the name-match tier finds
+        nothing; only "who holds it as a primary key" identifies the owner. If
+        that tier is skipped, Person gets qualified too and loses the bare label.
+        """
+        config = MappingConfig(
+            collections={
+                "people": CollectionMapping(source_table="people", target_collection="Person"),
+                "assets": CollectionMapping(source_table="assets", target_collection="Asset"),
+            },
+            edges=[
+                EdgeDefinition(
+                    edge_collection="assets_of_person",
+                    from_collection="assets", to_collection="people",
+                    from_fields=["owner_id"], to_fields=["owner_id"],
+                ),
+            ],
+        )
+        schema = Schema(
+            tables={
+                "people": Table(
+                    name="people",
+                    columns=[
+                        Column(name="owner_id", data_type="integer", is_primary_key=True),
+                        Column(name="full_name", data_type="text"),
+                    ],
+                    primary_key=["owner_id"],
+                ),
+                "assets": Table(
+                    name="assets",
+                    columns=[
+                        Column(name="owner_id", data_type="integer"),
+                        Column(name="tag", data_type="text"),
+                    ],
+                    primary_key=[],
+                ),
+            }
+        )
+        doc = mapping_to_csi(config, schema, label_policy="roles")
+        rec = next(r for r in doc["provenance"]["labelCollisions"] if r["label"] == "ownerId")
+        assert rec["owner"] == "Person"
+        assert "ownerId" in _labels_by_entity(doc)["Person"]
+        assert "assetOwnerId" in _labels_by_entity(doc)["Asset"]
