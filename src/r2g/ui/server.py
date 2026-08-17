@@ -8,7 +8,7 @@ import re
 import secrets
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -375,6 +375,92 @@ def create_app(
             "sample_used": sampler_used,
             "candidates": [c.model_dump() for c in candidates],
         }
+
+    @app.post("/api/shared-keys/infer")
+    async def infer_shared_keys_endpoint(body: InferSharedKeysRequest | None = None):
+        """Propose cross-source shared-key relationships (PRD P6.7).
+
+        Unlike ``/api/sources/{name}/infer-fks`` this is *not* source-scoped:
+        the whole point is to see keys that co-occur across two or more
+        sources, which single-schema inference structurally cannot find. Reads
+        the latest snapshot of each requested source (all snapshotted sources
+        by default); schema-metadata-only and free unless ``sample`` is set.
+
+        Candidates are proposals — nothing is written to any mapping here.
+        """
+        from r2g.fk_inference import create_value_sampler
+        from r2g.xsk import SharedKeyOptions, infer_shared_keys
+
+        req = body or InferSharedKeysRequest()
+        wanted = req.sources if req.sources else [s.name for s in catalog.list_sources()]
+
+        schemas: dict[str, Any] = {}
+        skipped: list[dict[str, str]] = []
+        for source_name in wanted:
+            source = catalog.get_source(source_name)
+            if source is None:
+                skipped.append({"source": source_name, "reason": "not found in catalog"})
+                continue
+            snap = catalog.get_latest_snapshot(source_name)
+            if snap is None:
+                skipped.append({"source": source_name, "reason": "no schema snapshot"})
+                continue
+            schemas[source_name] = snap.schema_data
+
+        if len(schemas) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cross-source inference needs at least two snapshotted sources; "
+                    f"got {len(schemas)}. Take a snapshot of the other source first."
+                ),
+            )
+
+        samplers: dict[str, Any] = {}
+        if req.sample:
+            for source_name in schemas:
+                source = catalog.get_source(source_name)
+                snap = catalog.get_latest_snapshot(source_name)
+                try:
+                    sampler = create_value_sampler(
+                        source.source_type,
+                        source.connection_string,
+                        pg_schema=snap.pg_schema,
+                        source_params=source.source_params,
+                        limit=req.sample_limit,
+                    )
+                except Exception as err:  # noqa: BLE001
+                    logger.warning(
+                        "xsk_sampler_init_failed", source=source_name, error=str(err)
+                    )
+                    sampler = None
+                if sampler is None:
+                    skipped.append(
+                        {
+                            "source": source_name,
+                            "reason": "value sampling unsupported for this source type",
+                        }
+                    )
+                samplers[source_name] = sampler
+
+        opts = SharedKeyOptions(
+            min_confidence=req.min_confidence,
+            sample_overlap=req.sample,
+            sample_limit=req.sample_limit,
+        )
+        try:
+            result = infer_shared_keys(schemas, options=opts, samplers=samplers)
+        finally:
+            for sampler in samplers.values():
+                if sampler is not None:
+                    try:
+                        sampler.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        payload = result.model_dump()
+        payload["skipped"] = skipped
+        return payload
 
     @app.post("/api/sources/{name}/analyze-denorm")
     async def analyze_denorm(name: str, body: AnalyzeDenormRequest | None = None):
@@ -1643,6 +1729,22 @@ class InferFksRequest(BaseModel):
     sample_limit: int = 10_000
     min_confidence: float = 0.4
     veto_on_zero_overlap: bool = True
+
+
+class InferSharedKeysRequest(BaseModel):
+    """Parameters for POST /api/shared-keys/infer (PRD P6.7).
+
+    Defaults are "cheap" — every snapshotted source, name + JSON-type
+    heuristics only, no queries against any source. Set ``sample=true`` to opt
+    into bounded value probes (hub-column uniqueness and cross-source value
+    overlap); sources whose type has no sampler are reported in ``skipped``
+    and still participate on name/type evidence alone.
+    """
+
+    sources: Optional[List[str]] = None
+    sample: bool = False
+    sample_limit: int = 1_000
+    min_confidence: float = 0.4
 
 
 class AnalyzeDenormRequest(BaseModel):

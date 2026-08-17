@@ -169,10 +169,31 @@ class MappingVisualizer:
             }
             for e in self.config.edges
         ]
+        # Accepted P6.7 cross-source join keys. Not edges: they have no edge
+        # collection because the referenced entity lives in another source, so
+        # the Studio renders them in their own section.
+        shared_keys = [
+            {
+                "key": sk.key,
+                "concept": sk.concept,
+                "hubKind": sk.hub_kind,
+                "hubSource": sk.hub_source,
+                "hubTable": sk.hub_table,
+                "hubColumn": sk.hub_column,
+                "bindings": [
+                    {"source": b.source, "table": b.table, "column": b.column}
+                    for b in sk.bindings
+                ],
+                "confidence": sk.confidence,
+                "method": sk.method,
+            }
+            for sk in self.config.shared_keys
+        ]
         return {
             "sourceSchema": self.config.source_schema,
             "collections": collections,
             "edges": edges,
+            "sharedKeys": shared_keys,
             "typeOverrides": self.config.type_overrides,
             "keySeparator": self.config.key_separator,
         }

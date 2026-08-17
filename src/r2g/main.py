@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import typer
 from rich.console import Console
@@ -26,11 +26,13 @@ project_app = typer.Typer(help="Manage projects")
 catalog_app = typer.Typer(help="Connect to external data catalogs (discovery)")
 entitlements_app = typer.Typer(help="Governance: classification entitlement reports (Phase 9)")
 ontology_app = typer.Typer(help="LLM-assisted ontology derivation (Phase 10)")
+shared_keys_app = typer.Typer(help="Cross-source shared-key (join key) inference (P6.7)")
 app.add_typer(source_app, name="source")
 app.add_typer(project_app, name="project")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(entitlements_app, name="entitlements")
 app.add_typer(ontology_app, name="ontology")
+app.add_typer(shared_keys_app, name="shared-keys")
 console = Console()
 log = get_logger(__name__)
 
@@ -549,6 +551,7 @@ def export_csi(
     CSI v1 pairs the conceptual model (entities/relationships) with its ArangoDB
     physical mapping so downstream tools (Ontop R2RML, arango-sparql-py) can
     partition a conceptual query by source. r2g is the forward producer.
+
     """
     from datetime import datetime, timezone
 
@@ -574,6 +577,7 @@ def export_csi(
             f"{len(doc['conceptualModel']['relationships'])} relationships"
             f"{' (schema-validated)' if validate else ''}[/dim]"
         )
+
     except Exception as e:
         log.exception("export_csi_failed", output=output)
         console.print(f"[red]Failed to export CSI:[/red] {e}")
@@ -2341,6 +2345,168 @@ def source_infer_fks(
             )
         else:
             console.print("[dim]No new FKs to accept.[/dim]")
+
+
+@shared_keys_app.command("infer")
+def shared_keys_infer(
+    sources: Optional[List[str]] = typer.Option(
+        None,
+        "--source",
+        "-s",
+        help="Source to include (repeatable). Default: every snapshotted source.",
+    ),
+    sample: bool = typer.Option(
+        False,
+        "--sample",
+        help=(
+            "Run bounded value probes: hub-column uniqueness and cross-source "
+            "value overlap. Sources whose type has no sampler still participate "
+            "on name/type evidence."
+        ),
+    ),
+    sample_limit: int = typer.Option(
+        1_000, "--sample-limit", help="Distinct values pulled per side when sampling"
+    ),
+    min_confidence: float = typer.Option(
+        0.4, "--min-confidence", help="Drop candidates below this confidence (0..1)"
+    ),
+    show_suppressed: bool = typer.Option(
+        False,
+        "--show-suppressed",
+        help="Also list every grouped column that did NOT become a candidate, with the reason",
+    ),
+) -> None:
+    """Propose cross-source shared keys (join keys) across catalog sources.
+
+    Single-schema FK inference (``r2g source infer-fks``) is name-anchored to a
+    parent table *in the same schema*, so a key shared across sources — the
+    ClickHouse ``account_id`` whose ``Account`` lives in the PostgreSQL CRM, say
+    — is invisible to it. This command groups key-shaped columns that co-occur
+    across two or more sources, gates them on JSON-level type compatibility, and
+    proposes a hub entity (or a virtual hub concept when no source owns the key).
+
+    Proposals only: nothing is written to any mapping. Accept them in the Studio
+    (``Actions -> Suggest shared keys``), which records them as declared join
+    keys in the project mapping and the CSI / R2RML export.
+    """
+    from rich.table import Table as RichTable
+
+    from r2g.xsk import SharedKeyOptions, infer_shared_keys
+
+    mgr = _get_catalog()
+    wanted = list(sources) if sources else [s.name for s in mgr.list_sources()]
+
+    schemas = {}
+    for source_name in wanted:
+        source = mgr.get_source(source_name)
+        if source is None:
+            console.print(f"[yellow]Source '{source_name}' not found; skipping.[/yellow]")
+            continue
+        snap = mgr.get_latest_snapshot(source_name)
+        if snap is None:
+            console.print(
+                f"[yellow]No snapshot for '{source_name}'; skipping "
+                f"(run `r2g source snapshot {source_name}`).[/yellow]"
+            )
+            continue
+        schemas[source_name] = snap.schema_data
+
+    if len(schemas) < 2:
+        console.print(
+            f"[red]Cross-source inference needs at least two snapshotted sources; "
+            f"got {len(schemas)}.[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    samplers = {}
+    if sample:
+        from r2g.fk_inference import create_value_sampler
+
+        for source_name in schemas:
+            source = mgr.get_source(source_name)
+            snap = mgr.get_latest_snapshot(source_name)
+            try:
+                sampler = create_value_sampler(
+                    source.source_type,
+                    source.connection_string,
+                    pg_schema=snap.pg_schema,
+                    source_params=source.source_params,
+                    limit=sample_limit,
+                )
+            except Exception as err:  # noqa: BLE001
+                console.print(f"[yellow]Sampler init failed for '{source_name}': {err}[/yellow]")
+                sampler = None
+            if sampler is None:
+                console.print(
+                    f"[yellow]No value sampler for '{source_name}' "
+                    f"({source.source_type}); using name/type evidence only.[/yellow]"
+                )
+            samplers[source_name] = sampler
+
+    opts = SharedKeyOptions(
+        min_confidence=min_confidence, sample_overlap=sample, sample_limit=sample_limit
+    )
+    try:
+        result = infer_shared_keys(schemas, options=opts, samplers=samplers)
+    finally:
+        for sampler in samplers.values():
+            if sampler is not None:
+                try:
+                    sampler.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    console.print(
+        f"[dim]Considered {len(result.sources_considered)} sources: "
+        f"{', '.join(result.sources_considered)}[/dim]"
+    )
+
+    if not result.candidates:
+        console.print("[dim]No shared-key candidates met the confidence threshold.[/dim]")
+    for cand in result.candidates:
+        hub = cand.hub
+        if hub.kind == "entity":
+            where = f"{hub.source}.{hub.table}.{hub.column}"
+            head = f"hub [bold]{hub.concept}[/bold] = {where}"
+        else:
+            head = f"virtual hub [bold]{hub.concept}[/bold] (no source owns this key)"
+        console.print(
+            f"\n[green]{cand.confidence:.2f}[/green] [cyan]{cand.key}[/cyan] — {head} "
+            f"[dim]({cand.method})[/dim]"
+        )
+        tbl = RichTable(show_header=True, header_style="dim")
+        tbl.add_column("Referencing source")
+        tbl.add_column("Table")
+        tbl.add_column("Column")
+        tbl.add_column("JSON type")
+        tbl.add_column("Overlap", justify="right")
+        for ref in cand.references:
+            tbl.add_row(
+                ref.source,
+                ref.table,
+                ref.column,
+                ref.json_type,
+                "-" if ref.overlap is None else f"{ref.overlap:.0%}",
+            )
+        console.print(tbl)
+        for line in cand.evidence:
+            console.print(f"  [dim]· {line}[/dim]")
+
+    if show_suppressed and result.suppressed:
+        console.print(f"\n[dim]Suppressed ({len(result.suppressed)}):[/dim]")
+        stbl = RichTable(show_header=True, header_style="dim")
+        stbl.add_column("Key")
+        stbl.add_column("Where")
+        stbl.add_column("Reason")
+        stbl.add_column("Detail")
+        for s in result.suppressed:
+            stbl.add_row(s.key, f"{s.source}.{s.table}.{s.column}", s.reason, s.detail)
+        console.print(stbl)
+    elif result.suppressed:
+        console.print(
+            f"\n[dim]{len(result.suppressed)} grouped column(s) suppressed; "
+            f"re-run with --show-suppressed to see why.[/dim]"
+        )
 
 
 @source_app.command("analyze-denorm")

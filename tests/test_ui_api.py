@@ -838,6 +838,107 @@ class TestDraftValidationWithExpressions:
         assert any("@nope" in m for m in body["issues"])
 
 
+class TestSharedKeysEndpoint:
+    """Cross-source shared-key inference over the catalog (PRD P6.7)."""
+
+    def _seed(self, client, catalog_dir):
+        for name, source_type in (("ch", "clickhouse"), ("crm", "postgresql")):
+            client.post("/api/sources", json={
+                "name": name,
+                "source_type": source_type,
+                "connection_string": f"{source_type}://localhost/{name}",
+            })
+        mgr = CatalogManager(catalog_dir)
+        mgr.create_snapshot("ch", Schema(tables={
+            "query_events": Table(name="query_events", columns=[
+                Column(name="event_id", data_type="uint64", is_primary_key=True),
+                Column(name="account_id", data_type="string"),
+            ], primary_key=["event_id"]),
+        }))
+        mgr.create_snapshot("crm", Schema(tables={
+            "accounts": Table(name="accounts", columns=[
+                Column(name="id", data_type="integer", is_primary_key=True),
+                Column(name="account_id", data_type="character varying"),
+            ], primary_key=["id"]),
+        }))
+
+    def test_infers_cross_source_hub(self, client, catalog_dir):
+        self._seed(client, catalog_dir)
+        resp = client.post("/api/shared-keys/infer", json={"min_confidence": 0.0})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert sorted(body["sources_considered"]) == ["ch", "crm"]
+        cand = next(c for c in body["candidates"] if c["key"] == "account_id")
+        assert cand["hub"]["kind"] == "entity"
+        assert cand["hub"]["concept"] == "Account"
+        assert (cand["hub"]["source"], cand["hub"]["table"]) == ("crm", "accounts")
+        assert [(r["source"], r["table"]) for r in cand["references"]] == [
+            ("ch", "query_events")
+        ]
+
+    def test_reports_suppressed_rather_than_dropping_silently(self, client, catalog_dir):
+        self._seed(client, catalog_dir)
+        body = client.post("/api/shared-keys/infer", json={"min_confidence": 0.0}).json()
+        reasons = {s["reason"] for s in body["suppressed"]}
+        # The CRM's own accounts row is the hub, not a reference.
+        assert "hub_table" in reasons
+
+    def test_single_source_returns_400(self, client, catalog_dir):
+        client.post("/api/sources", json={
+            "name": "only",
+            "source_type": "postgresql",
+            "connection_string": "postgresql://localhost/only",
+        })
+        CatalogManager(catalog_dir).create_snapshot("only", Schema(tables={}))
+        resp = client.post("/api/shared-keys/infer")
+        assert resp.status_code == 400
+        assert "at least two" in resp.json()["detail"]
+
+    def test_explicit_source_list_is_honoured(self, client, catalog_dir):
+        self._seed(client, catalog_dir)
+        resp = client.post(
+            "/api/shared-keys/infer",
+            json={"sources": ["ch", "missing"], "min_confidence": 0.0},
+        )
+        assert resp.status_code == 400
+        assert "at least two" in resp.json()["detail"]
+
+    def test_accepted_key_persists_through_the_mapping_put(self, client, catalog_dir):
+        """Accept mirrors P6.6: the client writes it into the mapping payload."""
+        self._seed(client, catalog_dir)
+        client.post("/api/projects", json={"name": "proj", "source_name": "ch"})
+        payload = {
+            "source_schema": "analytics",
+            "collections": {
+                "query_events": {
+                    "source_table": "query_events",
+                    "target_collection": "QueryEvent",
+                }
+            },
+            "edges": [],
+            "shared_keys": [
+                {
+                    "key": "account_id",
+                    "concept": "Account",
+                    "hub_kind": "entity",
+                    "hub_source": "crm",
+                    "hub_table": "accounts",
+                    "hub_column": "account_id",
+                    "bindings": [
+                        {"source": "ch", "table": "query_events", "column": "account_id"}
+                    ],
+                    "confidence": 0.8,
+                    "method": "hub_named_table",
+                }
+            ],
+        }
+        assert client.put("/api/projects/proj/mapping", json=payload).status_code == 200
+
+        got = client.get("/api/projects/proj/mapping").json()
+        assert got["shared_keys"][0]["hub_table"] == "accounts"
+        assert got["shared_keys"][0]["bindings"][0]["source"] == "ch"
+
+
 class TestStaticAssetSafety:
     def test_no_inline_handler_js_string_interpolation(self):
         """Guard against DOM XSS: inline event handlers must not interpolate a

@@ -378,6 +378,11 @@
     position: sticky; z-index: 9;
   }
   .target-section-label.edge-section { color: var(--pink); background: rgba(244,114,182,.05); }
+  /* Federated join keys (P6.7). Amber + a dashed left rule so they read as
+     "declared, not materialized" — there is no edge collection behind these. */
+  .target-section-label.xsk-section { color: var(--amber, #fbbf24); background: rgba(251,191,36,.06); }
+  .xsk-card { border-left: 2px dashed var(--amber, #fbbf24); }
+  .xsk-card .coll-name { color: var(--amber, #fbbf24); }
   .target-card { border-bottom: 1px solid rgba(71,85,105,.4); }
   .target-card.selected { background: rgba(52,211,153,.06); }
   .target-card-header {
@@ -1265,7 +1270,7 @@ const API = '';
 let currentProject = null;
 let currentSourceName = null;
 let graphDataCache = null;
-let editState = { collections: {}, edges: [], typeOverrides: {}, keySeparator: '_', sourceSchema: 'public', defaultWorkers: 1, defaultBatchSize: 10000 };
+let editState = { collections: {}, edges: [], sharedKeys: [], typeOverrides: {}, keySeparator: '_', sourceSchema: 'public', defaultWorkers: 1, defaultBatchSize: 10000 };
 let tablesInfo = [];
 let collapsedTables = new Set();
 let collapsedCollections = new Set();
@@ -2181,6 +2186,9 @@ function openActionsMenu(ev) {
     { label: 'Suggest FKs', icon: '\u2197', shortcut: 'i', disabled: dis,
       hint: 'Scan the source schema for likely foreign keys (by name and value overlap) and propose new edges to accept or dismiss.',
       onClick: suggestFks },
+    { label: 'Suggest shared keys', icon: '\u2263', shortcut: 'k',
+      hint: 'Find join keys shared ACROSS sources (e.g. a ClickHouse account_id whose Account entity lives in the Postgres CRM). Single-schema FK inference cannot see these. Accepted keys become declared join keys in the CSI / R2RML export, not ArangoDB edges.',
+      onClick: () => suggestSharedKeys() },
     { label: 'Analyze denormalization', icon: '\u2728', shortcut: 'n', disabled: dis,
       hint: 'Detect denormalization smells (repeating column groups, embedded lookups, multi-valued columns, redundant reference data, over-split 1:1 tables) and recommend graph remedies. Advisory \u2014 nothing is changed.',
       onClick: analyzeDenorm },
@@ -2393,6 +2401,7 @@ async function selectProject(name) {
       sourceSchema: data.config?.sourceSchema || 'public',
       collections: { ...data.config?.collections } || {},
       edges: data.config?.edges ? [...data.config.edges] : [],
+      sharedKeys: data.config?.sharedKeys ? [...data.config.sharedKeys] : [],
       typeOverrides: { ...data.config?.typeOverrides } || {},
       keySeparator: data.config?.keySeparator || '_',
       defaultWorkers: editState.defaultWorkers || 1,
@@ -2574,7 +2583,59 @@ function renderTargetPane() {
     }
   }
 
+  // ── Federated join keys (P6.7). ──
+  // Deliberately a separate section, not an edge card: the referenced entity
+  // lives in another source, so there is no edge collection to name and no
+  // ArangoDB traversal to promise. These are declared join keys exported in
+  // the CSI / R2RML bundle for the federated executor to bind-join on.
+  const sharedKeys = editState.sharedKeys || [];
+  if (sharedKeys.length) {
+    html += '<div class="target-section-label xsk-section">Federated Join Keys</div>';
+    for (const sk of sharedKeys) {
+      const hubLoc = sk.hubKind === 'entity'
+        ? `${sk.hubSource}.${sk.hubTable}.${sk.hubColumn}`
+        : 'virtual — no source owns this key';
+      const rows = (sk.bindings || []).map(b => `
+        <div class="target-prop-row" data-xsk="${escHtml(sk.key)}">
+          <div class="target-prop-dot" data-xsk="${escHtml(sk.key)}"></div>
+          <span class="prop-name">${escHtml(b.table)}</span>
+          <span class="field-type">${escHtml(b.column)}</span>
+        </div>`).join('');
+      html += `
+        <div class="target-card xsk-card" data-xsk="${escHtml(sk.key)}">
+          <div class="target-card-header">
+            <div class="target-dot" data-xsk="${escHtml(sk.key)}"></div>
+            <span class="coll-name">${escHtml(sk.concept)}</span>
+            <span class="coll-count">${(sk.bindings || []).length}</span>
+            <button class="card-info-btn" title="Remove this join key"
+                    aria-label="Remove join key ${escHtml(sk.key)}"
+                    onclick="event.stopPropagation();removeSharedKey(this.closest('.target-card').dataset.xsk)">&#10005;</button>
+          </div>
+          <div class="target-card-body">
+            <div class="target-prop-row">
+              <span class="prop-name">hub</span>
+              <span class="field-type">${escHtml(hubLoc)}</span>
+            </div>
+            <div class="target-prop-row">
+              <span class="prop-name">join key</span>
+              <span class="field-type">${escHtml(sk.key)}</span>
+            </div>
+            ${rows}
+          </div>
+        </div>
+      `;
+    }
+  }
+
   container.innerHTML = html || '<div class="empty-state">No target collections</div>';
+}
+
+// Drop an accepted join key back out of the mapping.
+function removeSharedKey(key) {
+  editState.sharedKeys = (editState.sharedKeys || []).filter(sk => sk.key !== key);
+  markDirty();
+  renderTargetPane();
+  toast(`Removed join key '${key}'`, 'info');
 }
 
 // ── Connector drawing ──
@@ -4063,13 +4124,31 @@ function buildMappingPayload() {
     return base;
   });
 
-  return {
+  const payload = {
     source_schema: editState.sourceSchema || 'public',
     collections,
     edges,
     type_overrides: editState.typeOverrides || {},
     key_separator: editState.keySeparator || '_',
   };
+
+  // Accepted cross-source join keys (P6.7). Omitted when empty so mappings
+  // that never used the feature keep their historical on-disk shape.
+  const sharedKeys = (editState.sharedKeys || []).map(sk => ({
+    key: sk.key,
+    concept: sk.concept,
+    hub_kind: sk.hubKind || sk.hub_kind || 'virtual',
+    hub_source: sk.hubSource || sk.hub_source || null,
+    hub_table: sk.hubTable || sk.hub_table || null,
+    hub_column: sk.hubColumn || sk.hub_column || null,
+    bindings: (sk.bindings || []).map(b => ({
+      source: b.source, table: b.table, column: b.column,
+    })),
+    confidence: sk.confidence || 0,
+    method: sk.method || '',
+  }));
+  if (sharedKeys.length) payload.shared_keys = sharedKeys;
+  return payload;
 }
 
 // After saving, if the database has already been loaded and the saved mapping
@@ -4393,6 +4472,17 @@ function applyConfigToEditState(config) {
     fromField: e.from_field || (e.from_fields ? e.from_fields.join(', ') : (e.fromField || '')),
     toField: e.to_field || (e.to_fields ? e.to_fields.join(', ') : (e.toField || '')),
   }));
+  editState.sharedKeys = (config.shared_keys || config.sharedKeys || []).map(sk => ({
+    key: sk.key,
+    concept: sk.concept,
+    hubKind: sk.hub_kind || sk.hubKind || 'virtual',
+    hubSource: sk.hub_source || sk.hubSource || null,
+    hubTable: sk.hub_table || sk.hubTable || null,
+    hubColumn: sk.hub_column || sk.hubColumn || null,
+    bindings: sk.bindings || [],
+    confidence: sk.confidence || 0,
+    method: sk.method || '',
+  }));
   editState.typeOverrides = config.type_overrides || config.typeOverrides || {};
   editState.keySeparator = config.key_separator || config.keySeparator || '_';
   editState.sourceSchema = config.source_schema || config.sourceSchema || 'public';
@@ -4508,6 +4598,188 @@ async function suggestFks({ sample = false } = {}) {
       status: { kind: 'error', label: 'failed' },
     });
   }
+}
+
+// ── Cross-source shared keys (P6.7) ──
+//
+// The counterpart to suggestFks(): that one is single-schema and name-anchored
+// to a parent table in the SAME source, so a key shared across sources is
+// structurally invisible to it. This asks the catalog-wide endpoint instead.
+let _pendingSharedKeys = [];
+// Kept so accept/dismiss can re-render the card without inventing a result
+// shape (source list, sampler note and skipped list must stay accurate).
+let _lastSharedKeyResult = null;
+
+async function suggestSharedKeys({ sample = false } = {}) {
+  openFloatingCard({
+    id: 'shared-key-suggestions',
+    title: 'Inferring cross-source join keys…',
+    body: '<p style="color:var(--text-dim)">Comparing every snapshotted source…</p>',
+    status: { kind: 'info', label: 'working' },
+    actions: [],
+    position: { right: 20, bottom: 120 },
+  });
+
+  try {
+    const result = await apiFetch('/api/shared-keys/infer', {
+      method: 'POST',
+      body: JSON.stringify({ sample, min_confidence: 0.4 }),
+    });
+    renderSharedKeySuggestions(result);
+  } catch (e) {
+    openFloatingCard({
+      id: 'shared-key-suggestions',
+      title: 'Suggest cross-source join keys',
+      body: `<p style="color:var(--red)">${escHtml(e.message || String(e))}</p>`,
+      status: { kind: 'error', label: 'failed' },
+    });
+  }
+}
+
+function renderSharedKeySuggestions(result) {
+  const candidates = (result && result.candidates) || [];
+  const suppressed = (result && result.suppressed) || [];
+  const considered = (result && result.sources_considered) || [];
+
+  if (!candidates.length) {
+    // Never a bare "nothing found": the engine reports why each grouped column
+    // was excluded, so show that instead of leaving the user guessing.
+    const byReason = {};
+    for (const s of suppressed) byReason[s.reason] = (byReason[s.reason] || 0) + 1;
+    const reasons = Object.entries(byReason)
+      .map(([r, n]) => `<li><code>${escHtml(r)}</code> &times; ${n}</li>`).join('');
+    openFloatingCard({
+      id: 'shared-key-suggestions',
+      title: 'Suggest cross-source join keys',
+      body: `
+        <p style="color:var(--text-dim)">No cross-source key met the confidence
+        threshold across ${considered.length} source(s):
+        <code>${escHtml(considered.join(', '))}</code>.</p>
+        ${reasons ? `<p style="color:var(--text-dim)">Columns were grouped but excluded:</p>
+        <ul style="color:var(--text-dim)">${reasons}</ul>` : ''}
+        <p style="color:var(--text-dim)">Run <code>r2g shared-keys infer --show-suppressed</code>
+        for the full account.</p>`,
+      status: { kind: 'info', label: '0 found' },
+    });
+    return;
+  }
+
+  const rows = candidates.map((c, idx) => {
+    const hub = c.hub || {};
+    const already = (editState.sharedKeys || []).some(sk => sk.key === c.key);
+    const confPct = Math.round((c.confidence || 0) * 100);
+    const confClass = confPct >= 80 ? 'high' : (confPct >= 60 ? 'mid' : 'low');
+    const hubLoc = hub.kind === 'entity'
+      ? `<code>${escHtml(hub.source)}.${escHtml(hub.table)}.${escHtml(hub.column)}</code>`
+      : '<em>virtual — no source owns this key, no table invented</em>';
+    const refs = (c.references || []).map(r =>
+      `<div class="fk-suggest-evidence"><code>${escHtml(r.source)}.${escHtml(r.table)}</code>(${escHtml(r.column)})
+       → <strong>${escHtml(hub.concept || '')}</strong>${r.overlap != null
+         ? ` <span class="hint">${Math.round(r.overlap * 100)}% value overlap</span>` : ''}</div>`
+    ).join('');
+    const evidence = (c.evidence || []).map(e => `<div class="fk-suggest-evidence">· ${escHtml(e)}</div>`).join('');
+    const disabledAttr = already ? 'disabled title="Already accepted into this mapping"' : '';
+    return `
+      <li class="fk-suggest-row" data-idx="${idx}">
+        <div class="fk-suggest-line">
+          <span class="fk-suggest-conf ${confClass}">${confPct}%</span>
+          <span class="fk-suggest-method">${escHtml(c.method || '')}</span>
+          <span class="fk-suggest-arrow"><code>${escHtml(c.key)}</code> hub ${hubLoc}</span>
+        </div>
+        ${refs}
+        ${evidence}
+        <div class="fk-suggest-actions">
+          <button class="btn btn-primary" ${disabledAttr} onclick="acceptSharedKey(${idx})">
+            ${already ? 'Already added' : 'Accept as join key'}</button>
+          <button class="btn" onclick="dismissSharedKey(${idx})">Dismiss</button>
+        </div>
+      </li>`;
+  }).join('');
+
+  const sampleNote = (result.sampled_sources || []).length
+    ? `<span class="hint" style="color:var(--green)">Value probes ON for ${escHtml((result.sampled_sources || []).join(', '))}</span>`
+    : '<span class="hint">Name + type evidence only</span>';
+  const skipped = (result.skipped || []).length
+    ? `<p class="hint">Skipped: ${escHtml((result.skipped || []).map(s => `${s.source} (${s.reason})`).join('; '))}</p>`
+    : '';
+
+  _pendingSharedKeys = candidates.slice();
+  _lastSharedKeyResult = result;
+
+  openFloatingCard({
+    id: 'shared-key-suggestions',
+    title: 'Suggested cross-source join keys',
+    body: `
+      <div class="fk-suggest-header">
+        <span>${candidates.length} candidate${candidates.length === 1 ? '' : 's'} across
+        ${considered.length} sources</span>
+        ${sampleNote}
+      </div>
+      ${skipped}
+      <p class="hint">Accepted keys are recorded as declared join keys in this mapping and
+      its CSI / R2RML export — they are federation metadata, not ArangoDB edge
+      collections, because the hub entity lives in another source.</p>
+      <ul class="fk-suggest-list">${rows}</ul>`,
+    status: { kind: 'ok', label: `${candidates.length} proposed` },
+    actions: [
+      { label: 'Accept all', kind: 'primary', onClick: acceptAllSharedKeys },
+      { label: 'Close', onClick: () => closeFloatingCard('shared-key-suggestions') },
+    ],
+  });
+}
+
+function _sharedKeyFromCandidate(c) {
+  const hub = c.hub || {};
+  return {
+    key: c.key,
+    concept: hub.concept || c.key,
+    hubKind: hub.kind || 'virtual',
+    hubSource: hub.source || null,
+    hubTable: hub.table || null,
+    hubColumn: hub.column || null,
+    bindings: (c.references || []).map(r => ({
+      source: r.source, table: r.table, column: r.column,
+    })),
+    confidence: c.confidence || 0,
+    method: c.method || '',
+  };
+}
+
+function acceptSharedKey(idx) {
+  const c = _pendingSharedKeys[idx];
+  if (!c) return;
+  editState.sharedKeys = editState.sharedKeys || [];
+  if (editState.sharedKeys.some(sk => sk.key === c.key)) return;
+  editState.sharedKeys.push(_sharedKeyFromCandidate(c));
+  markDirty();
+  renderTargetPane();
+  renderSharedKeySuggestions({ ..._lastSharedKeyResult, candidates: _pendingSharedKeys });
+  toast(`Accepted join key '${c.key}' — Save to persist`, 'success');
+}
+
+function acceptAllSharedKeys() {
+  let added = 0;
+  editState.sharedKeys = editState.sharedKeys || [];
+  for (const c of _pendingSharedKeys) {
+    if (editState.sharedKeys.some(sk => sk.key === c.key)) continue;
+    editState.sharedKeys.push(_sharedKeyFromCandidate(c));
+    added++;
+  }
+  if (added) {
+    markDirty();
+    renderTargetPane();
+    toast(`Accepted ${added} join key(s) — Save to persist`, 'success');
+  }
+  closeFloatingCard('shared-key-suggestions');
+}
+
+function dismissSharedKey(idx) {
+  _pendingSharedKeys.splice(idx, 1);
+  if (!_pendingSharedKeys.length) {
+    closeFloatingCard('shared-key-suggestions');
+    return;
+  }
+  renderSharedKeySuggestions({ ..._lastSharedKeyResult, candidates: _pendingSharedKeys });
 }
 
 function renderFkSuggestions(result) {
@@ -7103,6 +7375,7 @@ registerShortcut('meta+enter', 'Open load dialog', 'global', () => showLoadModal
 registerShortcut('ctrl+enter', 'Open load dialog', 'global', () => showLoadModal());
 registerShortcut('a', 'Auto-map all', 'global', () => autoMap());
 registerShortcut('i', 'Suggest foreign keys', 'global', () => suggestFks());
+registerShortcut('k', 'Suggest cross-source join keys', 'global', () => suggestSharedKeys());
 registerShortcut('n', 'Analyze denormalization', 'global', () => analyzeDenorm());
 registerShortcut('g', 'Entitlement report', 'global', () => showEntitlements());
 registerShortcut('m', 'Suggest model (AI)', 'global', () => suggestOntology());

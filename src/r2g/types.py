@@ -264,6 +264,43 @@ class NamingConvention(BaseModel):
     edges: NameCase = "preserve"
 
 
+class SharedKeyBinding(BaseModel):
+    """One table bound to a shared key (PRD P6.7).
+
+    ``source`` is the *catalog source name*, not a schema name — a shared key
+    spans sources by definition, so a binding is only meaningful when it says
+    which source it came from.
+    """
+
+    source: str
+    table: str
+    column: str
+
+
+class SharedKey(BaseModel):
+    """An accepted cross-source shared key — a **declared join key** (PRD P6.7).
+
+    This is deliberately *not* an :class:`EdgeDefinition`. A project maps exactly
+    one source, so a key shared with another source cannot become a materialized
+    ArangoDB edge collection; it is federation metadata that flows into the
+    CSI / R2RML export, where the federated executor bind-joins on it.
+
+    ``hub_kind="entity"`` records the source/table/column that owns the key;
+    ``hub_kind="virtual"`` records only the concept, because P6.7 forbids
+    inventing a table for a key no source owns.
+    """
+
+    key: str
+    concept: str
+    hub_kind: Literal["entity", "virtual"] = "virtual"
+    hub_source: Optional[str] = None
+    hub_table: Optional[str] = None
+    hub_column: Optional[str] = None
+    bindings: List[SharedKeyBinding] = Field(default_factory=list)
+    confidence: float = 0.0
+    method: str = ""
+
+
 class MappingConfig(BaseModel):
     """Top-level mapping configuration."""
     source_schema: str = "public"
@@ -272,6 +309,17 @@ class MappingConfig(BaseModel):
     type_overrides: Dict[str, str] = Field(default_factory=dict)
     key_separator: str = "_"
     naming_convention: Optional[NamingConvention] = None
+    # Accepted P6.7 cross-source join keys. Declared last and omitted from
+    # output when empty so every mapping written before P6.7 serializes
+    # byte-identically (guarded by tests/test_serialization_compat.py).
+    shared_keys: List[SharedKey] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        full = handler(self)
+        if not full.get("shared_keys"):
+            full.pop("shared_keys", None)
+        return full
 
     def save_to_file(self, path: str):
         with open(path, 'w') as f:

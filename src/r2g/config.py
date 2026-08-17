@@ -118,6 +118,38 @@ DEFAULT_TYPE_MAP: Dict[str, str] = {
     "geography": "object",
     "geometry": "object",
     "vector": "array",
+    # ClickHouse variants (base names after ``Nullable(…)`` / ``LowCardinality(…)``
+    # are stripped by ``connectors.clickhouse._clean_type``). Without these the
+    # unsigned/sized integer families fall through to the ``"string"`` default,
+    # which silently breaks JSON-level type comparisons — notably the P6.7
+    # cross-source shared-key type-compatibility gate, where a ClickHouse
+    # ``UInt64`` key would look incompatible with a PostgreSQL ``bigint``.
+    # ``Int8``/``Int4``/``Int2``, ``Float32``/``Float64``, ``Bool``, ``String``,
+    # ``UUID``, ``Date``, ``DateTime``, and ``Decimal`` are already covered above.
+    "uint8": "integer",
+    "uint16": "integer",
+    "uint32": "integer",
+    "uint64": "integer",
+    "uint128": "integer",
+    "uint256": "integer",
+    "int16": "integer",
+    "int32": "integer",
+    "int64": "integer",
+    "int128": "integer",
+    "int256": "integer",
+    "decimal32": "float",
+    "decimal64": "float",
+    "decimal128": "float",
+    "decimal256": "float",
+    "date32": "string",
+    "datetime64": "string",
+    "fixedstring": "string",
+    "enum8": "string",
+    "enum16": "string",
+    "ipv4": "string",
+    "ipv6": "string",
+    "map": "object",
+    "tuple": "object",
 }
 
 

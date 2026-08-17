@@ -172,6 +172,11 @@ def mapping_to_csi(
     target_by_source = {
         cm.source_table: cm.target_collection for cm in config.collections.values()
     }
+    # Needed to resolve a source column to the attribute actually stored for it
+    # (see the join-key bindings below).
+    collection_by_source_table = {
+        cm.source_table: cm for cm in config.collections.values()
+    }
     conceptual_relationships: List[Dict[str, Any]] = []
     physical_relationships: Dict[str, Dict[str, Any]] = {}
     for edge in config.edges:
@@ -192,6 +197,55 @@ def mapping_to_csi(
             "edgeCollectionName": edge.edge_collection,
         }
 
+    # --- Declared cross-source join keys (PRD P6.7). ---
+    # These are NOT relationships: a project maps one source, so a key shared
+    # with another source has no edge collection to name. They are emitted as a
+    # separate conceptual block so the federated executor can bind-join on them
+    # without hand-authored config. The CSI v1 schema allows additional
+    # properties on ``conceptualModel``, so this is additive and stays valid.
+    join_keys: List[Dict[str, Any]] = []
+    for sk in config.shared_keys:
+        hub: Dict[str, Any] = {"kind": sk.hub_kind, "concept": sk.concept}
+        if sk.hub_kind == "entity":
+            hub.update({"source": sk.hub_source, "table": sk.hub_table, "column": sk.hub_column})
+        bindings: List[Dict[str, Any]] = []
+        for b in sk.bindings:
+            collection = target_by_source.get(b.table)
+            binding: Dict[str, Any] = {
+                "source": b.source,
+                "table": b.table,
+                # The SQL column, for the relational leg.
+                "column": b.column,
+            }
+            # Only tables mapped by *this* project resolve to a conceptual
+            # entity; the other sources' tables are named but unresolved here.
+            if collection is not None:
+                binding["entity"] = entity_name_by_collection.get(
+                    collection, owl_entity_name(collection)
+                )
+                # ``field`` is the *stored ArangoDB attribute*, matching the
+                # meaning it carries everywhere else in this document — so it
+                # must go through field_mappings. Emitting the source column
+                # here would hand the federated executor an attribute that does
+                # not exist on the documents it bind-joins.
+                cm_for_table = collection_by_source_table.get(b.table)
+                binding["field"] = (
+                    cm_for_table.field_mappings.get(b.column, b.column)
+                    if cm_for_table is not None
+                    else b.column
+                )
+            bindings.append(binding)
+        join_keys.append(
+            {
+                "key": sk.key,
+                "concept": sk.concept,
+                "hub": hub,
+                "bindings": bindings,
+                "confidence": sk.confidence,
+                "method": sk.method,
+            }
+        )
+
     source: Dict[str, Any] = {
         "kind": source_type or "relational",
         "ref": source_ref or config.source_schema,
@@ -206,13 +260,18 @@ def mapping_to_csi(
     }
     if confidence is not None:
         provenance["confidence"] = confidence
+    conceptual_model: Dict[str, Any] = {
+        "entities": conceptual_entities,
+        "relationships": conceptual_relationships,
+    }
+    # Omitted entirely when no join key has been accepted, so mappings without
+    # P6.7 keys emit byte-identical CSI to before.
+    if join_keys:
+        conceptual_model["joinKeys"] = join_keys
 
     return {
         "csiVersion": CSI_VERSION,
-        "conceptualModel": {
-            "entities": conceptual_entities,
-            "relationships": conceptual_relationships,
-        },
+        "conceptualModel": conceptual_model,
         "arangoPhysicalMapping": {
             "entities": physical_entities,
             "relationships": physical_relationships,
