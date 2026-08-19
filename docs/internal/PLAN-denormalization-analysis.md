@@ -221,3 +221,40 @@ properties) with no schema rewriting and no LLM. Then **11b** for the remaining
 detectors + the Studio review card, and **11c** for opt-in remediation scaffolding
 and Phase 10 grounding. Keep the discipline explicit: r2g detects and advises with
 evidence; the user decides; the deterministic pipeline validates and loads.
+
+## 8. Cross-project convergence — arango-schema-analyzer (ArangoDB adapter)
+
+> Added Aug 2026. The same denormalization analysis is being adopted on the
+> **ArangoDB** side (`arango-schema-analyzer`), which reverse-engineers an existing
+> ArangoDB physical schema into a conceptual ontology + mapping contract. To avoid a
+> **fourth fork** of shared logic (the FK engine was copy-ported between r2g / RSA /
+> arango-schema-analyzer and has since drifted three ways), the two efforts converge
+> on this plan's vocabulary. See
+> `arango-schema-analyzer/docs/prd-patch-proposal-denormalization.md`.
+
+**What converges.** The `DenormFinding` contract (`kind`, `collection`/`table`,
+`fields`/`columns`, `recommendedAction`, `confidence`, `evidence`) and this §2 detector
+`kind` set are the shared vocabulary. arango-schema-analyzer implements the same `kind`s
+against ArangoDB collections (read-only detection; findings advise, never rewrite).
+
+**What inverts — `recommendedAction` is paradigm-specific.** r2g maps relational→graph, so
+its remedies *extract a vertex* or *embed an array*. arango-schema-analyzer maps
+ArangoDB→ontology, so for an already-embedded sub-document/array the remedy is the
+**opposite** — *un-embed* into a distinct class + edge for a pure ontology. Same `kind`,
+opposite action. Keep `kind` stable across both; let `recommendedAction` differ.
+
+**Three `kind`s to add to the shared §2 taxonomy** (proposed by the ArangoDB side; currently
+absent here too):
+- `eav` — Entity-Attribute-Value / open schema (pivot `attr_name` → properties or edges);
+  near-isomorphic to a triple/SPO store.
+- `derived_attribute` — pre-computed aggregates (`total_*`, `*_count`, `last_*`) flagged as
+  observations, not intrinsic properties. Cheap (name + optional value heuristic); high ROI.
+- `temporal_versioning` — SCD/effective-expiration versioning; **flag-only** — reification of
+  temporal state stays out of scope for both (owned by the temporal layer / AOE).
+
+**Shared-code decision (mirrors this repo's dependency-reversal stance).** Converge the
+*contract* now; house the paradigm-neutral heuristics (name/value/FD-candidate probing) in a
+small **neutral lib both import** (the `conceptual-taxonomy` precedent) rather than porting a
+copy; keep profiling (`Column`/`PhysicalSchema` vs ArangoDB nested-doc walking) and the remedy
+direction per-adapter. Full package sharing remains gated on the deferred RSA reversal
+(`PLAN-rsa-dependency-reversal.md`).
