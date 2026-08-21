@@ -158,6 +158,7 @@ def _resolve_label_collisions(
     policy: str,
     *,
     property_roles: Optional[Dict[tuple, str]] = None,
+    join_key_labels: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
     """Find (and optionally fix) attribute labels shared by two or more entities.
 
@@ -176,6 +177,14 @@ def _resolve_label_collisions(
             apply the remedy that fits (see below).
         ``"warn"``
             Record only. ``"off"`` skips the check entirely.
+
+    ``join_key_labels`` names conceptual labels that are declared **cross-source
+    join keys** (P6.7, emitted as ``conceptualModel.joinKeys``). A join key is a
+    *deliberately* shared label — the federation spine — so it is exempt from
+    every policy: kept bare on every entity that carries it, and recorded as a
+    ``"join_key"`` collision so the sharing stays visible. Qualifying it would
+    rename the very label ``joinKeys`` references, yielding a CSI whose join key
+    points at a property no entity still holds.
 
     Under ``qualify`` every occurrence is renamed, not just the second one, for
     two reasons: the result cannot depend on mapping insertion order, and leaving
@@ -207,6 +216,7 @@ def _resolve_label_collisions(
         return []
 
     property_roles = property_roles or {}
+    join_key_labels = join_key_labels or set()
 
     owners: Dict[str, List[str]] = {}
     for entity in conceptual_entities:
@@ -250,6 +260,21 @@ def _resolve_label_collisions(
     for label in sorted(colliding):
         entities = sorted(colliding[label])
         record: Dict[str, Any] = {"label": label, "entities": entities}
+
+        if label in join_key_labels:
+            # A declared cross-source join key (P6.7): the shared label IS the
+            # federation spine that ``conceptualModel.joinKeys`` references, so it
+            # must stay bare on every binding entity under every policy. Renaming
+            # it would leave joinKeys pointing at a label no entity still holds.
+            record["resolution"] = "join_key"
+            record["detail"] = (
+                "declared cross-source join key (P6.7) — kept bare on every "
+                "entity so the federation join spine survives; the shared label "
+                "is intentional, not an ambiguity"
+            )
+            records.append(record)
+            occupied.add(label)
+            continue
 
         if policy in {"warn", "reported"}:
             record["resolution"] = "reported"
@@ -476,6 +501,24 @@ def mapping_to_csi(
             "properties": {owl_property_name(p): {"field": p} for p in prop_names},
         }
 
+    # Source-table → collection, needed both for the join-key label set here and
+    # the join-key bindings emitted further below.
+    collection_by_source_table = {
+        cm.source_table: cm for cm in config.collections.values()
+    }
+    # Conceptual labels that are declared cross-source join keys (P6.7). A join
+    # key is deliberately shared across entities, so the collision resolver must
+    # keep it bare on every binding entity — qualifying it would rename the very
+    # spine that ``conceptualModel.joinKeys`` (built below) references.
+    join_key_labels: set = set()
+    for sk in config.shared_keys:
+        for b in sk.bindings:
+            cm_b = collection_by_source_table.get(b.table)
+            if cm_b is None or cm_b.collection_type == "edge" or cm_b.is_join_table:
+                continue
+            stored = cm_b.field_mappings.get(b.column, b.column)
+            join_key_labels.add(owl_property_name(stored))
+
     # Resolve attribute labels shared by two or more entities *before* anything
     # downstream sees them: this is the only place with the whole document in
     # view, so a collision left here is unrecoverable for every consumer.
@@ -484,6 +527,7 @@ def mapping_to_csi(
         physical_entities,
         label_policy,
         property_roles=property_roles,
+        join_key_labels=join_key_labels,
     )
 
     # --- Conceptual + physical relationships: one per edge definition. ---
@@ -492,11 +536,8 @@ def mapping_to_csi(
     target_by_source = {
         cm.source_table: cm.target_collection for cm in config.collections.values()
     }
-    # Needed to resolve a source column to the attribute actually stored for it
-    # (see the join-key bindings below).
-    collection_by_source_table = {
-        cm.source_table: cm for cm in config.collections.values()
-    }
+    # ``collection_by_source_table`` (source table → CollectionMapping) is built
+    # above, before label resolution, and reused for the join-key bindings below.
     conceptual_relationships: List[Dict[str, Any]] = []
     physical_relationships: Dict[str, Dict[str, Any]] = {}
     for edge in config.edges:

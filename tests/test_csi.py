@@ -14,6 +14,8 @@ from r2g.types import (
     FieldExpression,
     MappingConfig,
     Schema,
+    SharedKey,
+    SharedKeyBinding,
     Table,
 )
 
@@ -762,3 +764,116 @@ class TestRolesPolicy:
         assert rec["owner"] == "Person"
         assert "ownerId" in _labels_by_entity(doc)["Person"]
         assert "assetOwnerId" in _labels_by_entity(doc)["Asset"]
+
+
+class TestJoinKeyExemption:
+    """A declared P6.7 cross-source join key is the federation spine: its shared
+    label must survive on every binding entity, so the collision resolver exempts
+    it from renaming under *every* policy. Qualifying it would rename the very
+    label ``conceptualModel.joinKeys`` references, yielding a CSI whose join key
+    points at a property no entity still holds (the trap the CDF hit).
+    """
+
+    def _crm_with_join_key(self):
+        """`accountId` is a DECLARED shared key across three entities that all
+        carry `account_id` — so left un-exempted it collides and gets renamed."""
+        config = MappingConfig(
+            collections={
+                "accounts": CollectionMapping(source_table="accounts", target_collection="Account"),
+                "contacts": CollectionMapping(source_table="contacts", target_collection="Contact"),
+                "contracts": CollectionMapping(source_table="contracts", target_collection="Contract"),
+            },
+            shared_keys=[
+                SharedKey(
+                    key="accountId",
+                    concept="Account",
+                    hub_kind="entity",
+                    hub_source="crm",
+                    hub_table="accounts",
+                    hub_column="account_id",
+                    bindings=[
+                        SharedKeyBinding(source="crm", table="accounts", column="account_id"),
+                        SharedKeyBinding(source="crm", table="contacts", column="account_id"),
+                        SharedKeyBinding(source="crm", table="contracts", column="account_id"),
+                    ],
+                    confidence=1.0,
+                    method="test",
+                )
+            ],
+        )
+        schema = Schema(
+            tables={
+                "accounts": Table(
+                    name="accounts",
+                    columns=[
+                        Column(name="id", data_type="integer", is_primary_key=True),
+                        Column(name="account_id", data_type="text"),
+                        Column(name="account_name", data_type="text"),
+                    ],
+                    primary_key=["id"],
+                ),
+                "contacts": Table(
+                    name="contacts",
+                    columns=[
+                        Column(name="id", data_type="integer", is_primary_key=True),
+                        Column(name="account_id", data_type="text"),
+                        Column(name="contact_id", data_type="text"),
+                    ],
+                    primary_key=["id"],
+                ),
+                "contracts": Table(
+                    name="contracts",
+                    columns=[
+                        Column(name="id", data_type="integer", is_primary_key=True),
+                        Column(name="account_id", data_type="text"),
+                    ],
+                    primary_key=["id"],
+                ),
+            }
+        )
+        return config, schema
+
+    def test_join_key_stays_bare_under_default_qualify(self):
+        # Default policy is "qualify" — which, left to itself, renames the spine
+        # to accountAccountId / contactAccountId and desyncs it from joinKeys.
+        doc = mapping_to_csi(*self._crm_with_join_key())
+        labels = _labels_by_entity(doc)
+        assert "accountId" in labels["Account"]
+        assert "accountId" in labels["Contact"]
+        assert "accountId" in labels["Contract"]
+        assert "accountAccountId" not in _all_labels(doc)
+        assert "contactAccountId" not in _all_labels(doc)
+
+    def test_join_key_collision_is_recorded_as_join_key(self):
+        doc = mapping_to_csi(*self._crm_with_join_key())
+        rec = next(r for r in doc["provenance"]["labelCollisions"] if r["label"] == "accountId")
+        assert rec["resolution"] == "join_key"
+
+    def test_joinkeys_reference_a_label_the_entities_still_hold(self):
+        # The consistency the exemption guarantees: every joinKeys entry names a
+        # conceptual key that survives on each of its bound entities.
+        doc = mapping_to_csi(*self._crm_with_join_key())
+        join_keys = doc["conceptualModel"]["joinKeys"]
+        assert any(k["key"] == "accountId" for k in join_keys)
+        labels = _labels_by_entity(doc)
+        for k in join_keys:
+            for b in k["bindings"]:
+                if "entity" in b:
+                    assert "accountId" in labels[b["entity"]]
+
+    def test_exemption_holds_under_roles_too(self):
+        # Even the smarter roles policy (which would keep Account bare but rename
+        # Contact -> contactAccountId) must not split a DECLARED join key.
+        doc = mapping_to_csi(*self._crm_with_join_key(), label_policy="roles")
+        labels = _labels_by_entity(doc)
+        assert "accountId" in labels["Account"]
+        assert "accountId" in labels["Contact"]
+        assert "contactAccountId" not in _all_labels(doc)
+
+    def test_without_the_declaration_qualify_is_unchanged(self):
+        # Regression guard: drop the shared_keys declaration and the blunt default
+        # is untouched — accountId still qualifies to accountAccountId.
+        config, schema = self._crm_with_join_key()
+        config.shared_keys = []
+        doc = mapping_to_csi(config, schema)  # default qualify
+        assert "accountAccountId" in _all_labels(doc)
