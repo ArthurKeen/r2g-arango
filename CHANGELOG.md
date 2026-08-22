@@ -7,6 +7,44 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-21
+
+### Added
+
+- **Contextual Data Fabric federation producer (Phase 12 / M5).** r2g is now the
+  forward producer of the interchange artifacts that drive the
+  contextual-data-fabric federated-query engine:
+  - `r2g export-csi` (`src/r2g/csi.py`) emits a **CSI v1** document pairing the
+    conceptual model with its ArangoDB physical mapping. Load-independent — a
+    mapping is exported without running a migration. Feeds the fabric's Arango leg
+    (CSI → MappingBundle → `arango-sparql-py`).
+  - `r2g export-r2rml` (`src/r2g/r2rml.py`) emits **R2RML** for the relational leg
+    (R2RML → Ontop).
+- **ClickHouse source connector — federation mapping *and* ETL** (new
+  `r2g-arango[clickhouse]` extra). `ClickHouseConnector` introspects
+  `system.tables`/`system.columns` (sorting-key PK via `is_in_primary_key`,
+  `Nullable`/`LowCardinality` stripped) and feeds `generate-config` →
+  `export-csi`/`export-r2rml`; `ClickHouseSession` streams rows via server-side
+  block streaming for load into ArangoDB. `Int*`/`UInt*` map to `xsd:integer`.
+  Registered in `SUPPORTED_SOURCE_TYPES` / `create_source_connector` alongside
+  PostgreSQL, MySQL, SQL Server, Snowflake, CSV, and Kafka.
+- **Cross-source shared-key inference (PRD P6.7).** Accepted shared keys are
+  emitted as `conceptualModel.joinKeys` in the CSI export — the declared
+  cross-source join keys the federated executor bind-joins on, with no
+  materialized edge. `r2g.xsk` proposes shared-key hub relationships across
+  sources under a confirm-to-accept discipline.
+- **CC-12 OWL naming in exported conceptual models.** CSI/R2RML exports use
+  singular PascalCase entity names and lowerCamel property names; the physical
+  collection/table names are preserved in the physical mapping.
+- **Attribute-label collision policy for CSI export**
+  (`--label-policy qualify|roles|warn|off`). Labels shared by two entities are
+  resolved deterministically and every collision recorded in
+  `provenance.labelCollisions`. Declared P6.7 join keys are exempt — kept bare on
+  every binding entity so the federation join spine survives.
+- **Serialization compatibility corpus** (`tests/test_serialization_compat.py` +
+  frozen fixtures) freezing the on-disk JSON shape of the physical types and
+  `MappingConfig`, asserting byte-stability across the RSA type reversal.
+
 ### Changed
 
 - **Physical types re-based on `relational-schema-analyzer` (Stage 2, step 2).**
@@ -68,12 +106,28 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records membership/column diffs (non-fatal) — see the ADR. No
   behavior change; import safety for minimal installs preserved (no DB drivers pulled
   by importing the connector base/session).
+- **`relational-schema-analyzer` floor raised to `>=0.4.0,<0.5.0`** — r2g now
+  builds on RSA's `extra` consumer-metadata passthrough (0.2.0), physical-model
+  enrichment (0.3.0), and dbt/OSI data-catalog connectors (0.4.0).
 
-### Added
+### Fixed
 
-- **Serialization compatibility corpus** (`tests/test_serialization_compat.py` +
-  frozen fixtures) freezing the on-disk JSON shape of the physical types and
-  `MappingConfig`, asserting byte-stability across the RSA type reversal.
+- **CSI: declared P6.7 join keys are exempt from label qualification.** The
+  default `qualify` policy no longer renames a shared join key
+  (`accountId` → `accountAccountId`), which had silently desynced
+  `conceptualModel.joinKeys` from the entities it references.
+- **CSI: never emit one attribute label on two entities.** The label-collision
+  resolver guarantees a conceptual label maps to at most one entity (or is
+  recorded `unresolved`), so a downstream flat vocabulary cannot be ambiguous by
+  construction.
+- **R2RML: `TriplesMap` class IRI uses the CC-12 conceptual entity name** (not the
+  physical table name), so the relational and graph legs agree on class identity.
+- **UI: FK-inferred edges render under PascalCase naming.** The topology canvas
+  resolves edge endpoints by source-table name as well as target-collection name,
+  so join edges no longer silently vanish when a naming convention diverges the two
+  (e.g. `film_actor` → `FilmActor`).
+- **Catalog: a leading `~` in `mapping_config_path` is expanded** to the user's
+  home directory.
 
 ## [0.3.0] — 2026-07-05
 
@@ -467,5 +521,7 @@ Initial phased implementation (not yet published to PyPI):
   pipeline, `r2g source dump` CLI, pure-Python FK inference with
   optional value-overlap sampler.
 
-[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ArthurKeen/r2g-arango/releases/tag/v0.2.0
