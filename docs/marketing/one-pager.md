@@ -1,6 +1,6 @@
 # r2g-arango — Relational-to-Graph Ontology for ArangoDB
 
-**Derive a graph ontology from your relational schema and project data onto it in ArangoDB — shape the ontology visually, move data three ways, keep it in sync, and govern what you migrate.**
+**Derive a graph ontology from your relational schema and project data onto it in ArangoDB — shape the ontology visually, move data three ways, keep it in sync, and govern what you migrate. Or *federate*: emit CSI v1 + R2RML mappings so a query engine reaches your data where it lives, across relational, ClickHouse, and ArangoDB — no data movement.**
 
 *Open source · Apache 2.0 · `pip install r2g-arango` · Python 3.10+ · Experimental / educational reference implementation*
 
@@ -20,10 +20,11 @@ Derives a graph **ontology** from a relational schema — **tables → entity (d
 
 | | |
 |---|---|
-| **Broad sources** | PostgreSQL, MySQL/MariaDB, SQL Server, Snowflake, CSV directories, Kafka topics — via a common connector layer. |
+| **Broad sources** | PostgreSQL, MySQL/MariaDB, SQL Server, Snowflake, ClickHouse, CSV directories, Kafka topics — via a common connector layer. |
 | **Correct mapping** | Composite/multi-column FKs, 50+ type coercions, multi-schema, partitions, PK-less-table safety, join-table auto-detection. |
 | **Ontology Studio** | FastAPI web UI to shape the ontology on a single graph canvas: right-click context menus, lenses (Topology / Coverage / Validation / Diff / Sensitivity), Auto-Map, Suggest FKs, naming conventions. |
 | **Three load paths** | Batch `arangoimport` script generation · direct HTTP streaming (server-side cursors, parallel workers, dry-run) · CDC via logical replication + Kafka/Debezium. |
+| **Federate in place** | Emit **CSI v1** + **R2RML** mappings (`export-csi` / `export-r2rml`) so a query engine answers one conceptual query across PostgreSQL (Ontop) ⋈ ClickHouse (native executor) ⋈ ArangoDB (`arango-sparql-py`), joined on **P6.7** declared cross-source keys — grounded, cited, no data movement. |
 | **Change management** | Schema diff, config migration that preserves customizations, selective reload, and in-place migration of a loaded graph. |
 | **Data governance** | Catalog-sourced classifications (OpenMetadata), sensitivity gate at load, transform-at-load masking, and emitted RBAC/OPA enforcement artifacts. |
 | **AI ontology assistant** | *Optional.* An LLM **proposes** a richer ontology (entity-vs-relationship, implicit relationships, better names); you review per-item and apply. |
@@ -62,7 +63,7 @@ r2g source snapshot shop
 r2g ui        # open the Mapping Studio
 ```
 
-**Tech:** Python · Typer CLI · FastAPI + web UI · psycopg / python-arango · Polars · structlog · optional `[llm]`, `[kafka]`, `[snowflake]`, `[openmetadata]` extras.
+**Tech:** Python · Typer CLI · FastAPI + web UI · psycopg / python-arango · Polars · structlog · optional `[llm]`, `[kafka]`, `[snowflake]`, `[clickhouse]`, `[openmetadata]` extras.
 
 **Links:** GitHub `ArthurKeen/r2g-arango` · full roadmap in `docs/PRD.md` · License: Apache 2.0
 

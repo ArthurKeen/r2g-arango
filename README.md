@@ -15,17 +15,21 @@
 
 > Project relational and structured data sources as a graph in ArangoDB —
 > materialize via batch ETL, sync via CDC/Kafka, or query interactively
-> through the mapping studio.
+> through the mapping studio. **Or federate**: emit CSI v1 + R2RML mappings so a
+> query engine reaches your data where it lives — across PostgreSQL, ClickHouse,
+> and ArangoDB, joined on declared cross-source keys — with no data movement.
 
 ![R2G Mapping Studio showing relational source fields mapped to a target graph model](docs/assets/r2g-mapping-studio.png)
 
 `r2g` turns relational schemas into ArangoDB graph schemas mechanically:
 tables become document collections, foreign keys become edges, join tables
 become edges, and types are coerced from PostgreSQL representations into
-proper JSON types. PostgreSQL, MySQL / MariaDB, SQL Server, and Snowflake are
-supported as relational sources today (plus CSV directories and Kafka topics);
-the connector layer is designed for additional structured and semi-structured
-sources over time.
+proper JSON types. PostgreSQL, MySQL / MariaDB, SQL Server, Snowflake, and
+ClickHouse are supported as relational sources today (plus CSV directories and
+Kafka topics); the connector layer is designed for additional structured and
+semi-structured sources over time. Beyond loading data *into* ArangoDB, r2g can
+also emit **federation mappings** (CSI v1 + R2RML) so a query engine reaches your
+data where it lives — see [Federation](#federation-query-your-data-where-it-lives-csi-v1--r2rml).
 
 > **Status — actively used; the production core is RSA.** r2g is the
 > reference *application* for relational-to-graph migration with ArangoDB, and
@@ -68,6 +72,43 @@ flowchart LR
     SJ --> STREAM
     STREAM -->|"HTTP API bulk import"| ADB
 ```
+
+## Federation: query your data where it lives (CSI v1 + R2RML)
+
+Beyond *moving* data into ArangoDB, r2g can emit the mappings that let a query
+engine reach your data **where it already lives** — unmoved, across several
+engines at once. This is r2g's role as the forward mapping producer for the
+Contextual Data Fabric federated-query engine.
+
+Two exports, both load-independent (no migration required):
+
+- **`export-csi`** emits a **CSI v1** (Conceptual Schema Interchange) document
+  pairing the conceptual model — CC-12 OWL naming: singular PascalCase entities,
+  lowerCamel properties — with its ArangoDB physical mapping. It drives the
+  fabric's Arango leg (CSI → MappingBundle → `arango-sparql-py`).
+- **`export-r2rml`** emits **R2RML** for the relational leg (R2RML → Ontop), so a
+  Virtual Knowledge Graph engine can answer SPARQL over the live relational
+  database with no data movement. Both legs default to the same concept
+  namespace, so they share one vocabulary.
+
+**Cross-source join keys (P6.7).** Two sources often share a business key — say
+`account_id` in a ClickHouse analytics table and in a PostgreSQL CRM `Account`.
+r2g proposes these as *shared keys* (confirm-to-accept, never invented) and emits
+them as `conceptualModel.joinKeys` in the CSI export: declared cross-source join
+keys the federated executor **bind-joins** on, with no materialized edge.
+
+The payoff is a single conceptual query spanning **PostgreSQL (via Ontop) ⋈
+ClickHouse (via a native executor) ⋈ ArangoDB (via `arango-sparql-py`)**, joined
+on a declared key and grounded with citations — three engines, no data movement.
+
+```bash
+r2g export-csi   --config mapping.yaml --schema schema.json --output analytics.csi.json
+r2g export-r2rml --config mapping.yaml --schema schema.json --output analytics.r2rml.ttl
+```
+
+> Federation is read-only by construction and reuses r2g's mapping model, so the
+> same introspect → shape → validate workflow yields both a migration and a
+> federation mapping from one source.
 
 ## Prerequisites
 
@@ -178,6 +219,7 @@ Pick the extras that match your use case. Combine with commas.
 | `mysql`      | `pymysql`                                               | MySQL / MariaDB source — introspection, dumps, streaming |
 | `sqlserver`  | `pymssql`                                               | SQL Server source — introspection, dumps, streaming |
 | `snowflake`  | `snowflake-connector-python`                            | Snowflake source                              |
+| `clickhouse` | `clickhouse-connect`                                    | ClickHouse source — introspection, dumps, streaming, and federation (CSI/R2RML) |
 | `kafka`      | `confluent-kafka`                                       | Kafka-fed CDC consumer (Debezium or flat JSON) |
 | `ui`         | `fastapi`, `uvicorn[standard]`, `httpx`                 | Local mapping studio (`r2g ui`)               |
 | `mcp`        | `mcp[cli]`                                              | Run r2g as an MCP server for AI assistants    |
@@ -192,6 +234,7 @@ pipx install 'r2g-arango[mysql,ui]'                 # mapping studio against MyS
 pipx install 'r2g-arango[sqlserver,ui]'             # mapping studio against SQL Server
 pipx install 'r2g-arango[postgres,kafka]'           # batch load + Kafka CDC worker
 pipx install 'r2g-arango[snowflake,ui]'             # Snowflake source via the studio
+pipx install 'r2g-arango[clickhouse,ui]'            # ClickHouse source via the studio
 pipx install 'r2g-arango[postgres,llm]'             # PG + AI ontology suggestions (Phase 10)
 pipx install 'r2g-arango[postgres,ontology]'        # PG + deterministic ontology engine (Phase 10)
 pip   install 'r2g-arango[all]'                     # kitchen sink
@@ -412,6 +455,8 @@ r2g stream --dry-run \
 | `mapping-diff` | Compare two mapping configs and show what ArangoDB changes are needed |
 | `selective-reload` | Compute and execute a selective reload based on mapping changes |
 | `history` | Show load history (`--project`, `--limit`) |
+| `export-csi` | Emit a **CSI v1** conceptual-schema-interchange document (conceptual model + ArangoDB physical mapping) for federation; drives the fabric's Arango leg (`--config`, `--schema`, `--output`, `--source-type`, `--source-ref`, `--label-policy`, `--validate/--no-validate`) |
+| `export-r2rml` | Emit an **R2RML** mapping (relational → RDF) for SPARQL→SQL pushdown via Ontop — the federation relational leg (`--config`, `--schema`, `--output`, `--concept-base`, `--resource-base`, `--source-type`) |
 | `ui` | Start the Relational-to-Graph Studio web UI (requires the `ui` extra) |
 | `mcp` | Start the R2G MCP server for AI agent integration (requires the `mcp` extra) |
 
@@ -419,7 +464,7 @@ r2g stream --dry-run \
 
 | Command | Description |
 |---|---|
-| `source add` | Register a new data source (PostgreSQL, MySQL / MariaDB, SQL Server, Snowflake, CSV directory, or Kafka topic) |
+| `source add` | Register a new data source (PostgreSQL, MySQL / MariaDB, SQL Server, Snowflake, ClickHouse, CSV directory, or Kafka topic) |
 | `source list` | List all registered data sources |
 | `source remove` | Remove a registered data source |
 | `source snapshot` | Introspect the schema from a source and save a snapshot |
@@ -575,7 +620,7 @@ Use `--offset-reset earliest` or `latest` to control where a new consumer group 
 
 r2g is a reference application (see the Status note near the top): well-tested, but not held to a production operational bar. The following constraints apply:
 
-- **Supported sources: PostgreSQL, MySQL / MariaDB, SQL Server, Snowflake, and CSV directories** (Kafka is supported for streaming sync via `kafka-start` and introspection in the catalog). Schema introspection, FK inference (with value-overlap sampling on PostgreSQL, MySQL, SQL Server, and CSV), dump export (`r2g source dump`), and streaming into ArangoDB (`r2g stream --source …`) work across these backends through a common `SourceConnector` / `SourceSession` abstraction. MySQL is gated on the optional `r2g-arango[mysql]` extra (pure-Python `pymysql`, also covers MariaDB); SQL Server on `r2g-arango[sqlserver]` (pure-Python `pymssql`); Snowflake on `r2g-arango[snowflake]`. PostgreSQL, MySQL, and SQL Server are verified end-to-end against live servers in the integration suite; end-to-end Snowflake verification against a live warehouse remains a field-validation exercise. No SQLite or Oracle support yet.
+- **Supported sources: PostgreSQL, MySQL / MariaDB, SQL Server, Snowflake, ClickHouse, and CSV directories** (Kafka is supported for streaming sync via `kafka-start` and introspection in the catalog). Schema introspection, FK inference (with value-overlap sampling on PostgreSQL, MySQL, SQL Server, and CSV), dump export (`r2g source dump`), and streaming into ArangoDB (`r2g stream --source …`) work across these backends through a common `SourceConnector` / `SourceSession` abstraction. MySQL is gated on the optional `r2g-arango[mysql]` extra (pure-Python `pymysql`, also covers MariaDB); SQL Server on `r2g-arango[sqlserver]` (pure-Python `pymssql`); Snowflake on `r2g-arango[snowflake]`; ClickHouse on `r2g-arango[clickhouse]` (pure-Python `clickhouse-connect`). PostgreSQL, MySQL, and SQL Server are verified end-to-end against live servers in the integration suite; end-to-end Snowflake verification against a live warehouse remains a field-validation exercise. No SQLite or Oracle support yet.
 - **External data catalog discovery (Phase 8a):** connect to an [OpenMetadata](https://open-metadata.org) catalog (`r2g-arango[openmetadata]`) to browse its database/schema/Kafka assets and import a selection as an r2g source — see `r2g catalog`. Distinct from r2g's internal catalog; read-only; credentials stay with the user (the catalog supplies host/db, not secrets). AWS Glue and Atlan are planned next (see [docs/PRD.md](docs/PRD.md) Phase 8).
 - **Ontology derivation (Phase 10):** an *optional* way to **propose** a richer target graph from the introspected schema — the engine proposes, the deterministic pipeline disposes. Two engines: an **LLM engine** (`r2g-arango[llm]`; OpenAI, Anthropic/Claude, or any OpenAI-compatible/local endpoint like Ollama, vLLM, LM Studio), and a **deterministic engine** (`r2g-arango[ontology]`) that runs the shared [`relational-schema-analyzer`](https://github.com/ArthurKeen/relational-schema-analyzer) — the introspection core originally extracted from r2g — to derive a conceptual model (semantic collection names, join-table detection, foreign-key relationships, confidence/provenance) **offline, from structure alone** (no rows, no network); add `--refine` to LLM-improve it. The LLM path is metadata-only (no row data; Phase-9 Restricted/PII columns redacted to name-only and never sampled), prompt-injection-hardened; opt-in `--sample`/`--ground` add non-sensitive example values and Phase-11 denormalization findings. Both engines' proposals are validated/repaired against the real schema so a proposal can never load a hallucinated table or column, flowing through the **same** `validate_config` → mapper-review → loader path as Auto-Map (still the default); nothing is applied without explicit confirmation. Use it from the CLI (`r2g ontology suggest --engine {llm,rsa}`) or the **Mapping Studio**: a "Suggest model (AI)" action (Actions menu / canvas right-click / `m`) opens a floating review panel — pick the engine, accept or reject each suggestion per item, then apply the selection as an editable draft to review and Save.
 - **Data validation is opt-in** -- orphaned foreign key references (FK values pointing to non-existent PKs) will produce edges to vertices that don't exist in ArangoDB. Use `validate-data` before import to catch these, but it is not enforced automatically.
@@ -590,7 +635,7 @@ r2g is a reference application (see the Status note near the top): well-tested, 
 pytest tests/ -v
 ```
 
-Over 1,000 tests (6 integration tests skipped without Docker) covering CLI commands (via typer.testing.CliRunner, including CDC and Kafka commands), types (including composite FK serialization), schema diff, config migration, data validation (referential integrity with orphan detection), topological sort (dependency ordering, circular FK detection), config validation (including self-referential FKs, duplicate edge naming, PK-less table warnings, and reserved-attribute checks), dump reader, node/edge transformers, import generators (JSONL and CSV-direct), visualizer, ArangoDB writer (retry logic, error surfacing, single-document CDC ops), the full CDC stack (models, output-plugin parsers, delta transformer, handler, conflict resolution, replication listener), Kafka parsers and consumer, the streaming pipeline (sequential, parallel, filtering, skip-existing, topological/since handling), the expression evaluator (`expressions.py`), the MySQL, SQL Server, Snowflake, and CSV connectors, FK inference (name heuristics + PostgreSQL/MySQL/SQL Server/CSV value-overlap samplers), naming conventions, mapping diff + selective reload, temporal graph mode (applier, models, queries), credential encryption (`security.py`), the Mapping Studio API (`ui/server.py`) and MCP server, plus end-to-end integration tests against live PostgreSQL / MySQL / SQL Server + ArangoDB.
+Over 1,000 tests (6 integration tests skipped without Docker) covering CLI commands (via typer.testing.CliRunner, including CDC and Kafka commands), types (including composite FK serialization), schema diff, config migration, data validation (referential integrity with orphan detection), topological sort (dependency ordering, circular FK detection), config validation (including self-referential FKs, duplicate edge naming, PK-less table warnings, and reserved-attribute checks), dump reader, node/edge transformers, import generators (JSONL and CSV-direct), visualizer, ArangoDB writer (retry logic, error surfacing, single-document CDC ops), the full CDC stack (models, output-plugin parsers, delta transformer, handler, conflict resolution, replication listener), Kafka parsers and consumer, the streaming pipeline (sequential, parallel, filtering, skip-existing, topological/since handling), the expression evaluator (`expressions.py`), the MySQL, SQL Server, Snowflake, ClickHouse, and CSV connectors, the CSI v1 and R2RML federation emitters, FK inference (name heuristics + PostgreSQL/MySQL/SQL Server/CSV value-overlap samplers), naming conventions, mapping diff + selective reload, temporal graph mode (applier, models, queries), credential encryption (`security.py`), the Mapping Studio API (`ui/server.py`) and MCP server, plus end-to-end integration tests against live PostgreSQL / MySQL / SQL Server + ArangoDB.
 
 To run unit tests only (no Docker required):
 
@@ -615,7 +660,8 @@ Phases 1 through 4 are implemented. See [`docs/PRD.md`](docs/PRD.md) for the ful
 - **Phase 5** -- Temporal graph mode: immutable-proxy time travel pattern (ProxyIn/Entity/ProxyOut), soft deletes with `created`/`expired` versioning, TTL aging, MDI-prefixed temporal indexes, point-in-time query templates, SmartGraph compatibility -- **implemented** (`r2g.temporal`, `--temporal`/`--ttl-seconds`/`--smart-field` on `cdc-start`/`kafka-start`; live-warehouse field validation pending)
 - **Phase 5f** -- Naming conventions (PascalCase collections / camelCase properties + edges / snake_case) and rename change-management for already-loaded targets: `r2g.naming`, identity-based diff in `mapping-diff`, in-place `selective-reload`, `migration-plan` / `migrate` API endpoints, reserved-attribute protection -- **implemented**
 - **Phase 6** -- Snowflake integration -- **done**. Slice 1: source-abstraction `SourceConnector` Protocol, `SnowflakeConnector` for schema introspection via `INFORMATION_SCHEMA` + `SHOW PRIMARY/IMPORTED KEYS`, Snowflake-aware type map, UI / MCP / CLI dispatching through the factory. Slice 2: pure-Python FK inference engine (`r2g.fk_inference`, `POST /api/sources/{name}/infer-fks`, **Suggest FKs** toolbar button with per-row accept, `r2g source infer-fks <name> [--sample] [--accept]` CLI) with an optional PostgreSQL value-overlap sampler. Slice 3: new `SourceSession` Protocol (`count_rows`, `stream_rows`, `dump_table_to_csv`, `close`), `PostgresSession` (`REPEATABLE READ` + server-side cursor + `COPY TO STDOUT`), `SnowflakeSession` (`BEGIN`/`COMMIT` + `fetchmany` + CSV dump). `StreamingPipeline` is now fully source-agnostic; `r2g stream --source <name>` and new `r2g source dump <name>` work identically on PostgreSQL and Snowflake; `POST /api/projects/{name}/load` dispatches through `create_source_connector`. Legacy `--pg-conn` / `r2g dump-tables --conn` flags still work via a backward-compat shim.
-- **Phase 7+** -- Additional sources (MySQL, SQL Server), LLM-driven ontology derivation, ArangoRDF, bi-directional sync -- **exploratory**
+- **Phase 12** -- Federation: forward **CSI v1** and **R2RML** emitters (`export-csi` / `export-r2rml`) so r2g mappings drive the Contextual Data Fabric federated-query engine; **ClickHouse** source connector (federation mapping + ETL); **P6.7** cross-source shared keys emitted as `conceptualModel.joinKeys` -- **shipped (producer side)**; the fabric-side E1 routing consumer is tracked separately
+- **Phase 7+** -- Additional sources, LLM-driven ontology derivation, ArangoRDF, bi-directional sync -- **exploratory**
 
 ## Contributing
 

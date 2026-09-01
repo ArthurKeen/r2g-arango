@@ -1,6 +1,6 @@
 # From Schema to Ontology: Turning Relational Data into an ArangoDB Graph with r2g
 
-*A deep dive into r2g-arango — an open-source toolkit that derives a graph **ontology** from your relational schema and projects PostgreSQL, MySQL, SQL Server, and Snowflake data onto it in ArangoDB, with a visual ontology studio, change-data-capture sync, data-governance guardrails, and an optional "LLM proposes, the pipeline disposes" ontology assistant.*
+*A deep dive into r2g-arango — an open-source toolkit that derives a graph **ontology** from your relational schema and projects PostgreSQL, MySQL, SQL Server, Snowflake, and ClickHouse data onto it in ArangoDB, with a visual ontology studio, change-data-capture sync, data-governance guardrails, an optional "LLM proposes, the pipeline disposes" ontology assistant — and a federation mode that emits CSI v1 + R2RML mappings so a query engine can answer one question across all of them without moving a byte.*
 
 > **Draft — Medium article.** Suggested read time ~9 minutes. Placeholders for images/screenshots are marked `[IMAGE: …]`.
 
@@ -113,6 +113,30 @@ It's optional — an extra you install only if you want it — and it never phon
 
 ---
 
+## 7. Federate, don't always migrate: CSI v1 + R2RML
+
+Migration is the right move when you want your data *in* ArangoDB — governed, traversable, one engine. But sometimes the data should stay where it is: the analytics rollups belong in ClickHouse, the system of record is a Postgres CRM, and the document graph already lives in ArangoDB. You still want to ask one question across all three. That's **federation**, and r2g plays a specific role in it: the **forward mapping producer**.
+
+The same mapping you'd use to migrate can instead be exported as two load-independent artifacts:
+
+- **`export-csi`** emits a **CSI v1** (Conceptual Schema Interchange) document — the conceptual model (CC-12 OWL naming: singular PascalCase entities, lowerCamel properties) paired with its ArangoDB physical mapping. It drives the fabric's Arango leg (CSI → MappingBundle → `arango-sparql-py`).
+- **`export-r2rml`** emits **R2RML** for the relational leg, so a Virtual Knowledge Graph engine (Ontop) answers SPARQL over the *live* relational database — no ETL, no copy. Both legs default to the same concept namespace, so they speak one vocabulary.
+
+The hard part of federation isn't any single source — it's the **joins across** sources. Two systems share a business key (`account_id` in a ClickHouse usage table and in the Postgres CRM's `Account`), but nothing declares they're the same thing. r2g's **cross-source shared-key inference (P6.7)** proposes those keys — by name, type compatibility, and value overlap — under the same confirm-to-accept discipline as everything else (it never invents topology), and emits the accepted ones as `conceptualModel.joinKeys`. The federated executor **bind-joins** on them, with no materialized edge.
+
+Put together, a single conceptual query fans out across **PostgreSQL (via Ontop) ⋈ ClickHouse (via a native BGP→SQL executor, because Ontop has no ClickHouse dialect) ⋈ ArangoDB (via `arango-sparql-py`)**, joins on the declared key, and comes back grounded and cited — three engines, one answer, zero data movement.
+
+```bash
+r2g export-csi   --config mapping.yaml --schema schema.json --output analytics.csi.json
+r2g export-r2rml --config mapping.yaml --schema schema.json --output analytics.r2rml.ttl
+```
+
+It's the same philosophy as the rest of r2g — deterministic first, human in the loop, nothing invented — pointed at a different destination: not a new copy of your data, but a map to the data you already have.
+
+[IMAGE: one SPARQL query fanning out to Postgres, ClickHouse, and ArangoDB, joined on accountId]
+
+---
+
 ## The philosophy tying it together
 
 Three ideas run through the whole toolkit:
@@ -137,7 +161,7 @@ r2g source snapshot shop
 r2g ui
 ```
 
-From there: Auto-Map, refine on the canvas (or ask the AI for a proposal), validate, and stream into ArangoDB. Want it continuous? Wire up CDC. Worried about PII? Bind a catalog and turn on the sensitivity gate.
+From there: Auto-Map, refine on the canvas (or ask the AI for a proposal), validate, and stream into ArangoDB. Want it continuous? Wire up CDC. Worried about PII? Bind a catalog and turn on the sensitivity gate. Want to *federate* instead of migrate? The same mapping exports to CSI v1 and R2RML (`r2g export-csi` / `r2g export-r2rml`), and — with `r2g-arango[clickhouse]` — ClickHouse joins as a first-class federated source.
 
 - **Source & docs:** the GitHub repo (`ArthurKeen/r2g-arango`)
 - **License:** Apache 2.0
