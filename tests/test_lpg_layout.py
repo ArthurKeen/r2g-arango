@@ -17,6 +17,7 @@ from r2g.lpg import (
     EDGE_OUTBOUND_INDEX,
     edge_indexes,
     graph_edge_definition,
+    traversal_index_hint,
     traversal_templates,
     uses_vertex_centric_index,
     vertex_indexes,
@@ -271,6 +272,21 @@ class TestLpgTraversalTemplates:
 
     def test_entry_point_query_uses_the_label_field(self):
         assert "@label IN n.labels" in traversal_templates(LPG)["nodes_by_label"]
+
+    def test_traversals_carry_the_nested_index_hint(self):
+        """The flat `indexHint: 'name'` form is silently ignored by traversals;
+        only the nested per-collection/direction/level shape is honoured."""
+        t = traversal_templates(LPG)
+        assert "indexHint: {edges: {outbound: {base: ['r2g_lpg_vci_outbound']}}}" in (
+            t["neighbors_by_type"]
+        )
+        assert "indexHint: {edges: {inbound: {base: ['r2g_lpg_vci_inbound']}}}" in (
+            t["inbound_by_type"]
+        )
+
+    def test_hint_follows_the_configured_collection_name(self):
+        hint = traversal_index_hint(LpgLayout(edge_collection="rel"), "outbound")
+        assert hint.startswith("OPTIONS {indexHint: {rel: {outbound:")
 
 
 class TestExplainAssertion:

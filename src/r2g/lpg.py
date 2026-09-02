@@ -17,8 +17,9 @@ edge collection costs you the two things the ``pg`` layout gets for free:
    collection could never reach them.
 
 The templates in :func:`traversal_templates` are written to *match* those
-indexes — same fields, equality-first — so the optimizer can actually use them.
-Whether it does is not a matter of belief: assert it with
+indexes — same fields, equality-first — and each carries the **nested traversal
+index hint** the optimizer requires (see :func:`traversal_index_hint`). Whether
+the index is really used is not a matter of belief: assert it with
 :func:`uses_vertex_centric_index` against a real ``explain``.
 """
 
@@ -105,6 +106,32 @@ def graph_edge_definition(lpg: LpgLayout) -> Dict[str, Any]:
     }
 
 
+def traversal_index_hint(lpg: LpgLayout, direction: str) -> str:
+    """The ``OPTIONS`` clause that points a traversal at its VCI.
+
+    A traversal will **not** pick a vertex-centric index on its own — left
+    alone it always takes the built-in ``edge`` index — and the familiar flat
+    form (``OPTIONS {indexHint: 'name'}``) is *silently ignored* here: no
+    error, no effect, even with ``forceIndexHint``. Traversals need the nested,
+    per-collection / per-direction / per-level shape, which mirrors the
+    ``{"base": [...], "levels": {...}}`` structure ``explain`` reports back::
+
+        OPTIONS {indexHint: {edges: {outbound: {base: ['r2g_lpg_vci_outbound']}}}}
+
+    Verified on ArangoDB 3.12.9: with this hint the plan names the VCI for both
+    directions, including the array-expanded label field.
+
+    The hint is deliberately **not** forced. A missing index then costs
+    performance rather than failing the query outright, and the explain-based
+    tests are what catch the degradation.
+    """
+    index = EDGE_OUTBOUND_INDEX if direction == "outbound" else EDGE_INBOUND_INDEX
+    return (
+        f"OPTIONS {{indexHint: {{{lpg.edge_collection}: "
+        f"{{{direction}: {{base: ['{index}']}}}}}}}}"
+    )
+
+
 def traversal_templates(lpg: LpgLayout) -> Dict[str, str]:
     """Named AQL templates whose filters line up with :func:`edge_indexes`.
 
@@ -140,6 +167,7 @@ def traversal_templates(lpg: LpgLayout) -> Dict[str, str]:
         "outbound_by_type": (
             f"WITH {node}\n"
             f"FOR v, e IN 1..@depth OUTBOUND @start {edge_c}\n"
+            f"  {traversal_index_hint(lpg, 'outbound')}\n"
             f"  FILTER e.{type_f} == @type\n"
             f"  FILTER @toLabel IN e.{to_l}\n"
             f"  RETURN {{vertex: v, edge: e}}"
@@ -147,6 +175,7 @@ def traversal_templates(lpg: LpgLayout) -> Dict[str, str]:
         "inbound_by_type": (
             f"WITH {node}\n"
             f"FOR v, e IN 1..@depth INBOUND @start {edge_c}\n"
+            f"  {traversal_index_hint(lpg, 'inbound')}\n"
             f"  FILTER e.{type_f} == @type\n"
             f"  FILTER @fromLabel IN e.{from_l}\n"
             f"  RETURN {{vertex: v, edge: e}}"
@@ -155,6 +184,7 @@ def traversal_templates(lpg: LpgLayout) -> Dict[str, str]:
         "neighbors_by_type": (
             f"WITH {node}\n"
             f"FOR v, e IN 1..1 OUTBOUND @start {edge_c}\n"
+            f"  {traversal_index_hint(lpg, 'outbound')}\n"
             f"  FILTER e.{type_f} == @type\n"
             f"  FILTER @toLabel IN e.{to_l}\n"
             f"  RETURN v"
@@ -189,17 +219,12 @@ def indexes_used(explain_result: Dict[str, Any]) -> List[str]:
 def uses_vertex_centric_index(explain_result: Dict[str, Any]) -> bool:
     """True when a plan engages one of the vertex-centric indexes.
 
-    **Measured limitation (ArangoDB 3.12.9).** A graph *traversal* always uses
-    the built-in ``edge`` index; it will not select a vertex-centric index, and
-    neither ``indexHint`` nor ``forceIndexHint`` overrides that. A plain
-    edge-collection query *can* use one, but only when forced — the cost model
-    otherwise rates the ``edge`` index cheaper. So this returns ``True`` for the
-    pattern-match access path, not for traversals.
-
-    The copied labels still pay for themselves in traversals for a different
-    reason: with ``type`` and the endpoint labels *on the edge*, the filter is
-    satisfied from the edge document alone (visible as ``edgeProjections`` in
-    the plan), so non-matching neighbours are never materialized.
+    Verified on ArangoDB 3.12.9: a traversal carrying the nested hint from
+    :func:`traversal_index_hint` reports the VCI in its plan, for both
+    directions and including the array-expanded label field. **Without** that
+    hint the traversal silently falls back to the built-in ``edge`` index — the
+    exact degradation this assertion exists to catch, since it changes nothing
+    about the results and everything about the cost.
     """
     return any(
         name in (EDGE_OUTBOUND_INDEX, EDGE_INBOUND_INDEX)

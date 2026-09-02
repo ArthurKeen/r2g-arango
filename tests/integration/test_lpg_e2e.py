@@ -14,6 +14,7 @@ of the vertex-centric indexes.
 from __future__ import annotations
 
 from r2g.lpg import (
+    EDGE_INBOUND_INDEX,
     EDGE_OUTBOUND_INDEX,
     VERTEX_LABEL_INDEX,
     edge_indexes,
@@ -82,14 +83,8 @@ class TestLpgLiveIndexes:
         assert vci["type"] == "persistent"
         assert vci["fields"] == ["_from", "type", "toLabels[*]"]
 
-    def test_traversal_uses_the_edge_index_not_the_vci(self, arango_test_db):
-        """Measured behaviour on 3.12.9, recorded so it is not re-assumed.
-
-        A traversal always picks the built-in ``edge`` index; `indexHint` and
-        even `forceIndexHint` do not move it. If a future ArangoDB starts
-        selecting the VCI, this test fails loudly and the layout's docs and
-        templates should be revisited — that is the point of pinning it.
-        """
+    def test_traversal_actually_uses_the_vertex_centric_index(self, arango_test_db):
+        """The load-bearing assertion for the whole layout."""
         _, db = arango_test_db
         _provision(db)
         explained = db.aql.explain(
@@ -99,6 +94,42 @@ class TestLpgLiveIndexes:
                 "type": "placedBy",
                 "toLabel": "Account",
             },
+        )
+        assert uses_vertex_centric_index(explained), (
+            f"traversal fell back to {indexes_used(explained)} — the VCI was not used"
+        )
+
+    def test_inbound_traversal_uses_its_own_vci(self, arango_test_db):
+        _, db = arango_test_db
+        _provision(db)
+        explained = db.aql.explain(
+            traversal_templates(LPG)["inbound_by_type"],
+            bind_vars={
+                "start": f"{LPG.node_collection}/Account_1",
+                "depth": 1,
+                "type": "placedBy",
+                "fromLabel": "Order",
+            },
+        )
+        assert EDGE_INBOUND_INDEX in indexes_used(explained)
+
+    def test_without_the_hint_it_silently_falls_back(self, arango_test_db):
+        """Why the hint is generated rather than left to the optimizer.
+
+        The flat ``indexHint: 'name'`` form is silently ignored by traversals —
+        no error, no effect — so an unhinted traversal degrades to the built-in
+        edge index with identical results and very different cost.
+        """
+        _, db = arango_test_db
+        _provision(db)
+        unhinted = (
+            f"WITH {LPG.node_collection}\n"
+            f"FOR v, e IN 1..1 OUTBOUND @start {LPG.edge_collection}\n"
+            f"  FILTER e.type == @type RETURN v"
+        )
+        explained = db.aql.explain(
+            unhinted,
+            bind_vars={"start": f"{LPG.node_collection}/Order_10", "type": "placedBy"},
         )
         assert indexes_used(explained) == ["edge"]
         assert not uses_vertex_centric_index(explained)
