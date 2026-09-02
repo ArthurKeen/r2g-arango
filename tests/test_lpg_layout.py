@@ -200,8 +200,17 @@ class TestLpgIndexes:
     def test_vertex_centric_indexes_lead_with_the_traversal_endpoint(self):
         out, inb = edge_indexes(LPG)
         # _from/_to must lead: that is the lookup the traversal performs.
-        assert out["fields"] == ["_from", "type", "toLabels[*]"]
-        assert inb["fields"] == ["_to", "type", "fromLabels[*]"]
+        assert out["fields"] == ["_from", "type"]
+        assert inb["fields"] == ["_to", "type"]
+
+    def test_edge_indexes_never_expand_an_array(self):
+        """An array-expansion field stores one entry per element, and a
+        traversal scans every entry under the _from/type prefix — so indexing
+        toLabels[*] returns each edge once per label on its target. The label
+        copies stay on the edge (filtering without loading the neighbour); they
+        just must not be index fields."""
+        for idx in edge_indexes(LPG):
+            assert not any("[*]" in f for f in idx["fields"]), idx["name"]
 
     def test_each_index_expands_at_most_one_array(self):
         """ArangoDB permits a single array expansion per persistent index."""
@@ -215,9 +224,9 @@ class TestLpgIndexes:
         }
 
     def test_field_names_follow_the_configured_layout(self):
-        custom = LpgLayout(type_field="rel", to_labels_field="dstLabels")
+        custom = LpgLayout(type_field="rel")
         out, _ = edge_indexes(custom)
-        assert out["fields"] == ["_from", "rel", "dstLabels[*]"]
+        assert out["fields"] == ["_from", "rel"]
 
 
 class TestLpgGraphDefinition:

@@ -58,32 +58,45 @@ def vertex_indexes(lpg: LpgLayout) -> List[Dict[str, Any]]:
 def edge_indexes(lpg: LpgLayout) -> List[Dict[str, Any]]:
     """Vertex-centric index specs for the single edge collection.
 
-    Two indexes, one per direction. Each leads with the endpoint the traversal
-    looks up by, then the edge ``type``, then the *other* end's copied labels:
+    Two indexes, one per direction, each leading with the endpoint the traversal
+    looks up by and then the edge ``type``:
 
-    - outbound: ``[_from, type, toLabels[*]]`` — "edges out of this node, of
-      this type, landing on that kind of node"
-    - inbound:  ``[_to, type, fromLabels[*]]`` — the mirror image
+    - outbound: ``[_from, type]``
+    - inbound:  ``[_to, type]``
 
-    Ordering matters. ``_from``/``_to`` must lead because that is the lookup the
-    traversal performs; ``type`` precedes the labels because it is always an
-    equality match, which keeps the label condition usable as the last field.
-    Each spec expands exactly one array — a persistent index may not expand two.
+    **The copied endpoint labels are deliberately NOT index fields.** An
+    array-expansion field stores **one index entry per element**, and a
+    traversal scans every entry under the ``_from``/``type`` prefix — so an
+    index of ``[_from, type, toLabels[*]]`` makes the traversal return each edge
+    *once per label on its target*, duplicating paths. Measured on 3.12.11 with
+    edges carrying 1/2/3/4 labels: the built-in edge index and this flat spec
+    each returned every edge once, while the array spec returned them 1/2/3/4
+    times. Adding the label filter does **not** narrow it — the label condition
+    is applied after the prefix scan — and ``uniqueEdges: 'global'`` is rejected
+    outright (ERR 10), so there is no query-side repair.
 
-    A query filtering on only ``_from`` and ``type`` still uses the outbound
-    index (a usable prefix), so the two specs cover the unlabelled cases too.
+    Dropping the array field costs nothing measurable: the flat spec is still
+    selected, still serves the pushed-down ``p.edges[*].type ALL == @type``
+    condition, and the label filter is evaluated against an edge document the
+    traversal has already loaded. The label *copies* still earn their place —
+    they let the filter run without materializing the neighbour vertex — they
+    just must not be indexed.
+
+    The array expansion remains correct on the **vertex** collection
+    (:func:`vertex_indexes`), where an equality lookup matches one entry per
+    document and the access path is an ``IndexNode`` rather than a traversal.
     """
     return [
         {
             "type": "persistent",
-            "fields": ["_from", lpg.type_field, f"{lpg.to_labels_field}[*]"],
+            "fields": ["_from", lpg.type_field],
             "name": EDGE_OUTBOUND_INDEX,
             "sparse": False,
             "unique": False,
         },
         {
             "type": "persistent",
-            "fields": ["_to", lpg.type_field, f"{lpg.from_labels_field}[*]"],
+            "fields": ["_to", lpg.type_field],
             "name": EDGE_INBOUND_INDEX,
             "sparse": False,
             "unique": False,
@@ -161,6 +174,42 @@ def label_predicate(field: str, *, mode: str = "has", bind: str = "label") -> st
     if mode == "has":
         return f"@{bind} IN {field}"
     return f"@{bind} {mode.upper()} IN {field}"
+
+
+def all_hops_label_predicate(
+    labels_field: str, *, bind: str = "label", path: str = "p.edges"
+) -> str:
+    """"Every hop carries this label" — the one form that is correct *and* pushed.
+
+    Expressed by inverting: select the hops that **lack** the label with an
+    inline ``FILTER``, then assert that set is empty.
+
+    ::
+
+        p.edges[* FILTER @label NOT IN CURRENT.toLabels]._key NONE != null
+
+    Two details are load-bearing and both were measured, not assumed:
+
+    - **It must be the negated ``NONE`` shape, not the positive ``ALL`` one.**
+      An inline ``FILTER`` *restricts the scope* of the comparison, so
+      ``p.edges[* FILTER @l IN CURRENT.toLabels]._key ALL != null`` asks "of the
+      hops that have the label, do all of them have a key" — vacuously true.
+      On a path where **no** hop carries the label the selected set is empty and
+      ``[] ALL != null`` is ``true``, so the path is accepted. Verified: that
+      form returns the paths it should reject.
+    - **The projection must be an attribute that always exists** (``_key``).
+      Projecting the label array instead — ``… .toLabels NONE == null`` — is
+      also wrong, because a violating edge's array is not *null*, it merely
+      lacks the label, so the test is trivially satisfied.
+
+    Version behaviour (measured): on **3.12.11+** the optimizer moves this into
+    the traversal, leaving no ``FilterNode`` — an inline ``FILTER`` qualifies for
+    pushdown only with ``ALL``/``NONE``, without an inline ``LIMIT`` or
+    ``RETURN``, and without referencing the path variable. On **3.12.9** the
+    same query is correct but post-filtered. So the form is safe to emit
+    against either: it gets faster on newer servers rather than changing answer.
+    """
+    return f"{path}[* FILTER @{bind} NOT IN CURRENT.{labels_field}]._key NONE != null"
 
 
 def traversal_index_hint(lpg: LpgLayout, direction: str) -> str:
@@ -257,6 +306,18 @@ def traversal_templates(lpg: LpgLayout) -> Dict[str, str]:
             f"  FILTER e.{type_f} == @type\n"
             f"  FILTER @toLabel IN e.{to_l}\n"
             f"  RETURN v"
+        ),
+        # "Every hop of this type landed on an X" — distinct from
+        # outbound_by_type, which asks only that the FINAL vertex is an X.
+        # Uses the inverted inline-FILTER form (see all_hops_label_predicate);
+        # correct on any 3.12, and pushed into the traverser from 3.12.11.
+        "outbound_all_hops_labelled": (
+            f"WITH {node}\n"
+            f"FOR v, e, p IN 1..@depth OUTBOUND @start {edge_c}\n"
+            f"  {traversal_index_hint(lpg, 'outbound')}\n"
+            f"  FILTER p.edges[*].{type_f} ALL == @type\n"
+            f"  FILTER {all_hops_label_predicate(to_l, bind='toLabel')}\n"
+            f"  RETURN {{vertex: v, edge: e}}"
         ),
         # The inbound mirror, so the [_to, type, fromLabels[*]] index has a
         # single-hop template that actually exercises its label field.

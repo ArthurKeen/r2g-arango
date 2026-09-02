@@ -246,7 +246,10 @@ class TestLpgLiveIndexes:
         assert EDGE_OUTBOUND_INDEX in by_name
         vci = by_name[EDGE_OUTBOUND_INDEX]
         assert vci["type"] == "persistent"
-        assert vci["fields"] == ["_from", "type", "toLabels[*]"]
+        # No array expansion: indexing toLabels[*] makes a traversal return
+        # each edge once per label on its target (see
+        # TestLpgNoDuplicationFromLabelArrays).
+        assert vci["fields"] == ["_from", "type"]
 
     def test_traversal_actually_uses_the_vertex_centric_index(self, arango_test_db):
         """The load-bearing assertion for the whole layout."""
@@ -616,7 +619,7 @@ class TestLpgMultiLabel:
             f"  {traversal_index_hint(LPG, 'outbound')}\n"
             f"  FILTER e.type == @type\n"
             f"  FILTER {predicate}\n"
-            f"  RETURN DISTINCT v._key"
+            f"  RETURN v._key"
         )
         bind_vars = {"start": f"{LPG.node_collection}/O_1", "type": "placedBy", **bind}
         return sorted(db.aql.execute(q, bind_vars=bind_vars)), db.aql.explain(q, bind_vars=bind_vars)
@@ -625,7 +628,7 @@ class TestLpgMultiLabel:
         _, db = arango_test_db
         self._seed(db)
         rows, ex = self._traverse(db, label_predicate("e.toLabels"), {"label": "Account"})
-        assert rows == ["A_1", "A_2"]           # A_1 has 3 labels, A_2 has 1
+        assert rows == ["A_1", "A_2"]  # exactly once each: A_1 has 3 labels
         assert uses_vertex_centric_index(ex)     # still index-served
 
     def test_a_label_unique_to_the_multi_label_node(self, arango_test_db):
@@ -772,3 +775,80 @@ class TestLpgMultiHopSemantics:
             f"  FILTER e.type == @type FILTER @toLabel IN e.toLabels RETURN v._key"
         )
         assert sorted(db.aql.execute(leaky, bind_vars=self._bind())) == ["A_1", "A_2"]
+
+
+@requires_arango
+class TestLpgNoDuplicationFromLabelArrays:
+    """An array-expansion field in a vertex-centric index duplicates traversals.
+
+    A persistent index stores one entry per array element, and a traversal scans
+    every entry under the `_from`/`type` prefix — so indexing `toLabels[*]` makes
+    each edge come back once per label on its target. The multiplier is the
+    label count, which is exactly what multi-label support introduces, and the
+    symptom is inflated counts rather than an error. `RETURN DISTINCT` hides it,
+    which is why these assertions count occurrences instead.
+    """
+
+    def _seed(self, db):
+        nodes = db.create_collection(LPG.node_collection)
+        edges = db.create_collection(LPG.edge_collection, edge=True)
+        for spec in vertex_indexes(LPG):
+            nodes.add_index(spec)
+        for spec in edge_indexes(LPG):
+            edges.add_index(spec)
+        nodes.insert_many([
+            {"_key": "O_1", "labels": ["Order"]},
+            {"_key": "L_1", "labels": ["A"]},
+            {"_key": "L_2", "labels": ["A", "B"]},
+            {"_key": "L_3", "labels": ["A", "B", "C"]},
+        ])
+        edges.insert_many([
+            {"_from": "nodes/O_1", "_to": "nodes/L_1", "type": "t",
+             "fromLabels": ["Order"], "toLabels": ["A"]},
+            {"_from": "nodes/O_1", "_to": "nodes/L_2", "type": "t",
+             "fromLabels": ["Order"], "toLabels": ["A", "B"]},
+            {"_from": "nodes/O_1", "_to": "nodes/L_3", "type": "t",
+             "fromLabels": ["Order"], "toLabels": ["A", "B", "C"]},
+        ])
+
+    def _counts(self, db, hinted):
+        hint = traversal_index_hint(LPG, "outbound") if hinted else ""
+        q = (
+            f"WITH {LPG.node_collection}\n"
+            f"FOR v, e IN 1..1 OUTBOUND @start {LPG.edge_collection} {hint}\n"
+            f"  FILTER e.type == @type\n  RETURN v._key"
+        )
+        rows = list(db.aql.execute(
+            q, bind_vars={"start": f"{LPG.node_collection}/O_1", "type": "t"}))
+        return {k: rows.count(k) for k in set(rows)}
+
+    def test_every_edge_is_traversed_exactly_once(self, arango_test_db):
+        """Targets carry 1, 2 and 3 labels; each must appear exactly once."""
+        _, db = arango_test_db
+        self._seed(db)
+        assert self._counts(db, hinted=True) == {"L_1": 1, "L_2": 1, "L_3": 1}
+
+    def test_holds_without_the_index_hint_too(self, arango_test_db):
+        _, db = arango_test_db
+        self._seed(db)
+        assert self._counts(db, hinted=False) == {"L_1": 1, "L_2": 1, "L_3": 1}
+
+    def test_the_edge_indexes_do_not_expand_an_array(self, arango_test_db):
+        """The structural guard: no edge index may carry a `[*]` field, since
+        that is what reintroduces the multiplier."""
+        _, db = arango_test_db
+        self._seed(db)
+        for idx in db.collection(LPG.edge_collection).indexes():
+            assert not any("[*]" in f for f in idx.get("fields", [])), idx.get("name")
+
+    def test_vertex_label_index_still_expands_and_does_not_duplicate(self, arango_test_db):
+        """The array expansion is fine on the vertex collection: an equality
+        lookup matches one entry per document, via an IndexNode not a traversal."""
+        _, db = arango_test_db
+        self._seed(db)
+        rows = list(db.aql.execute(
+            traversal_templates(LPG)["nodes_by_label"],
+            bind_vars={"label": "A", "limit": 10}))
+        keys = [d["_key"] for d in rows]
+        assert sorted(keys) == ["L_1", "L_2", "L_3"]
+        assert len(keys) == len(set(keys))
