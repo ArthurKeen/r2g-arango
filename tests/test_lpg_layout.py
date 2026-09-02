@@ -17,6 +17,7 @@ import pytest
 
 from r2g.config import ConfigManager
 from r2g.connectors.arango_writer import ArangoWriter
+from r2g.csi import mapping_to_csi, validate_csi
 from r2g.lpg import (
     EDGE_INBOUND_INDEX,
     EDGE_OUTBOUND_INDEX,
@@ -433,6 +434,13 @@ class TestLpgPipelineRouting:
         assert keys == {"Account_1", "Order_10"}
         assert {tuple(d["labels"]) for d in docs} == {("Account",), ("Order",)}
 
+    def test_csi_describes_the_layout_it_produced(self, writer):
+        """P13.7 — see TestLpgCsiExport; here only that routing and export agree."""
+        _run("lpg", writer)
+        _, config, _ = _two_table_setup("lpg")
+        doc = mapping_to_csi(config, Schema(tables={"accounts": _accounts()}))
+        assert doc["arangoPhysicalMapping"]["entities"]["Account"]["collectionName"] == "nodes"
+
     def test_edges_carry_type_and_endpoint_labels(self, writer):
         _run("lpg", writer)
         edges = [
@@ -446,3 +454,70 @@ class TestLpgPipelineRouting:
         assert e["type"] == "placedBy"
         assert e["fromLabels"] == ["Order"] and e["toLabels"] == ["Account"]
         assert e["_from"] == "nodes/Order_10" and e["_to"] == "nodes/Account_1"
+
+
+# ── layout-aware CSI export (P13.7) ──────────────────────────────────
+
+
+class TestLpgCsiExport:
+    """The emitted CSI must describe the physical shape actually produced.
+
+    Emitting the pg styles for an LPG target names collections that do not
+    exist: a consumer resolves `Account` to a collection called `Account`,
+    finds nothing, and fails far from the cause.
+    """
+
+    def _schema(self):
+        return Schema(tables={"accounts": _accounts(), "orders": _orders()})
+
+    def _doc(self, layout, target="Account"):
+        config = MappingConfig(source_schema="public", graph_layout=layout)
+        config.collections = {
+            "accounts": CollectionMapping(source_table="accounts", target_collection=target),
+            "orders": CollectionMapping(source_table="orders", target_collection="Order"),
+        }
+        config.edges = [
+            EdgeDefinition(
+                edge_collection="placedBy",
+                from_collection="orders",
+                to_collection="accounts",
+                from_fields=["account_id"],
+                to_fields=["id"],
+            )
+        ]
+        return mapping_to_csi(config, self._schema())
+
+    def test_pg_layout_is_unchanged(self):
+        pm = self._doc("pg")["arangoPhysicalMapping"]
+        assert pm["entities"]["Account"]["style"] == "COLLECTION"
+        assert pm["entities"]["Account"]["collectionName"] == "Account"
+        assert pm["relationships"]["placedBy"]["style"] == "DEDICATED_COLLECTION"
+        assert "typeField" not in pm["entities"]["Account"]
+
+    def test_lpg_entities_use_label_style_with_a_carrier(self):
+        e = self._doc("lpg")["arangoPhysicalMapping"]["entities"]["Account"]
+        assert e["style"] == "LABEL"
+        assert e["collectionName"] == "nodes"
+        assert e["typeField"] == "labels"
+        assert e["typeValue"] == "Account"
+
+    def test_lpg_relationships_use_generic_with_type(self):
+        r = self._doc("lpg")["arangoPhysicalMapping"]["relationships"]["placedBy"]
+        assert r["style"] == "GENERIC_WITH_TYPE"
+        assert r["edgeCollectionName"] == "edges"
+        assert r["typeField"] == "type"
+        assert r["typeValue"] == "placedBy"
+        # The CSI schema forbids collectionName on a relationship.
+        assert "collectionName" not in r
+
+    def test_type_value_is_the_stored_label_not_the_conceptual_name(self):
+        """These diverge under a naming convention (`accounts` -> `Account`);
+        the physical mapping must describe what the loader actually wrote."""
+        doc = self._doc("lpg", target="accounts")
+        entity = doc["conceptualModel"]["entities"][0]["name"]
+        assert entity == "Account"  # conceptual, singular PascalCase
+        assert doc["arangoPhysicalMapping"]["entities"]["Account"]["typeValue"] == "accounts"
+
+    def test_both_layouts_validate_against_the_csi_schema(self):
+        for layout in ("pg", "lpg"):
+            validate_csi(self._doc(layout))

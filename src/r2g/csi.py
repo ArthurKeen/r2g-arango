@@ -35,12 +35,20 @@ from .types import (
 CSI_VERSION = "1"
 PRODUCER = "r2g"
 
-# ArangoDB physical styles r2g emits. r2g always maps a table to its own
-# document collection and an edge to its own dedicated edge collection, so the
-# forward direction only ever produces these two styles (the LABEL /
-# GENERIC_WITH_TYPE styles are reverse-direction detections).
+# ArangoDB physical styles r2g emits, one pair per target layout (P13).
+#
+# ``pg`` — a table becomes its own document collection and an edge its own
+# dedicated edge collection, so the type *is* the collection.
 _ENTITY_STYLE = "COLLECTION"
 _RELATIONSHIP_STYLE = "DEDICATED_COLLECTION"
+# ``lpg`` — every type shares one collection and the type moves into a field,
+# so the mapping has to name the carrier (``typeField``) and this entity's or
+# relationship's value in it (``typeValue``) as well as the collection. Emitting
+# the pg pair for an LPG target would describe collections that do not exist:
+# a consumer would resolve ``Account`` to a collection named ``Account``, find
+# nothing, and fail far from the cause.
+_ENTITY_STYLE_LPG = "LABEL"
+_RELATIONSHIP_STYLE_LPG = "GENERIC_WITH_TYPE"
 
 
 def owl_entity_name(name: str) -> str:
@@ -467,6 +475,10 @@ def mapping_to_csi(
         from . import __version__ as producer_version  # local import: avoid cycle
 
     tables = schema.tables if schema is not None else {}
+    # The physical layout this mapping targets (P13). When set, entities and
+    # relationships are described by LABEL / GENERIC_WITH_TYPE rather than by a
+    # collection per type — see the style constants above.
+    lpg = config.lpg if config.graph_layout == "lpg" else None
 
     # --- Conceptual + physical entities: one per document collection. ---
     conceptual_entities: List[Dict[str, Any]] = []
@@ -493,13 +505,25 @@ def mapping_to_csi(
                 "properties": [{"name": owl_property_name(p)} for p in prop_names],
             }
         )
-        physical_entities[name] = {
+        entity_physical: Dict[str, Any] = {
             "style": _ENTITY_STYLE,
             "collectionName": cm.target_collection,
             # Conceptual property → stored field, so the AQL/SQL legs resolve
             # OWL-style names back to physical attributes (CC-12).
             "properties": {owl_property_name(p): {"field": p} for p in prop_names},
         }
+        if lpg is not None:
+            # The label the loader actually writes is the *physical* target
+            # collection name, not the conceptual entity name — those diverge
+            # under a naming convention (`accounts` → `Account`), and this
+            # mapping must describe what is stored.
+            entity_physical.update(
+                style=_ENTITY_STYLE_LPG,
+                collectionName=lpg.node_collection,
+                typeField=lpg.label_field,
+                typeValue=cm.target_collection,
+            )
+        physical_entities[name] = entity_physical
 
     # Source-table → collection, needed both for the join-key label set here and
     # the join-key bindings emitted further below.
@@ -553,10 +577,18 @@ def mapping_to_csi(
         )
         # NB: relationships must NOT carry ``collectionName`` (CSI schema
         # forbids it) — only ``edgeCollectionName``.
-        physical_relationships[rel_type] = {
+        rel_physical: Dict[str, Any] = {
             "style": _RELATIONSHIP_STYLE,
             "edgeCollectionName": edge.edge_collection,
         }
+        if lpg is not None:
+            rel_physical.update(
+                style=_RELATIONSHIP_STYLE_LPG,
+                edgeCollectionName=lpg.edge_collection,
+                typeField=lpg.type_field,
+                typeValue=edge.edge_collection,
+            )
+        physical_relationships[rel_type] = rel_physical
 
     # --- Declared cross-source join keys (PRD P6.7). ---
     # These are NOT relationships: a project maps one source, so a key shared

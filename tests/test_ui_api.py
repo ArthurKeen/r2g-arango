@@ -4,7 +4,7 @@ import pytest
 
 from r2g.catalog import CatalogManager
 from r2g.config import ConfigManager
-from r2g.types import Column, MappingConfig, Schema, Table
+from r2g.types import Column, LpgLayout, MappingConfig, Schema, Table
 from r2g.ui.server import create_app
 
 
@@ -1359,3 +1359,57 @@ class TestSuggestOntologyApi:
         )
         assert resp.status_code == 400
         assert "Unsupported LLM provider" in resp.text
+
+
+class TestGraphModelSelection:
+    """P13: the Studio must be able to target PG or LPG, and the choice must
+    survive the round trip — the layout decides how every document is written,
+    so a setting that silently reverts would load the wrong shape."""
+
+    def _project(self, client, tmp_path, name="gm_proj"):
+        client.post("/api/sources", json={
+            "name": "src", "source_type": "postgresql",
+            "connection_string": "postgresql://u:p@localhost/db",
+        })
+        ConfigManager.save_config(MappingConfig(), str(tmp_path / "mapping.yaml"))
+        client.post("/api/projects", json={
+            "name": name, "source_name": "src",
+            "mapping_config_path": str(tmp_path / "mapping.yaml"),
+        })
+        return name
+
+    def test_lpg_selection_round_trips(self, client, tmp_path):
+        name = self._project(client, tmp_path)
+        payload = MappingConfig(source_schema="public", graph_layout="lpg").model_dump()
+        assert client.put(f"/api/projects/{name}/mapping", json=payload).status_code == 200
+        back = client.get(f"/api/projects/{name}/mapping").json()
+        assert back["graph_layout"] == "lpg"
+        assert back["lpg"]["node_collection"] == "nodes"
+        assert back["lpg"]["edge_collection"] == "edges"
+
+    def test_custom_collection_names_round_trip(self, client, tmp_path):
+        name = self._project(client, tmp_path, "gm_custom")
+        cfg = MappingConfig(
+            source_schema="public",
+            graph_layout="lpg",
+            lpg=LpgLayout(node_collection="v", edge_collection="e"),
+        )
+        client.put(f"/api/projects/{name}/mapping", json=cfg.model_dump())
+        back = client.get(f"/api/projects/{name}/mapping").json()
+        assert (back["lpg"]["node_collection"], back["lpg"]["edge_collection"]) == ("v", "e")
+
+    def test_pg_default_is_not_persisted(self, client, tmp_path):
+        """A project that never touched the setting keeps its historical shape."""
+        name = self._project(client, tmp_path, "gm_pg")
+        client.put(f"/api/projects/{name}/mapping", json=MappingConfig().model_dump())
+        back = client.get(f"/api/projects/{name}/mapping").json()
+        assert "graph_layout" not in back or back["graph_layout"] == "pg"
+
+    def test_switching_back_to_pg_clears_the_layout(self, client, tmp_path):
+        name = self._project(client, tmp_path, "gm_switch")
+        client.put(f"/api/projects/{name}/mapping",
+                   json=MappingConfig(graph_layout="lpg").model_dump())
+        assert client.get(f"/api/projects/{name}/mapping").json()["graph_layout"] == "lpg"
+        client.put(f"/api/projects/{name}/mapping", json=MappingConfig().model_dump())
+        back = client.get(f"/api/projects/{name}/mapping").json()
+        assert back.get("graph_layout", "pg") == "pg"

@@ -1050,6 +1050,7 @@
     </button>
     <span class="toolbar-status">
       <span class="lens-chip" id="lens-chip" role="button" tabindex="0" aria-label="Active graph lens; click to cycle" data-hint="Active graph lens. Click to cycle Topology &rarr; Coverage &rarr; Validation &rarr; Diff &rarr; Sensitivity. Lenses only recolor the graph (no relayout). Also: right-click canvas &rarr; View as, or press 1-5.">Topology</span>
+      <span class="lens-chip" id="graph-model-chip" role="button" tabindex="0" aria-label="Target graph model; click to change" data-hint="Target graph model. PG = a collection per node type and per edge type. LPG = one node collection with a labels array and one edge collection with a type property. Click to change.">PG</span>
       <span class="lens-chip" id="dirty-chip" style="display:none;color:var(--yellow);border-color:var(--yellow);cursor:default" data-hint="You have unsaved mapping changes. Press Cmd/Ctrl+S or use Save to persist them.">Unsaved</span>
     </span>
   </div>
@@ -4132,6 +4133,14 @@ function buildMappingPayload() {
     key_separator: editState.keySeparator || '_',
   };
 
+  // Target graph model (P13). Sent only when the project opted into LPG, so a
+  // mapping that never touched the setting keeps its historical on-disk shape
+  // (the server omits the default on write too).
+  if (editState.graphLayout === 'lpg') {
+    payload.graph_layout = 'lpg';
+    if (editState.lpg) payload.lpg = editState.lpg;
+  }
+
   // Accepted cross-source join keys (P6.7). Omitted when empty so mappings
   // that never used the feature keep their historical on-disk shape.
   const sharedKeys = (editState.sharedKeys || []).map(sk => ({
@@ -4486,6 +4495,12 @@ function applyConfigToEditState(config) {
   editState.typeOverrides = config.type_overrides || config.typeOverrides || {};
   editState.keySeparator = config.key_separator || config.keySeparator || '_';
   editState.sourceSchema = config.source_schema || config.sourceSchema || 'public';
+  // Target graph model (P13). 'pg' = a collection per node/edge type;
+  // 'lpg' = one node collection with a labels array + one edge collection
+  // with a type property. Absent in every mapping written before P13.
+  editState.graphLayout = config.graph_layout || config.graphLayout || 'pg';
+  editState.lpg = config.lpg || null;
+  renderGraphModelChip();
 }
 
 async function autoMap() {
@@ -4500,6 +4515,107 @@ async function autoMap() {
   } catch (e) {
     toast('Auto-map failed: ' + e.message, 'error');
   }
+}
+
+// ── Target graph model (P13: pg vs lpg) ──
+
+function openGraphModelForm() {
+  if (!currentProject) { toast('Open a project first', 'info'); return; }
+  const cur = editState.graphLayout || 'pg';
+  const lpg = editState.lpg || {};
+  const opt = (v, title, desc) => `
+    <label style="display:flex;gap:8px;align-items:flex-start;margin-bottom:10px;cursor:pointer">
+      <input type="radio" name="gm-layout" value="${v}"${v === cur ? ' checked' : ''} style="margin-top:3px">
+      <span>
+        <strong>${title}</strong><br>
+        <span style="color:var(--text-muted);font-size:11px">${desc}</span>
+      </span>
+    </label>`;
+  openFloatingCard({
+    id: 'graph-model',
+    title: 'Target graph model',
+    body: `
+      <p style="color:var(--text-muted);margin:0 0 10px;font-size:12px">
+        How types are represented in ArangoDB. Changes the load layout &#x2014;
+        review, then Save to persist.
+      </p>
+      ${opt('pg', 'Property graph (PG)',
+            'A collection per node type and per edge type. Per-type indexes, sharding and permissions; traversals scoped by the edge collection. Default.')}
+      ${opt('lpg', 'Labeled property graph (LPG)',
+            'One node collection with a <code>labels</code> array and one edge collection with a <code>type</code> property. Multi-label nodes; types can change without adding collections.')}
+      <div id="gm-lpg-opts" style="margin:10px 0 0;padding-left:22px;display:${cur === 'lpg' ? '' : 'none'}">
+        <label style="display:block;margin-bottom:6px;font-size:12px">Node collection
+          <input class="prop-input" id="gm-node-coll" value="${escHtml(lpg.node_collection || 'nodes')}">
+        </label>
+        <label style="display:block;margin-bottom:6px;font-size:12px">Edge collection
+          <input class="prop-input" id="gm-edge-coll" value="${escHtml(lpg.edge_collection || 'edges')}">
+        </label>
+        <p style="color:var(--text-muted);font-size:11px;margin:6px 0 0">
+          Edges also store their endpoints' labels, so vertex-centric indexes can
+          filter a traversal by type and neighbour label from the index.
+        </p>
+      </div>
+      <div id="gm-warn" style="margin-top:10px;color:var(--amber,#b7791f);font-size:11px;display:none">
+        <strong>Switching model changes how data is written.</strong>
+        Re-load the target (or drop collections) so the graph is not left half in
+        each layout &#x2014; the two use different collections and key schemes.
+      </div>
+      <div id="gm-error" style="color:var(--red);font-size:12px;display:none"></div>
+    `,
+    actions: [
+      { label: 'Apply', kind: 'primary', onClick: applyGraphModel },
+      { label: 'Cancel', onClick: () => closeFloatingCard('graph-model') },
+    ],
+    position: { right: 20, top: 80 },
+  });
+  // Reveal the LPG collection names and the re-load warning on change.
+  document.querySelectorAll('input[name="gm-layout"]').forEach(r => {
+    r.addEventListener('change', () => {
+      const isLpg = document.querySelector('input[name="gm-layout"]:checked').value === 'lpg';
+      document.getElementById('gm-lpg-opts').style.display = isLpg ? '' : 'none';
+      const warn = document.getElementById('gm-warn');
+      const picked = document.querySelector('input[name="gm-layout"]:checked').value;
+      warn.style.display = picked !== cur ? '' : 'none';
+    });
+  });
+}
+
+function applyGraphModel() {
+  const picked = document.querySelector('input[name="gm-layout"]:checked');
+  if (!picked) return;
+  const layout = picked.value;
+  if (layout === 'lpg') {
+    const node = (document.getElementById('gm-node-coll').value || '').trim() || 'nodes';
+    const edge = (document.getElementById('gm-edge-coll').value || '').trim() || 'edges';
+    if (node === edge) {
+      const errEl = document.getElementById('gm-error');
+      errEl.textContent = 'Node and edge collections must differ.';
+      errEl.style.display = '';
+      return;
+    }
+    editState.graphLayout = 'lpg';
+    editState.lpg = Object.assign({}, editState.lpg || {}, {
+      node_collection: node, edge_collection: edge,
+    });
+  } else {
+    editState.graphLayout = 'pg';
+    editState.lpg = null;
+  }
+  closeFloatingCard('graph-model');
+  renderGraphModelChip();
+  markDirty();
+  toast(`Target model: ${layout === 'lpg' ? 'LPG' : 'PG'} — review and Save`, 'success');
+}
+
+function renderGraphModelChip() {
+  const el = document.getElementById('graph-model-chip');
+  if (!el) return;
+  const isLpg = (editState.graphLayout || 'pg') === 'lpg';
+  el.textContent = isLpg ? 'LPG' : 'PG';
+  el.title = isLpg
+    ? 'Labeled property graph: one node collection (labels) + one edge collection (type)'
+    : 'Property graph: a collection per node type and per edge type';
+  el.classList.toggle('active-lens', isLpg);
 }
 
 // ── Naming conventions ──
@@ -5991,6 +6107,8 @@ function _menuCanvas() {
   return [
     { label: 'Auto-map all', icon: '\u2728', shortcut: 'a', onClick: autoMap,
       hint: 'Generate default mappings for every source table using column-name and primary-key heuristics. Existing manual edits are preserved.' },
+    { label: 'Target graph model\u2026', icon: '\u25c7', onClick: openGraphModelForm,
+      hint: 'Choose how types are represented in ArangoDB: PG (a collection per node and edge type) or LPG (one node collection with a labels array, one edge collection with a type property, with vertex-centric indexes).' },
     { label: 'Apply naming convention\u2026', icon: 'Aa', onClick: openNamingConventionForm,
       hint: 'Re-case all generated names at once (e.g. PascalCase collections, camelCase properties and edges). Manual renames and system attributes are left untouched.' },
     { label: 'Suggest foreign keys\u2026', icon: '\u2699', shortcut: 'i', onClick: () => suggestFks(),
@@ -7408,6 +7526,14 @@ function cycleLens() {
 document.getElementById('lens-chip').addEventListener('click', cycleLens);
 document.getElementById('lens-chip').addEventListener('keydown', e => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); cycleLens(); }
+});
+
+// The target graph model is always visible, and the chip is the shortest path
+// to changing it — the layout decides how every document is written, so it
+// should not be buried in a menu alone.
+document.getElementById('graph-model-chip').addEventListener('click', openGraphModelForm);
+document.getElementById('graph-model-chip').addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openGraphModelForm(); }
 });
 
 // Start a load and report progress via a floating card.
