@@ -20,7 +20,9 @@ import pytest
 from r2g.connectors.arango_writer import ArangoWriter
 from r2g.lpg import (
     EDGE_INBOUND_INDEX,
+    EDGE_INBOUND_LABEL_INDEX,
     EDGE_OUTBOUND_INDEX,
+    EDGE_OUTBOUND_LABEL_INDEX,
     VERTEX_LABEL_INDEX,
     edge_indexes,
     graph_edge_definition,
@@ -852,3 +854,56 @@ class TestLpgNoDuplicationFromLabelArrays:
         keys = [d["_key"] for d in rows]
         assert sorted(keys) == ["L_1", "L_2", "L_3"]
         assert len(keys) == len(set(keys))
+
+
+@requires_arango
+class TestOptInLabelIndexLive:
+    """`index_edge_labels` provisions an index that helps pattern-match queries
+    and would duplicate traversals — so the point of these tests is that having
+    BOTH indexes present is safe: each access path takes the right one."""
+
+    LPG_OPT = LpgLayout(index_edge_labels=True)
+
+    def _seed(self, db):
+        nodes = db.create_collection(self.LPG_OPT.node_collection)
+        edges = db.create_collection(self.LPG_OPT.edge_collection, edge=True)
+        for spec in vertex_indexes(self.LPG_OPT):
+            nodes.add_index(spec)
+        for spec in edge_indexes(self.LPG_OPT):
+            edges.add_index(spec)
+        nodes.insert_many([{"_key": k, "labels": ["X"]} for k in ("O", "L1", "L2", "L3")])
+        edges.insert_many([
+            {"_from": "nodes/O", "_to": "nodes/L1", "type": "t", "toLabels": ["A"]},
+            {"_from": "nodes/O", "_to": "nodes/L2", "type": "t", "toLabels": ["A", "B"]},
+            {"_from": "nodes/O", "_to": "nodes/L3", "type": "t", "toLabels": ["A", "B", "C"]},
+        ])
+        return edges
+
+    def test_all_four_edge_indexes_are_provisioned(self, arango_test_db):
+        _, db = arango_test_db
+        edges = self._seed(db)
+        names = {i.get("name") for i in edges.indexes()}
+        assert {EDGE_OUTBOUND_INDEX, EDGE_INBOUND_INDEX,
+                EDGE_OUTBOUND_LABEL_INDEX, EDGE_INBOUND_LABEL_INDEX} <= names
+
+    def test_traversal_still_takes_the_flat_index_and_does_not_duplicate(self, arango_test_db):
+        """The safety property: the explicit hint pins the traversal to the flat
+        index, so opting in cannot silently inflate traversal counts."""
+        _, db = arango_test_db
+        self._seed(db)
+        q = traversal_templates(self.LPG_OPT)["neighbors_by_type"]
+        bind = {"start": "nodes/O", "type": "t", "toLabel": "A"}
+        assert EDGE_OUTBOUND_INDEX in indexes_used(db.aql.explain(q, bind_vars=bind))
+        keys = [r["_key"] for r in db.aql.execute(q, bind_vars=bind)]
+        assert sorted(keys) == ["L1", "L2", "L3"]   # once each, despite 1/2/3 labels
+
+    def test_pattern_match_query_takes_the_label_index(self, arango_test_db):
+        """What the opt-in is for: a label-filtered edge lookup, index-served."""
+        _, db = arango_test_db
+        self._seed(db)
+        q = ("FOR e IN edges FILTER e._from == @s AND e.type == @t "
+             "AND @l IN e.toLabels RETURN e._to")
+        bind = {"s": "nodes/O", "t": "t", "l": "A"}
+        assert EDGE_OUTBOUND_LABEL_INDEX in indexes_used(db.aql.explain(q, bind_vars=bind))
+        rows = list(db.aql.execute(q, bind_vars=bind))
+        assert len(rows) == len(set(rows)) == 3

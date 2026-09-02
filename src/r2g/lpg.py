@@ -34,6 +34,10 @@ from r2g.types import LpgLayout
 VERTEX_LABEL_INDEX = "r2g_lpg_node_labels"
 EDGE_OUTBOUND_INDEX = "r2g_lpg_vci_outbound"
 EDGE_INBOUND_INDEX = "r2g_lpg_vci_inbound"
+#: Opt-in label-indexed edge specs — pattern-match access only. See
+#: :attr:`~r2g.types.LpgLayout.index_edge_labels`; these duplicate traversals.
+EDGE_OUTBOUND_LABEL_INDEX = "r2g_lpg_vci_outbound_labels"
+EDGE_INBOUND_LABEL_INDEX = "r2g_lpg_vci_inbound_labels"
 
 
 def vertex_indexes(lpg: LpgLayout) -> List[Dict[str, Any]]:
@@ -86,7 +90,7 @@ def edge_indexes(lpg: LpgLayout) -> List[Dict[str, Any]]:
     (:func:`vertex_indexes`), where an equality lookup matches one entry per
     document and the access path is an ``IndexNode`` rather than a traversal.
     """
-    return [
+    specs = [
         {
             "type": "persistent",
             "fields": ["_from", lpg.type_field],
@@ -102,6 +106,29 @@ def edge_indexes(lpg: LpgLayout) -> List[Dict[str, Any]]:
             "unique": False,
         },
     ]
+    if lpg.index_edge_labels:
+        # Opt-in only (see LpgLayout.index_edge_labels). Useful for the
+        # *pattern-match* access path, where an equality on the array field
+        # seeks one entry per document; harmful in traversals, which scan every
+        # entry under the prefix. Named distinctly so the flat traversal
+        # indexes above stay identifiable in getIndexes() output.
+        specs += [
+            {
+                "type": "persistent",
+                "fields": ["_from", lpg.type_field, f"{lpg.to_labels_field}[*]"],
+                "name": EDGE_OUTBOUND_LABEL_INDEX,
+                "sparse": False,
+                "unique": False,
+            },
+            {
+                "type": "persistent",
+                "fields": ["_to", lpg.type_field, f"{lpg.from_labels_field}[*]"],
+                "name": EDGE_INBOUND_LABEL_INDEX,
+                "sparse": False,
+                "unique": False,
+            },
+        ]
+    return specs
 
 
 def graph_edge_definition(lpg: LpgLayout) -> Dict[str, Any]:

@@ -328,6 +328,24 @@ class LpgLayout(BaseModel):
     #: Originating relational table, kept so an LPG graph stays self-describing
     #: and reversible back to the ``pg`` layout.
     source_field: str = "sourceTable"
+    #: Also index the endpoint-label arrays on the edge collection
+    #: (``[_from, type, toLabels[*]]`` and its inbound mirror).
+    #:
+    #: **Off by default, and leave it off unless you run label-filtered
+    #: *pattern-match* edge queries** (``FOR e IN edges FILTER e._from == …``).
+    #: In that access path the index is selected and each edge is returned once.
+    #:
+    #: **In a traversal the same index duplicates results** — a persistent index
+    #: over an array-expansion field stores one entry per element and the
+    #: traversal scans every entry under the ``_from``/``type`` prefix, so each
+    #: edge comes back once per label on its target. The label filter does not
+    #: narrow the scan and ``uniqueEdges: 'global'`` is rejected, so there is no
+    #: query-side repair. Enabling this on a deployment that also traverses
+    #: silently inflates counts.
+    #:
+    #: It also costs write throughput on every load (one index entry per label),
+    #: which is why it is not provisioned by default.
+    index_edge_labels: bool = False
 
 
 class MappingConfig(BaseModel):

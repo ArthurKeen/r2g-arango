@@ -352,6 +352,25 @@ class ArangoWriter:
         """
         self.ensure_collection(collection, edge=edge)
         coll = self.db.collection(collection)
+        if edge:
+            # An array-expansion field on an EDGE collection makes traversals
+            # return each edge once per element — inflated counts, no error.
+            # Warn rather than refuse: it is a legitimate choice for the
+            # pattern-match access path, and the caller may have opted in.
+            for spec in specs:
+                expanded = [f for f in spec.get("fields", []) if "[*]" in f]
+                if expanded:
+                    logger.warning(
+                        "arango_edge_array_index",
+                        collection=collection,
+                        name=spec.get("name"),
+                        fields=expanded,
+                        hint=(
+                            "array-expansion index on an edge collection: "
+                            "traversals will return each edge once per element. "
+                            "Intended for pattern-match queries only."
+                        ),
+                    )
         for spec in specs:
             try:
                 coll.add_index(spec)

@@ -20,7 +20,9 @@ from r2g.connectors.arango_writer import ArangoWriter
 from r2g.csi import mapping_to_csi, validate_csi
 from r2g.lpg import (
     EDGE_INBOUND_INDEX,
+    EDGE_INBOUND_LABEL_INDEX,
     EDGE_OUTBOUND_INDEX,
+    EDGE_OUTBOUND_LABEL_INDEX,
     edge_indexes,
     graph_edge_definition,
     label_predicate,
@@ -668,3 +670,38 @@ class TestLabelPredicate:
         """`p.edges[*].toLabels` nests, so ALL ==/IN silently match nothing."""
         for mode in ("has", "all", "any", "none"):
             assert "[*]" not in label_predicate("e.toLabels", mode=mode)
+
+
+class TestOptInLabelIndexes:
+    """`index_edge_labels` — off by default, because the index it adds helps the
+    pattern-match path and actively harms traversals."""
+
+    def test_default_is_off_and_yields_only_flat_specs(self):
+        specs = edge_indexes(LpgLayout())
+        assert len(specs) == 2
+        assert not any("[*]" in f for s in specs for f in s["fields"])
+
+    def test_opting_in_adds_the_array_specs_alongside(self):
+        specs = edge_indexes(LpgLayout(index_edge_labels=True))
+        assert len(specs) == 4
+        names = {s["name"] for s in specs}
+        # The flat traversal indexes must survive — they are what traversals use.
+        assert EDGE_OUTBOUND_INDEX in names and EDGE_INBOUND_INDEX in names
+        assert EDGE_OUTBOUND_LABEL_INDEX in names and EDGE_INBOUND_LABEL_INDEX in names
+
+    def test_opt_in_specs_carry_the_expansion(self):
+        specs = {s["name"]: s for s in edge_indexes(LpgLayout(index_edge_labels=True))}
+        assert specs[EDGE_OUTBOUND_LABEL_INDEX]["fields"] == ["_from", "type", "toLabels[*]"]
+        assert specs[EDGE_INBOUND_LABEL_INDEX]["fields"] == ["_to", "type", "fromLabels[*]"]
+
+    def test_flag_is_omitted_from_a_default_mapping(self):
+        """Byte-stability: an untouched mapping must not gain the field."""
+        assert "lpg" not in MappingConfig(source_schema="public").model_dump()
+
+    def test_flag_round_trips_when_set(self):
+        cfg = MappingConfig(
+            source_schema="public",
+            graph_layout="lpg",
+            lpg=LpgLayout(index_edge_labels=True),
+        )
+        assert MappingConfig.model_validate(cfg.model_dump()).lpg.index_edge_labels is True
