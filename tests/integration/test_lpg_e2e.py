@@ -13,6 +13,10 @@ of the vertex-centric indexes.
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from r2g.connectors.arango_writer import ArangoWriter
 from r2g.lpg import (
     EDGE_INBOUND_INDEX,
@@ -36,7 +40,38 @@ from r2g.types import (
     Table,
 )
 
-from .conftest import ARANGO_ENDPOINT, ARANGO_PASSWORD, ARANGO_USER, requires_arango
+from .conftest import (
+    ARANGO_ENDPOINT,
+    ARANGO_PASSWORD,
+    ARANGO_USER,
+    _arango_available,
+    requires_arango,
+)
+
+#: The compose stack seeds northwind as the default database (docker-compose.yml),
+#: which is a different DSN from the conftest's PG_CONN (an `r2g_test` database
+#: that the stack does not create) — so these tests gate on the one they use.
+PG_CONN_NORTHWIND = os.getenv(
+    "PG_CONN_NORTHWIND", "postgresql://r2g:r2g_test_2026@localhost:5432/northwind"
+)
+
+
+def _northwind_available() -> bool:
+    try:
+        import psycopg
+
+        with psycopg.connect(PG_CONN_NORTHWIND, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM information_schema.tables LIMIT 1")
+        return True
+    except Exception:
+        return False
+
+
+requires_northwind = pytest.mark.skipif(
+    not (_northwind_available() and _arango_available()),
+    reason="northwind Postgres + ArangoDB required",
+)
 
 LPG = LpgLayout()
 
@@ -333,3 +368,103 @@ class TestLpgLiveIndexes:
         )
         # The entry point IS index-backed — verified, not assumed.
         assert VERTEX_LABEL_INDEX in indexes_used(explained)
+
+
+@requires_northwind
+class TestLpgRealSourceEndToEnd:
+    """The full chain: a REAL relational database -> LPG graph -> traversal.
+
+    The other end-to-end test in this module drives a fake source, which proves
+    the write path but never exercises real introspection, a generated mapping,
+    composite/self-referential FKs, or realistic volume. This one does, because
+    "it works end to end" should not rest on a hand-built two-table fixture.
+    """
+
+    def _load(self, db_name, **pipeline_kw):
+        from r2g.config import ConfigManager
+        from r2g.connectors.postgres import PostgresConnector
+
+        conn = PostgresConnector(PG_CONN_NORTHWIND, schema_name="public")
+        schema = conn.get_schema()
+        config = ConfigManager.generate_default_config(schema)
+        config.graph_layout = "lpg"
+        writer = ArangoWriter(
+            endpoint=ARANGO_ENDPOINT,
+            database=db_name,
+            username=ARANGO_USER,
+            password=ARANGO_PASSWORD,
+        )
+        StreamingPipeline(
+            source_connector=conn,
+            arango_writer=writer,
+            schema=schema,
+            config=config,
+            batch_size=500,
+            **pipeline_kw,
+        ).run(graph_name="nw_lpg")
+        return schema, config
+
+    def test_whole_database_collapses_into_two_collections(self, arango_test_db):
+        name, db = arango_test_db
+        schema, config = self._load(name)
+        colls = {c["name"] for c in db.collections() if not c["name"].startswith("_")}
+        assert colls == {LPG.node_collection, LPG.edge_collection}
+        # Many tables and many FK types, two collections.
+        assert len(config.collections) > 5 and len(config.edges) > 5
+        assert db.collection(LPG.node_collection).count() > 1000
+        assert db.collection(LPG.edge_collection).count() > 1000
+
+    def test_labels_and_types_survive_the_collapse(self, arango_test_db):
+        """Every former collection must still be identifiable by label/type —
+        that is the only thing standing in for the collections we gave up."""
+        name, db = arango_test_db
+        schema, config = self._load(name)
+        labels = set(db.aql.execute("FOR n IN nodes COLLECT l = n.labels[0] RETURN l"))
+        types = set(db.aql.execute("FOR e IN edges COLLECT t = e.type RETURN t"))
+        # Every non-empty mapped collection appears as a label.
+        assert labels <= {c.target_collection for c in config.collections.values()}
+        assert len(labels) > 5
+        assert types <= {e.edge_collection for e in config.edges}
+        assert len(types) > 5
+
+    def test_no_key_collisions_across_tables(self, arango_test_db):
+        """The collapse hazard, at real volume: label-namespaced keys mean the
+        node count equals the sum of rows, with nothing silently overwritten."""
+        name, db = arango_test_db
+        self._load(name)
+        dupes = list(db.aql.execute(
+            "FOR n IN nodes COLLECT k = n._key WITH COUNT INTO c "
+            "FILTER c > 1 LIMIT 1 RETURN k"
+        ))
+        assert dupes == []
+
+    def test_named_graph_has_exactly_one_edge_definition(self, arango_test_db):
+        name, db = arango_test_db
+        self._load(name)
+        defs = db.graph("nw_lpg").edge_definitions()
+        assert len(defs) == 1
+        assert defs[0]["edge_collection"] == LPG.edge_collection
+        assert defs[0]["from_vertex_collections"] == [LPG.node_collection]
+
+    def test_traversal_at_volume_uses_the_vci_and_filters_correctly(self, arango_test_db):
+        name, db = arango_test_db
+        self._load(name)
+        seed = list(db.aql.execute(
+            "FOR e IN edges COLLECT t = e.type, f = e._from, tl = e.toLabels[0] "
+            "LIMIT 1 RETURN {t: t, f: f, tl: tl}"
+        ))[0]
+        q = traversal_templates(LPG)["neighbors_by_type"]
+        bind = {"start": seed["f"], "type": seed["t"], "toLabel": seed["tl"]}
+        assert uses_vertex_centric_index(db.aql.explain(q, bind_vars=bind))
+        rows = list(db.aql.execute(q, bind_vars=bind))
+        assert rows
+        assert all(seed["tl"] in r.get("labels", []) for r in rows)
+
+    def test_reload_with_drop_collections_does_not_lose_tables(self, arango_test_db):
+        """--drop-collections must drop the shared pair ONCE per run. Dropping
+        per table would leave only the last table's rows — silently."""
+        name, db = arango_test_db
+        self._load(name)
+        first = db.collection(LPG.node_collection).count()
+        self._load(name, drop_collections=True)
+        assert db.collection(LPG.node_collection).count() == first

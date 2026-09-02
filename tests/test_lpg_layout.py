@@ -521,3 +521,25 @@ class TestLpgCsiExport:
     def test_both_layouts_validate_against_the_csi_schema(self):
         for layout in ("pg", "lpg"):
             validate_csi(self._doc(layout))
+
+
+class TestLpgCdcGuard:
+    """CDC still targets a collection per type, which does not exist in an LPG
+    graph. Writing anyway would silently build a parallel graph in the wrong
+    shape, so the delta path refuses rather than corrupts (P13.9 will route it)."""
+
+    def test_cdc_refuses_an_lpg_mapping(self):
+        from r2g.cdc.delta_transformer import DeltaTransformer
+
+        cfg = MappingConfig(source_schema="public", graph_layout="lpg")
+        with pytest.raises(NotImplementedError, match="LPG graph layout"):
+            DeltaTransformer(Schema(tables={"accounts": _accounts()}), cfg)
+
+    def test_cdc_still_accepts_a_pg_mapping(self):
+        from r2g.cdc.delta_transformer import DeltaTransformer
+
+        cfg = MappingConfig(source_schema="public")
+        cfg.collections = {
+            "accounts": CollectionMapping(source_table="accounts", target_collection="Account")
+        }
+        assert DeltaTransformer(Schema(tables={"accounts": _accounts()}), cfg) is not None

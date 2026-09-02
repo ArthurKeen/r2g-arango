@@ -49,6 +49,21 @@ class DeltaTransformer:
         schema: Schema,
         config: MappingConfig,
     ) -> None:
+        # The CDC path still targets a collection per node/edge type. Against an
+        # LPG graph (P13) those collections do not exist: every delta would be
+        # written to `Account` / `placedBy` rather than to the shared `nodes` /
+        # `edges`, and the keys would lack their label namespace — so the sync
+        # would appear to succeed while silently building a second, parallel
+        # graph in the wrong shape. Refuse instead, until P13.9 routes CDC the
+        # way the streaming path already does.
+        if config.graph_layout == "lpg":
+            raise NotImplementedError(
+                "CDC/Kafka sync does not support the LPG graph layout yet "
+                "(graph_layout: lpg). The delta path writes to a collection per "
+                "type, which does not exist in an LPG target — it would silently "
+                "create a parallel graph in the wrong shape. Use the streaming "
+                "load for LPG projects, or keep graph_layout: pg for CDC."
+            )
         self.schema = schema
         self.config = config
         self._cm_by_table = {

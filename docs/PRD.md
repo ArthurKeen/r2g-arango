@@ -1097,9 +1097,20 @@ move **into the documents** — and that is not merely a serialization change:
 | **P13.7 ✅** | **Layout-aware CSI export.** The emitter reports the layout it actually produced: `LABEL` / `GENERIC_WITH_TYPE` for an LPG target instead of the previously unconditional `COLLECTION` / `DEDICATED_COLLECTION`, naming the shared collection plus the carrier field (`typeField`) and this entity's or relationship's value in it (`typeValue`). Emitting the pg styles for an LPG target describes collections that do not exist — a consumer resolves `Account` to a collection named `Account`, finds nothing, and fails far from the cause. `typeValue` is the **stored** label (the physical target-collection name), not the conceptual entity name, because a naming convention makes those diverge (`accounts` → `Account`) and this mapping must describe what the loader wrote. | `src/r2g/csi.py:42-53` (both style pairs), `mapping_to_csi`. No contract change: `schemas/csi_v1.schema.json:60,75` already permit both enums and already define `typeField`/`typeValue`. Both layouts validate against the schema. |
 | **P13.8 ✅** | **Studio selector.** The Mapping Studio exposes the target model — a **Target graph model** action and an always-visible header chip (`PG`/`LPG`) that opens the same picker, since the layout governs how every document is written and should not be buried in a menu. Choosing LPG reveals the node/edge collection names (rejecting equal names) and warns that switching model changes the write layout, so the target should be re-loaded rather than left half in each shape. The setting is sent only when non-default, so a mapping that never touched it keeps its historical on-disk shape. | `src/r2g/ui/static/index.html` (`openGraphModelForm`, `applyGraphModel`, `renderGraphModelChip`; carried through `applyConfigToEditState` / `buildMappingPayload`). No API change — `PUT /api/projects/{name}/mapping` already validates the whole `MappingConfig`. Round-trip covered by `tests/test_ui_api.py::TestGraphModelSelection`. |
 
+| **P13.9** | **CDC / Kafka sync in the LPG layout.** The delta path (`cdc-start`, `kafka-start`) still resolves a collection per node and edge type, which do not exist in an LPG target: every delta would be written to `Account` / `placedBy` instead of the shared `nodes` / `edges`, with keys lacking their label namespace — the sync would report success while silently building a second graph in the wrong shape. Until the delta path routes the way the streaming path does, `DeltaTransformer` **refuses an LPG mapping** with an explanatory error rather than corrupting the target. | **Planned** (guard shipped). Guard: `src/r2g/cdc/delta_transformer.py` (raises `NotImplementedError` when `graph_layout == "lpg"`). The fix is the same shape as P13.6: route to `lpg.node_collection` / `lpg.edge_collection` and pass `lpg=` to the transformers. |
+
 **Round-tripping.** Nodes and edges also carry `sourceTable`, so an LPG graph
 stays self-describing and reversible back to the PG layout rather than becoming
 a one-way projection.
+
+**Verified end-to-end** against live PostgreSQL 16 (northwind) → ArangoDB 3.12.9:
+a real introspection and generated mapping, switched to `lpg`, collapses 13
+tables and 11 FK relationships into **two collections** (3,362 nodes / 7,113
+edges) with 12 distinct labels, 11 distinct edge types, **zero `_key`
+collisions**, one named-graph edge definition, and a traversal that filters
+through `r2g_lpg_vci_outbound` and returns only correctly-labelled neighbours.
+A re-load with `--drop-collections` preserves the full node count, proving the
+shared pair is dropped once per run rather than once per table.
 
 ---
 
