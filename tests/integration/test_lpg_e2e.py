@@ -468,3 +468,110 @@ class TestLpgRealSourceEndToEnd:
         first = db.collection(LPG.node_collection).count()
         self._load(name, drop_collections=True)
         assert db.collection(LPG.node_collection).count() == first
+
+
+@requires_arango
+class TestLpgCdcLive:
+    """P13.9 live: CDC deltas keep an LPG graph in ONE shape.
+
+    The failure this guards against is quiet: deltas routed to per-type
+    collections would build a second graph beside the real one and report
+    success, and an un-namespaced delete key would remove nothing (deletes are
+    idempotent, so the miss leaves no trace). Both are only visible by looking
+    at the database afterwards.
+    """
+
+    def _tx_and_writer(self, db_name):
+        from r2g.cdc.delta_transformer import DeltaTransformer
+        from r2g.types import MappingConfig as MC
+
+        schema = Schema(
+            tables={
+                "accounts": Table(
+                    name="accounts",
+                    columns=[
+                        Column(name="id", data_type="integer", is_primary_key=True),
+                        Column(name="name", data_type="text"),
+                    ],
+                    primary_key=["id"],
+                ),
+                "orders": Table(
+                    name="orders",
+                    columns=[
+                        Column(name="id", data_type="integer", is_primary_key=True),
+                        Column(name="account_id", data_type="integer"),
+                    ],
+                    primary_key=["id"],
+                ),
+            }
+        )
+        config = MC(source_schema="public", graph_layout="lpg")
+        config.collections = {
+            "accounts": CollectionMapping(source_table="accounts", target_collection="Account"),
+            "orders": CollectionMapping(source_table="orders", target_collection="Order"),
+        }
+        config.edges = [
+            EdgeDefinition(
+                edge_collection="placedBy",
+                from_collection="orders",
+                to_collection="accounts",
+                from_fields=["account_id"],
+                to_fields=["id"],
+            )
+        ]
+        writer = ArangoWriter(
+            endpoint=ARANGO_ENDPOINT,
+            database=db_name,
+            username=ARANGO_USER,
+            password=ARANGO_PASSWORD,
+        )
+        writer.connect()
+        return DeltaTransformer(schema, config), writer
+
+    def _event(self, op, table, new=None, old=None):
+        from r2g.cdc.models import ChangeEvent, ChangeOperation
+
+        return ChangeEvent(
+            operation=getattr(ChangeOperation, op),
+            table_name=table,
+            new_row=new,
+            old_row=old,
+        )
+
+    def test_cdc_creates_no_extra_collections(self, arango_test_db):
+        name, db = arango_test_db
+        tx, writer = self._tx_and_writer(name)
+        for d in tx.transform(self._event("INSERT", "accounts", new={"id": 1, "name": "Acme"})):
+            writer.apply_delta(d)
+        for d in tx.transform(self._event("INSERT", "orders", new={"id": 10, "account_id": 1})):
+            writer.apply_delta(d)
+        colls = {c["name"] for c in db.collections() if not c["name"].startswith("_")}
+        # No `Account` / `Order` / `placedBy` collections beside the real graph.
+        assert colls == {LPG.node_collection, LPG.edge_collection}
+
+    def test_cdc_insert_is_reachable_by_traversal(self, arango_test_db):
+        name, db = arango_test_db
+        tx, writer = self._tx_and_writer(name)
+        for tbl, row in (("accounts", {"id": 1, "name": "Acme"}),
+                         ("orders", {"id": 10, "account_id": 1})):
+            for d in tx.transform(self._event("INSERT", tbl, new=row)):
+                writer.apply_delta(d)
+        rows = list(db.aql.execute(
+            traversal_templates(LPG)["neighbors_by_type"],
+            bind_vars={"start": f"{LPG.node_collection}/Order_10",
+                       "type": "placedBy", "toLabel": "Account"},
+        ))
+        assert [r["_key"] for r in rows] == ["Account_1"]
+
+    def test_cdc_delete_actually_deletes(self, arango_test_db):
+        """Proves the delete key carries its label namespace: an un-namespaced
+        key would target nodes/10, silently remove nothing, and leave the
+        document sitting here."""
+        name, db = arango_test_db
+        tx, writer = self._tx_and_writer(name)
+        for d in tx.transform(self._event("INSERT", "orders", new={"id": 10, "account_id": 1})):
+            writer.apply_delta(d)
+        assert db.collection(LPG.node_collection).has("Order_10")
+        for d in tx.transform(self._event("DELETE", "orders", old={"id": 10, "account_id": 1})):
+            writer.apply_delta(d)
+        assert not db.collection(LPG.node_collection).has("Order_10")

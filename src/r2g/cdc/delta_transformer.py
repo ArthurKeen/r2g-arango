@@ -49,23 +49,14 @@ class DeltaTransformer:
         schema: Schema,
         config: MappingConfig,
     ) -> None:
-        # The CDC path still targets a collection per node/edge type. Against an
-        # LPG graph (P13) those collections do not exist: every delta would be
-        # written to `Account` / `placedBy` rather than to the shared `nodes` /
-        # `edges`, and the keys would lack their label namespace — so the sync
-        # would appear to succeed while silently building a second, parallel
-        # graph in the wrong shape. Refuse instead, until P13.9 routes CDC the
-        # way the streaming path already does.
-        if config.graph_layout == "lpg":
-            raise NotImplementedError(
-                "CDC/Kafka sync does not support the LPG graph layout yet "
-                "(graph_layout: lpg). The delta path writes to a collection per "
-                "type, which does not exist in an LPG target — it would silently "
-                "create a parallel graph in the wrong shape. Use the streaming "
-                "load for LPG projects, or keep graph_layout: pg for CDC."
-            )
         self.schema = schema
         self.config = config
+        # Target layout (P13.9). In the LPG layout every delta is written to the
+        # one shared node or edge collection and the type travels in the
+        # document, exactly as the streaming load does — so a CDC stream keeps
+        # the graph in the same shape the initial load produced. Indexes are
+        # provisioned by that initial load; CDC only ensures the collections.
+        self._lpg = config.lpg if config.graph_layout == "lpg" else None
         self._cm_by_table = {
             cm.source_table: (key, cm)
             for key, cm in config.collections.items()
@@ -85,6 +76,7 @@ class DeltaTransformer:
             collection_mapping=cm,
             key_separator=self.config.key_separator,
             type_overrides=self.config.type_overrides,
+            lpg=self._lpg,
         )
 
     def _build_edge_transformer(
@@ -102,7 +94,16 @@ class DeltaTransformer:
             key_separator=self.config.key_separator,
             from_name=target_by_source.get(edge_def.from_collection),
             to_name=target_by_source.get(edge_def.to_collection),
+            lpg=self._lpg,
         )
+
+    def _node_collection(self, cm: Any) -> str:
+        """Where a document delta is written for this mapping."""
+        return self._lpg.node_collection if self._lpg is not None else cm.target_collection
+
+    def _edge_collection(self, edge_def: EdgeDefinition) -> str:
+        """Where an edge delta is written for this edge definition."""
+        return self._lpg.edge_collection if self._lpg is not None else edge_def.edge_collection
 
     def _document_key_from_row(
         self, table_name: str, row: dict[str, Any]
@@ -116,7 +117,20 @@ class DeltaTransformer:
             if val is None:
                 return None
             parts.append(sanitize_key_component(val))
-        return self.config.key_separator.join(parts)
+        key = self.config.key_separator.join(parts)
+        if self._lpg is not None:
+            # This key is built here rather than by NodeTransformer (a delete
+            # carries only the old row), so the label namespace has to be
+            # applied here too. Without it a DELETE would address ``nodes/42``
+            # instead of ``nodes/Account_42`` — deleting nothing, or, if another
+            # table happens to own that key, the wrong document. Deletes are
+            # idempotent, so the miss would leave no trace.
+            mapping_entry = self._cm_by_table.get(table_name)
+            if mapping_entry is None:
+                return None
+            _, cm = mapping_entry
+            key = f"{cm.target_collection}{self.config.key_separator}{key}"
+        return key
 
     def transform(self, event: ChangeEvent) -> list[ArangoDelta]:
         """Produce zero or more ArangoDeltas from a single ChangeEvent."""
@@ -129,7 +143,6 @@ class DeltaTransformer:
             return deltas
 
         _, cm = mapping_entry
-        target = cm.target_collection
         arango_op = _OP_MAP[event.operation]
 
         if event.is_delete:
@@ -137,7 +150,7 @@ class DeltaTransformer:
             if doc_key:
                 deltas.append(ArangoDelta(
                     operation=ArangoOperation.DELETE,
-                    collection=target,
+                    collection=self._node_collection(cm),
                     key=doc_key,
                 ))
             self._emit_edge_deletes(deltas, table_name, event.old_row or {})
@@ -149,7 +162,7 @@ class DeltaTransformer:
             doc = node_xform.transform_row(row)
             deltas.append(ArangoDelta(
                 operation=arango_op,
-                collection=target,
+                collection=self._node_collection(cm),
                 document=doc,
                 key=doc.get("_key"),
             ))
@@ -174,7 +187,7 @@ class DeltaTransformer:
                 edge_op = ArangoOperation.REPLACE if op == ArangoOperation.REPLACE else ArangoOperation.INSERT
                 deltas.append(ArangoDelta(
                     operation=edge_op,
-                    collection=edge_def.edge_collection,
+                    collection=self._edge_collection(edge_def),
                     is_edge=True,
                     document=edge_doc,
                     key=edge_doc.get("_key"),
@@ -195,7 +208,7 @@ class DeltaTransformer:
             if edge_doc is not None:
                 deltas.append(ArangoDelta(
                     operation=ArangoOperation.DELETE,
-                    collection=edge_def.edge_collection,
+                    collection=self._edge_collection(edge_def),
                     is_edge=True,
                     key=edge_doc.get("_key"),
                 ))

@@ -523,23 +523,95 @@ class TestLpgCsiExport:
             validate_csi(self._doc(layout))
 
 
-class TestLpgCdcGuard:
-    """CDC still targets a collection per type, which does not exist in an LPG
-    graph. Writing anyway would silently build a parallel graph in the wrong
-    shape, so the delta path refuses rather than corrupts (P13.9 will route it)."""
+class TestLpgCdcRouting:
+    """CDC deltas must land in the same shape the initial load produced (P13.9).
 
-    def test_cdc_refuses_an_lpg_mapping(self):
-        from r2g.cdc.delta_transformer import DeltaTransformer
+    A delta routed to a per-type collection would create a second, parallel
+    graph beside the real one — and report success doing it.
+    """
 
-        cfg = MappingConfig(source_schema="public", graph_layout="lpg")
-        with pytest.raises(NotImplementedError, match="LPG graph layout"):
-            DeltaTransformer(Schema(tables={"accounts": _accounts()}), cfg)
-
-    def test_cdc_still_accepts_a_pg_mapping(self):
-        from r2g.cdc.delta_transformer import DeltaTransformer
-
-        cfg = MappingConfig(source_schema="public")
+    def _cfg(self, layout):
+        cfg = MappingConfig(source_schema="public", graph_layout=layout)
         cfg.collections = {
-            "accounts": CollectionMapping(source_table="accounts", target_collection="Account")
+            "accounts": CollectionMapping(source_table="accounts", target_collection="Account"),
+            "orders": CollectionMapping(source_table="orders", target_collection="Order"),
         }
-        assert DeltaTransformer(Schema(tables={"accounts": _accounts()}), cfg) is not None
+        cfg.edges = [
+            EdgeDefinition(
+                edge_collection="placedBy",
+                from_collection="orders",
+                to_collection="accounts",
+                from_fields=["account_id"],
+                to_fields=["id"],
+            )
+        ]
+        return cfg
+
+    def _tx(self, layout):
+        from r2g.cdc.delta_transformer import DeltaTransformer
+
+        schema = Schema(tables={"accounts": _accounts(), "orders": _orders()})
+        return DeltaTransformer(schema, self._cfg(layout))
+
+    def _event(self, op, table="orders", new=None, old=None):
+        from r2g.cdc.models import ChangeEvent, ChangeOperation
+
+        return ChangeEvent(
+            operation=getattr(ChangeOperation, op),
+            table_name=table,
+            new_row=new,
+            old_row=old,
+        )
+
+    def test_insert_routes_to_the_shared_collections(self):
+        deltas = self._tx("lpg").transform(
+            self._event("INSERT", new={"id": 10, "account_id": 1})
+        )
+        assert {d.collection for d in deltas} == {"nodes", "edges"}
+
+    def test_inserted_document_is_label_namespaced_and_labelled(self):
+        deltas = self._tx("lpg").transform(
+            self._event("INSERT", new={"id": 10, "account_id": 1})
+        )
+        doc = next(d for d in deltas if not d.is_edge).document
+        assert doc["_key"] == "Order_10"
+        assert doc["labels"] == ["Order"]
+
+    def test_inserted_edge_carries_type_and_endpoint_labels(self):
+        deltas = self._tx("lpg").transform(
+            self._event("INSERT", new={"id": 10, "account_id": 1})
+        )
+        edge = next(d for d in deltas if d.is_edge).document
+        assert edge["type"] == "placedBy"
+        assert edge["_from"] == "nodes/Order_10"
+        assert edge["_to"] == "nodes/Account_1"
+        assert edge["fromLabels"] == ["Order"] and edge["toLabels"] == ["Account"]
+
+    def test_delete_key_is_label_namespaced(self):
+        """The subtle one: a delete carries only the old row, so its key is
+        built outside NodeTransformer. Un-namespaced it would address
+        `nodes/10` instead of `nodes/Order_10` — deleting nothing, or another
+        table's document, with no trace either way since deletes are idempotent."""
+        deltas = self._tx("lpg").transform(
+            self._event("DELETE", old={"id": 10, "account_id": 1})
+        )
+        doc_delete = next(d for d in deltas if not d.is_edge)
+        assert doc_delete.collection == "nodes"
+        assert doc_delete.key == "Order_10"
+
+    def test_delete_removes_the_edge_from_the_shared_collection(self):
+        deltas = self._tx("lpg").transform(
+            self._event("DELETE", old={"id": 10, "account_id": 1})
+        )
+        edge_delete = next(d for d in deltas if d.is_edge)
+        assert edge_delete.collection == "edges"
+        assert edge_delete.key.startswith("placedBy")
+
+    def test_pg_layout_still_routes_per_type(self):
+        deltas = self._tx("pg").transform(
+            self._event("INSERT", new={"id": 10, "account_id": 1})
+        )
+        assert {d.collection for d in deltas} == {"Order", "placedBy"}
+        doc = next(d for d in deltas if not d.is_edge).document
+        assert doc["_key"] == "10"
+        assert "labels" not in doc
