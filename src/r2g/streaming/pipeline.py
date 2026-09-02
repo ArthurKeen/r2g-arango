@@ -147,6 +147,41 @@ class StreamingPipeline:
 
     # ── Filtering / skip-existing ──────────────────────────────────
 
+    @property
+    def _lpg(self) -> Any:
+        """The :class:`LpgLayout` when this project opted in, else ``None``."""
+        return self.config.lpg if self.config.graph_layout == "lpg" else None
+
+    def _prepare_lpg_collections(self) -> None:
+        """Create (and optionally drop) the two shared LPG collections **once**.
+
+        The pg path prepares a collection per table, which is safe because each
+        table owns its own. In the LPG layout one node collection and one edge
+        collection are shared by every type, so doing this per table would make
+        each table's ``--drop-collections`` erase the tables loaded before it,
+        and would make ``--skip-existing`` skip every table after the first
+        wrote a row. Both fail silently — you get a partial graph, not an error
+        — so the preparation is hoisted here and skipped in the per-table path.
+
+        Indexes are provisioned at the same time: the edge collection is created
+        with ``edge=True`` (as a document collection it succeeds quietly, then
+        graph creation fails ERR 1942/1944 and traversals return nothing).
+        """
+        from r2g.lpg import edge_indexes, vertex_indexes
+
+        lpg = self.config.lpg
+        if self.drop_collections:
+            # Edges first: they reference the nodes.
+            self.writer.drop_collection(lpg.edge_collection)
+            self.writer.drop_collection(lpg.node_collection)
+        self.writer.ensure_indexes(lpg.node_collection, vertex_indexes(lpg), edge=False)
+        self.writer.ensure_indexes(lpg.edge_collection, edge_indexes(lpg), edge=True)
+        logger.info(
+            "lpg_collections_prepared",
+            node_collection=lpg.node_collection,
+            edge_collection=lpg.edge_collection,
+        )
+
     def _should_skip_collection(self, writer: ArangoWriter, collection_name: str) -> bool:
         if not self.skip_existing:
             return False
@@ -289,9 +324,17 @@ class StreamingPipeline:
     ) -> tuple[str, int]:
         table_def = self.schema.tables[table_name]
         target = cm.target_collection
+        lpg = self._lpg
+        # In the LPG layout every type shares one collection, so writes go there
+        # while ``target`` stays the *label* — which keeps the per-table
+        # progress and result reporting intact.
+        write_to = lpg.node_collection if lpg is not None else target
         w = writer or self.writer
 
-        if not self.dry_run:
+        # LPG collections are prepared once in run(); doing it per table would
+        # let one table's drop erase the previous tables (see
+        # _prepare_lpg_collections).
+        if not self.dry_run and lpg is None:
             if self._should_skip_collection(w, target):
                 return (target, 0)
             if self.drop_collections:
@@ -311,6 +354,8 @@ class StreamingPipeline:
             collection_mapping=cm,
             key_separator=self.config.key_separator,
             type_overrides=self.config.type_overrides,
+            # ``label`` defaults to cm.target_collection — the per-type name.
+            lpg=lpg,
         )
 
         since_col = self._resolve_since_column(table_name)
@@ -350,7 +395,7 @@ class StreamingPipeline:
                 if not self.dry_run:
                     if delegate:
                         self._apply_delegation(w, delegation_query, batch, raw_batch, target)
-                    self._flush_batch(w, target, batch)
+                    self._flush_batch(w, write_to, batch)
                 total += len(batch)
                 batch.clear()
                 raw_batch.clear()
@@ -361,7 +406,7 @@ class StreamingPipeline:
             if not self.dry_run:
                 if delegate:
                     self._apply_delegation(w, delegation_query, batch, raw_batch, target)
-                self._flush_batch(w, target, batch)
+                self._flush_batch(w, write_to, batch)
             total += len(batch)
 
         if self.dry_run:
@@ -382,9 +427,12 @@ class StreamingPipeline:
         table_name = edge_def.from_collection
         table_def = self.schema.tables[table_name]
         edge_name = edge_def.edge_collection
+        lpg = self._lpg
+        # One edge collection holds every type; ``edge_name`` stays the type.
+        write_to = lpg.edge_collection if lpg is not None else edge_name
         w = writer or self.writer
 
-        if not self.dry_run:
+        if not self.dry_run and lpg is None:
             if self._should_skip_collection(w, edge_name):
                 return (edge_name, 0)
             if self.drop_collections:
@@ -400,6 +448,10 @@ class StreamingPipeline:
             key_separator=self.config.key_separator,
             from_name=target_by_source.get(edge_def.from_collection),
             to_name=target_by_source.get(edge_def.to_collection),
+            # Endpoint labels derive from the resolved from_name/to_name before
+            # both are redirected at the single node collection; edge_type
+            # defaults to edge_def.edge_collection.
+            lpg=lpg,
         )
 
         since_col = self._resolve_since_column(table_name)
@@ -429,7 +481,7 @@ class StreamingPipeline:
                 batch.append(doc)
                 if len(batch) >= self.batch_size:
                     if not self.dry_run:
-                        self._flush_batch(w, edge_name, batch)
+                        self._flush_batch(w, write_to, batch)
                     total += len(batch)
                     batch.clear()
                     self._notify("progress", edge_name, total, row_estimate)
@@ -440,7 +492,7 @@ class StreamingPipeline:
 
         if batch:
             if not self.dry_run:
-                self._flush_batch(w, edge_name, batch)
+                self._flush_batch(w, write_to, batch)
             total += len(batch)
 
         if self.dry_run:
@@ -576,6 +628,12 @@ class StreamingPipeline:
         # graph is recreated from the current edge definitions at the end.
         if not self.dry_run and self.drop_collections and graph_name:
             self.writer.drop_named_graph(graph_name)
+
+        # Hoisted out of the per-table path on purpose — see
+        # _prepare_lpg_collections. Covers both the sequential and parallel
+        # paths below, and provisions the vertex-centric indexes up front.
+        if not self.dry_run and self._lpg is not None:
+            self._prepare_lpg_collections()
 
         if self.workers > 1:
             doc_results, edge_results = self._run_parallel(graph_name)

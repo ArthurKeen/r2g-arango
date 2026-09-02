@@ -13,6 +13,7 @@ of the vertex-centric indexes.
 
 from __future__ import annotations
 
+from r2g.connectors.arango_writer import ArangoWriter
 from r2g.lpg import (
     EDGE_INBOUND_INDEX,
     EDGE_OUTBOUND_INDEX,
@@ -24,9 +25,18 @@ from r2g.lpg import (
     uses_vertex_centric_index,
     vertex_indexes,
 )
-from r2g.types import LpgLayout
+from r2g.streaming.pipeline import StreamingPipeline
+from r2g.types import (
+    CollectionMapping,
+    Column,
+    EdgeDefinition,
+    LpgLayout,
+    MappingConfig,
+    Schema,
+    Table,
+)
 
-from .conftest import requires_arango
+from .conftest import ARANGO_ENDPOINT, ARANGO_PASSWORD, ARANGO_USER, requires_arango
 
 LPG = LpgLayout()
 
@@ -70,6 +80,124 @@ def _provision(db):
     ])
     db.create_graph("lpg_graph", edge_definitions=[graph_edge_definition(LPG)])
     return nodes, edges
+
+
+class _Session:
+    def __init__(self, tables):
+        self._t = tables
+
+    def count_rows(self, table, *, since_column=None, since_value=None):
+        return len(self._t.get(table, []))
+
+    def stream_rows(self, table, *, batch_size=10_000, since_column=None, since_value=None):
+        yield from self._t.get(table, [])
+
+    def close(self):
+        pass
+
+
+class _Connector:
+    connection_string = "fake://local"
+    schema_name = "public"
+
+    def __init__(self, tables):
+        self._t = tables
+
+    def get_schema(self):
+        return Schema()
+
+    def open_session(self):
+        return _Session(self._t)
+
+
+@requires_arango
+class TestLpgEndToEndLoad:
+    """P13.6: the pipeline actually lands an LPG graph in a real ArangoDB.
+
+    Fake *source*, real *target* — the point is the write path and the graph it
+    produces, not the relational read.
+    """
+
+    def _load(self, db_name):
+        schema = Schema(
+            tables={
+                "accounts": Table(
+                    name="accounts",
+                    columns=[
+                        Column(name="id", data_type="integer", is_primary_key=True),
+                        Column(name="name", data_type="text"),
+                    ],
+                    primary_key=["id"],
+                ),
+                "orders": Table(
+                    name="orders",
+                    columns=[
+                        Column(name="id", data_type="integer", is_primary_key=True),
+                        Column(name="account_id", data_type="integer"),
+                    ],
+                    primary_key=["id"],
+                ),
+            }
+        )
+        config = MappingConfig(source_schema="public", graph_layout="lpg")
+        config.collections = {
+            "accounts": CollectionMapping(source_table="accounts", target_collection="Account"),
+            "orders": CollectionMapping(source_table="orders", target_collection="Order"),
+        }
+        config.edges = [
+            EdgeDefinition(
+                edge_collection="placedBy",
+                from_collection="orders",
+                to_collection="accounts",
+                from_fields=["account_id"],
+                to_fields=["id"],
+            )
+        ]
+        rows = {
+            "accounts": [{"id": 1, "name": "Acme"}, {"id": 2, "name": "Globex"}],
+            "orders": [{"id": 10, "account_id": 1}, {"id": 11, "account_id": 2}],
+        }
+        writer = ArangoWriter(
+            endpoint=ARANGO_ENDPOINT,
+            database=db_name,
+            username=ARANGO_USER,
+            password=ARANGO_PASSWORD,
+        )
+        StreamingPipeline(
+            source_connector=_Connector(rows),
+            arango_writer=writer,
+            schema=schema,
+            config=config,
+        ).run(graph_name="lpg_graph")
+
+    def test_load_produces_one_node_and_one_edge_collection(self, arango_test_db):
+        name, db = arango_test_db
+        self._load(name)
+        names = {c["name"] for c in db.collections() if not c["name"].startswith("_")}
+        assert names == {LPG.node_collection, LPG.edge_collection}
+        assert db.collection(LPG.node_collection).count() == 4  # 2 accounts + 2 orders
+        assert db.collection(LPG.edge_collection).count() == 2
+
+    def test_loaded_documents_carry_labels_and_namespaced_keys(self, arango_test_db):
+        name, db = arango_test_db
+        self._load(name)
+        keys = {d["_key"] for d in db.collection(LPG.node_collection).all()}
+        assert keys == {"Account_1", "Account_2", "Order_10", "Order_11"}
+
+    def test_traversal_over_the_loaded_graph_works_and_uses_the_vci(self, arango_test_db):
+        """End-to-end payoff: loaded by the pipeline, traversed by the template,
+        filtered through the vertex-centric index."""
+        name, db = arango_test_db
+        self._load(name)
+        q = traversal_templates(LPG)["neighbors_by_type"]
+        bind = {
+            "start": f"{LPG.node_collection}/Order_10",
+            "type": "placedBy",
+            "toLabel": "Account",
+        }
+        assert uses_vertex_centric_index(db.aql.explain(q, bind_vars=bind))
+        rows = list(db.aql.execute(q, bind_vars=bind))
+        assert [r["_key"] for r in rows] == ["Account_1"]
 
 
 @requires_arango

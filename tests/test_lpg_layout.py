@@ -11,7 +11,12 @@ and edge ``_key`` collisions between two edge types joining the same pair.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
+import pytest
+
 from r2g.config import ConfigManager
+from r2g.connectors.arango_writer import ArangoWriter
 from r2g.lpg import (
     EDGE_INBOUND_INDEX,
     EDGE_OUTBOUND_INDEX,
@@ -22,6 +27,7 @@ from r2g.lpg import (
     uses_vertex_centric_index,
     vertex_indexes,
 )
+from r2g.streaming.pipeline import StreamingPipeline
 from r2g.transformers.edge_transformer import EdgeTransformer
 from r2g.transformers.node_transformer import NodeTransformer
 from r2g.types import (
@@ -30,6 +36,7 @@ from r2g.types import (
     EdgeDefinition,
     LpgLayout,
     MappingConfig,
+    Schema,
     Table,
 )
 
@@ -300,3 +307,142 @@ class TestExplainAssertion:
 
     def test_empty_plan_is_not_a_pass(self):
         assert uses_vertex_centric_index({}) is False
+
+
+# ── pipeline routing (P13.6) ─────────────────────────────────────────
+
+
+class _Session:
+    def __init__(self, tables):
+        self._t = tables
+
+    def count_rows(self, table, *, since_column=None, since_value=None):
+        return len(self._t.get(table, []))
+
+    def stream_rows(self, table, *, batch_size=10_000, since_column=None, since_value=None):
+        yield from self._t.get(table, [])
+
+    def close(self):
+        pass
+
+
+class _Connector:
+    connection_string = "fake://local"
+    schema_name = "public"
+
+    def __init__(self, tables):
+        self._t = tables
+
+    def get_schema(self):
+        return Schema()
+
+    def open_session(self):
+        return _Session(self._t)
+
+
+def _two_table_setup(layout: str):
+    schema = Schema(tables={"accounts": _accounts(), "orders": _orders()})
+    config = MappingConfig(source_schema="public", graph_layout=layout)
+    config.collections = {
+        "accounts": CollectionMapping(source_table="accounts", target_collection="Account"),
+        "orders": CollectionMapping(source_table="orders", target_collection="Order"),
+    }
+    config.edges = [
+        EdgeDefinition(
+            edge_collection="placedBy",
+            from_collection="orders",
+            to_collection="accounts",
+            from_fields=["account_id"],
+            to_fields=["id"],
+        )
+    ]
+    rows = {
+        "accounts": [{"id": 1, "name": "Acme"}],
+        "orders": [{"id": 10, "account_id": 1}],
+    }
+    return schema, config, _Connector(rows)
+
+
+def _run(layout: str, writer, **kw):
+    schema, config, connector = _two_table_setup(layout)
+    StreamingPipeline(
+        source_connector=connector,
+        arango_writer=writer,
+        schema=schema,
+        config=config,
+        **kw,
+    ).run(graph_name="g")
+    # collection name each import_batch targeted
+    return [c.args[0] for c in writer.import_batch.call_args_list]
+
+
+@pytest.fixture
+def writer():
+    w = MagicMock(spec=ArangoWriter)
+    w.import_batch.return_value = {
+        "created": 0, "errors": 0, "empty": 0, "updated": 0, "ignored": 0,
+    }
+    return w
+
+
+class TestLpgPipelineRouting:
+    def test_every_type_lands_in_the_single_collection_pair(self, writer):
+        assert set(_run("lpg", writer)) == {"nodes", "edges"}
+
+    def test_pg_layout_still_routes_per_type(self, writer):
+        assert set(_run("pg", writer)) == {"Account", "Order", "placedBy"}
+
+    def test_shared_collections_are_dropped_once_not_per_table(self, writer):
+        """The hazard: a per-table drop would erase the tables loaded before it.
+
+        Two tables + one edge — a per-table drop would fire three times and
+        leave only the last table's rows, silently and without an error.
+        """
+        _run("lpg", writer, drop_collections=True)
+        dropped = [c.args[0] for c in writer.drop_collection.call_args_list]
+        assert sorted(dropped) == ["edges", "nodes"]
+
+    def test_indexes_are_provisioned_with_the_right_edge_flag(self, writer):
+        _run("lpg", writer)
+        calls = {c.args[0]: c for c in writer.ensure_indexes.call_args_list}
+        assert set(calls) == {"nodes", "edges"}
+        # An edge collection created as a document collection succeeds quietly,
+        # then graph creation fails ERR 1944 and traversals return nothing.
+        assert calls["edges"].kwargs["edge"] is True
+        assert calls["nodes"].kwargs["edge"] is False
+
+    def test_pg_layout_provisions_no_lpg_indexes(self, writer):
+        _run("pg", writer)
+        writer.ensure_indexes.assert_not_called()
+
+    def test_graph_gets_one_edge_definition(self, writer):
+        _run("lpg", writer)
+        defs = writer.create_named_graph.call_args.args[1]
+        assert len(defs) == 1
+        assert defs[0]["edge_collection"] == "edges"
+
+    def test_documents_carry_labels_and_namespaced_keys(self, writer):
+        _run("lpg", writer)
+        docs = [
+            d
+            for call in writer.import_batch.call_args_list
+            if call.args[0] == "nodes"
+            for d in call.args[1]
+        ]
+        keys = {d["_key"] for d in docs}
+        assert keys == {"Account_1", "Order_10"}
+        assert {tuple(d["labels"]) for d in docs} == {("Account",), ("Order",)}
+
+    def test_edges_carry_type_and_endpoint_labels(self, writer):
+        _run("lpg", writer)
+        edges = [
+            d
+            for call in writer.import_batch.call_args_list
+            if call.args[0] == "edges"
+            for d in call.args[1]
+        ]
+        assert len(edges) == 1
+        e = edges[0]
+        assert e["type"] == "placedBy"
+        assert e["fromLabels"] == ["Order"] and e["toLabels"] == ["Account"]
+        assert e["_from"] == "nodes/Order_10" and e["_to"] == "nodes/Account_1"
