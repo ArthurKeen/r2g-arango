@@ -301,6 +301,35 @@ class SharedKey(BaseModel):
     method: str = ""
 
 
+class LpgLayout(BaseModel):
+    """Physical field/collection names for the **LPG** graph target (P13).
+
+    In the default ``pg`` layout a node's type *is* its collection and an edge's
+    type *is* its edge collection. The ``lpg`` layout collapses everything into
+    one node collection and one edge collection, so both types must move **into
+    the documents**: nodes carry a ``labels`` array, edges carry a ``type``.
+
+    Edges additionally carry **copies of their endpoints' labels**
+    (``fromLabels`` / ``toLabels``). That denormalization is the whole point: it
+    is what lets a *vertex-centric index* — a persistent index led by ``_from``
+    or ``_to`` — answer "outbound edges of this node, of this type, landing on
+    that kind of node" entirely from the index, instead of loading every
+    incident edge and filtering afterwards. Without the copies the labels live
+    on the neighbour document, which an index on the edge collection cannot
+    reach.
+    """
+
+    node_collection: str = "nodes"
+    edge_collection: str = "edges"
+    label_field: str = "labels"
+    type_field: str = "type"
+    from_labels_field: str = "fromLabels"
+    to_labels_field: str = "toLabels"
+    #: Originating relational table, kept so an LPG graph stays self-describing
+    #: and reversible back to the ``pg`` layout.
+    source_field: str = "sourceTable"
+
+
 class MappingConfig(BaseModel):
     """Top-level mapping configuration."""
     source_schema: str = "public"
@@ -313,12 +342,23 @@ class MappingConfig(BaseModel):
     # output when empty so every mapping written before P6.7 serializes
     # byte-identically (guarded by tests/test_serialization_compat.py).
     shared_keys: List[SharedKey] = Field(default_factory=list)
+    # Physical graph layout (P13). ``pg`` (default) = a collection per node type
+    # and per edge type; ``lpg`` = one node collection + one edge collection
+    # with types carried as ``labels`` / ``type`` fields. Declared last and
+    # omitted from output while default, so every mapping written before P13
+    # serializes byte-identically (guarded by tests/test_serialization_compat.py).
+    graph_layout: Literal["pg", "lpg"] = "pg"
+    lpg: LpgLayout = Field(default_factory=LpgLayout)
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
         full = handler(self)
         if not full.get("shared_keys"):
             full.pop("shared_keys", None)
+        # Only a project that actually opted into the LPG layout carries these.
+        if full.get("graph_layout") == "pg":
+            full.pop("graph_layout", None)
+            full.pop("lpg", None)
         return full
 
     def save_to_file(self, path: str):

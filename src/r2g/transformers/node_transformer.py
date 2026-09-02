@@ -13,7 +13,7 @@ from r2g.expressions import (
 )
 from r2g.keys import sanitize_key_component
 from r2g.log import get_logger
-from r2g.types import CollectionMapping, Column, FieldExpression, Table
+from r2g.types import CollectionMapping, Column, FieldExpression, LpgLayout, Table
 
 logger = get_logger(__name__)
 
@@ -25,11 +25,22 @@ class NodeTransformer:
         collection_mapping: Optional[CollectionMapping] = None,
         key_separator: str = "_",
         type_overrides: Optional[Dict[str, str]] = None,
+        lpg: Optional[LpgLayout] = None,
+        label: Optional[str] = None,
     ) -> None:
         self.table_def = table_def
         self._mapping = collection_mapping
         self.key_separator = key_separator
         self._type_overrides = type_overrides or {}
+        # LPG layout (P13): one collection for every node type, so the type has
+        # to travel inside the document as a label — and inside the key, which
+        # would otherwise collide across former tables.
+        self.lpg = lpg
+        self.label = label or (
+            collection_mapping.target_collection
+            if collection_mapping is not None
+            else table_def.name
+        )
         self._compiled_expressions: list[tuple[FieldExpression, Optional[CompiledExpression]]] = []
         # Expressions that compile-fail locally but are valid AQL are pushed
         # down to ArangoDB per batch (P5c.1.5). They are *not* added to
@@ -157,7 +168,21 @@ class NodeTransformer:
             if val is None:
                 raise ValueError(f"Row missing PK value for column '{pk_col}': {row}")
             pk_values.append(sanitize_key_component(val))
-        return self.key_separator.join(pk_values)
+        key = self.key_separator.join(pk_values)
+        if self.lpg is not None:
+            # ``customers/1`` and ``orders/1`` are distinct in the pg layout but
+            # both become ``nodes/1`` once collapsed into one collection — the
+            # second silently overwrites the first. Namespace by label.
+            key = f"{self.label}{self.key_separator}{key}"
+        return key
+
+    def _decorate_lpg(self, doc: Dict[str, Any]) -> Dict[str, Any]:
+        """Attach the LPG type carriers: the label array and the origin table."""
+        if self.lpg is None:
+            return doc
+        doc[self.lpg.label_field] = [self.label]
+        doc[self.lpg.source_field] = self.table_def.name
+        return doc
 
     def transform_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
         key = self._generate_key(row)
@@ -166,7 +191,7 @@ class NodeTransformer:
             passthrough = row.copy()
             if key:
                 passthrough["_key"] = key
-            return passthrough
+            return self._decorate_lpg(passthrough)
 
         col_by_name: Dict[str, Column] = {c.name: c for c in self.table_def.columns}
         known = set(col_by_name.keys())
@@ -199,7 +224,7 @@ class NodeTransformer:
 
         if key:
             doc["_key"] = key
-        return doc
+        return self._decorate_lpg(doc)
 
     def _apply_field_expression(
         self,

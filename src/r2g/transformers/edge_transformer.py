@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 from r2g.keys import sanitize_key_component
 from r2g.log import get_logger
-from r2g.types import CollectionMapping, EdgeDefinition, Schema, Table
+from r2g.types import CollectionMapping, EdgeDefinition, LpgLayout, Schema, Table
 
 logger = get_logger(__name__)
 
@@ -20,6 +20,10 @@ class EdgeTransformer:
         join_mode: bool = False,
         from_name: str | None = None,
         to_name: str | None = None,
+        lpg: LpgLayout | None = None,
+        from_label: str | None = None,
+        to_label: str | None = None,
+        edge_type: str | None = None,
     ) -> None:
         self.edge_def = edge_def
         self.source_table = source_table
@@ -31,6 +35,41 @@ class EdgeTransformer:
         # resolved ``target_collection`` names so endpoints stay valid.
         self.from_name = from_name or edge_def.from_collection
         self.to_name = to_name or edge_def.to_collection
+        # LPG layout (P13). Capture the endpoint *labels* from the resolved
+        # collection names BEFORE redirecting both endpoints at the single node
+        # collection — in this layout the type stops being the collection and
+        # becomes data, copied onto the edge so a vertex-centric index can
+        # filter on it.
+        self.lpg = lpg
+        self.from_label = from_label or self.from_name
+        self.to_label = to_label or self.to_name
+        self.edge_type = edge_type or edge_def.edge_collection
+        if lpg is not None:
+            self.from_name = lpg.node_collection
+            self.to_name = lpg.node_collection
+
+    def _ns(self, label: str, key: str) -> str:
+        """Label-namespace a vertex key. Identity in the ``pg`` layout."""
+        if self.lpg is None:
+            return key
+        return f"{label}{self.key_separator}{key}"
+
+    def _edge_key(self, from_ref: str, to_ref: str) -> str:
+        if self.lpg is None:
+            return f"{from_ref}{self.key_separator}{to_ref}"
+        # One edge collection now holds every type, so two different edge types
+        # joining the same pair would collide on ``_key``. Lead with the type.
+        return self.key_separator.join((self.edge_type, from_ref, to_ref))
+
+    def _decorate_lpg(self, doc: Dict[str, Any]) -> Dict[str, Any]:
+        """Attach the type + endpoint-label copies the VCIs index on."""
+        if self.lpg is None:
+            return doc
+        doc[self.lpg.type_field] = self.edge_type
+        doc[self.lpg.from_labels_field] = [self.from_label]
+        doc[self.lpg.to_labels_field] = [self.to_label]
+        doc[self.lpg.source_field] = self.source_table.name
+        return doc
 
     @classmethod
     def for_join_table(
@@ -98,13 +137,14 @@ class EdgeTransformer:
             return None
 
         to_key = self.key_separator.join(fk_parts)
-        edge_key = f"{src_key}{self.key_separator}{to_key}"
-        return {
-            "_key": edge_key,
-            "_from": f"{self.from_name}/{src_key}",
-            "_to": f"{self.to_name}/{to_key}",
+        from_ref = self._ns(self.from_label, src_key)
+        to_ref = self._ns(self.to_label, to_key)
+        return self._decorate_lpg({
+            "_key": self._edge_key(from_ref, to_ref),
+            "_from": f"{self.from_name}/{from_ref}",
+            "_to": f"{self.to_name}/{to_ref}",
             "_label": self.edge_def.edge_collection,
-        }
+        })
 
     def _transform_join_row(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         from_parts: list[str] = []
@@ -133,13 +173,14 @@ class EdgeTransformer:
 
         from_key = self.key_separator.join(from_parts)
         to_key = self.key_separator.join(to_parts)
-        edge_key = f"{from_key}{self.key_separator}{to_key}"
-        return {
-            "_key": edge_key,
-            "_from": f"{self.from_name}/{from_key}",
-            "_to": f"{self.to_name}/{to_key}",
+        from_ref = self._ns(self.from_label, from_key)
+        to_ref = self._ns(self.to_label, to_key)
+        return self._decorate_lpg({
+            "_key": self._edge_key(from_ref, to_ref),
+            "_from": f"{self.from_name}/{from_ref}",
+            "_to": f"{self.to_name}/{to_ref}",
             "_label": self.edge_def.edge_collection,
-        }
+        })
 
     def transform_rows(self, rows: Iterable[Dict[str, Any]]) -> Generator[Dict[str, Any], None, None]:
         for row in rows:
