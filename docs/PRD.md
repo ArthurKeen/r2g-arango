@@ -1062,6 +1062,46 @@ Serves the **Contextual Data Fabric** project (fabric modules M4 Mapping Layer a
 
 ---
 
+### Phase 13: LPG target layout -- P13.1–P13.5 implemented; P13.6–P13.7 planned
+
+Until now r2g's ArangoDB target has had exactly one physical shape: a document
+collection per node type and an edge collection per edge type (call it **PG**).
+That shape is a good default — the type *is* the collection, so per-type
+indexes, sharding, and permissions come free, and a traversal is scoped by
+which edge collection it walks. It is not the only shape people want. The
+**LPG** shape puts every node in one collection carrying a `labels` array and
+every edge in one collection carrying a `type` property, which is what you
+choose when types churn, when a node legitimately has several labels, or when a
+downstream tool expects that model.
+
+The design consequence is that everything the collection used to express must
+move **into the documents** — and that is not merely a serialization change:
+
+- **Two collapse hazards, both silent.** Distinct in PG, colliding in LPG:
+  `customers/1` and `orders/1` both become `nodes/1`, and two edge types joining
+  the same pair produce one `_key`. Neither errors; each just overwrites. Keys
+  are therefore label-namespaced, and the edge key leads with its type.
+- **Filtering must be paid for.** A traversal that was scoped by its edge
+  collection now shares one collection with every other type, so the engine
+  would load each incident edge and discard the misses. Hence **vertex-centric
+  indexes**, and hence the copied endpoint labels that make them possible.
+
+| ID | Requirement | Notes |
+|---|---|---|
+| **P13.1 ✅** | **Selectable layout.** `MappingConfig.graph_layout` is `pg` (default) or `lpg`, with an `LpgLayout` model naming the collections and fields. The default is omitted from serialization, so every mapping written before P13 is byte-identical. | `src/r2g/types.py:304` (`LpgLayout`), `:350` (`graph_layout`); guarded by the serialization compatibility corpus. |
+| **P13.2 ✅** | **Collapse-safe identity.** Node `_key` is label-namespaced (`<Label><sep><pk>`, e.g. `Account_42`); edge `_key` leads with the edge type. Both hazards lose data *silently* in the PG→LPG collapse, so neither may be left to chance. Nodes carry `labels[]`; edges carry `type`. | `src/r2g/transformers/node_transformer.py:176`, `:183`; `src/r2g/transformers/edge_transformer.py`. |
+| **P13.3 ✅** | **Vertex-centric indexing.** Each edge carries copies of its endpoints' labels (`fromLabels`/`toLabels`) *alongside* `type`, so persistent indexes `[_from, type, toLabels[*]]` and `[_to, type, fromLabels[*]]` can satisfy a type- and label-filtered traversal from the index. The copies are load-bearing: were the labels left on the neighbour node, an index on the edge collection could never reach them. A `labels[*]` index on the node collection serves traversal entry points. | `src/r2g/lpg.py:58` (`edge_indexes`), `:39` (`vertex_indexes`). One array expansion per index — a persistent index may not expand two. |
+| **P13.4 ✅** | **Traversals must be hinted.** Generated traversal templates carry the **nested** per-collection/per-direction/per-level `indexHint`; the familiar flat `indexHint: 'name'` form is *silently ignored* by traversals — no error, no effect, not even with `forceIndexHint` — so an unhinted traversal degrades to the built-in `edge` index with identical results and very different cost. Index usage is asserted against a live `explain`, never assumed. | `src/r2g/lpg.py:130` (`traversal_index_hint`). Verified on ArangoDB 3.12.9, both directions, including the array-expanded label field. Templates avoid `arr[*] ALL == x` (trivially true over a one-element array) and always emit `WITH` (absent, it passes on single-server and fails on cluster with error 1521). |
+| **P13.5 ✅** | **Provisioning.** One named-graph edge definition (one edge collection, both endpoints the one node collection), with the collections and indexes created idempotently. The edge collection **must** be created with `edge=True`: as a document collection it succeeds quietly, then `create_graph` fails ERR 1944 and traversals return nothing — a failure that surfaces far from its cause. | `src/r2g/connectors/arango_writer.py:336` (`ensure_indexes`); `src/r2g/lpg.py` (`graph_edge_definition`). |
+| **P13.6** | **Pipeline routing.** The streaming/batch load paths route every document into the single node collection and every edge into the single edge collection when `graph_layout: lpg`, so an LPG target loads end-to-end. | **Planned.** The transformers already emit LPG-shaped documents; the loader still targets per-type collections. |
+| **P13.7** | **Layout-aware CSI export.** The CSI v1 vocabulary already distinguishes these layouts — `COLLECTION`/`DEDICATED_COLLECTION` versus `LABEL`/`GENERIC_WITH_TYPE` — and r2g currently pins the former pair unconditionally. The emitter should report the layout it actually produced, so a federation mapping describes the real physical shape. | **Planned.** `src/r2g/csi.py:42-43`; the schema enum already permits it, so no contract change is needed. |
+
+**Round-tripping.** Nodes and edges also carry `sourceTable`, so an LPG graph
+stays self-describing and reversible back to the PG layout rather than becoming
+a one-way projection.
+
+---
+
 ## 6. Future considerations (Phase 7+) -- Exploratory
 
 These ideas are exploratory and represent potential directions, not committed work. Each would require significant design effort.
@@ -1134,5 +1174,6 @@ These ideas are exploratory and represent potential directions, not committed wo
 | **P6.7 Cross-source shared-key inference — Planned** | **August 2026** | Added P6.7 to the Phase 6 FK-inference family (no code yet). The ClickHouse work exposed the gap: P6.6 inference is single-schema and name-anchored to an in-schema parent table (RSA `_candidates_for_column` — `{prefix}_id → prefix(s).pk` or direct PK-name match; the value-overlap sampler only *reweights* name-derived candidates, never creates them), so a cross-source join key such as `account_id` (shared by ClickHouse `query_events`/`usage_metrics`, FK to the Postgres CRM `Account`) yields zero candidates — the federation join key is invisible to inference. P6.7 proposes shared-key **hub** relationships across two or more sources under the same confirm-to-accept discipline, feeding accepted keys into the Phase-12 CSI/R2RML → E1 routing path. Reverse-drift `new-requirement` accepted for review (prd_patches `r2g_REQ-XSK_20260807`). |
 | **P6.7 Cross-source shared-key inference — Done (producer side)** | **August 2026** | P6.7 implemented: `src/r2g/xsk.py` groups key-shaped columns co-occurring across two or more sources, gates them on JSON-level type compatibility, and proposes a hub — the owning table (sole PK, else a name-matched table) or, when no source owns the key, a **virtual hub concept with no table invented for it**. Accepted keys persist on `MappingConfig.shared_keys` and export as `conceptualModel.joinKeys`; surfaced via `POST /api/shared-keys/infer`, `r2g shared-keys infer`, and a Studio card (shortcut `k`). Confirm-to-accept throughout, and every grouped-but-excluded column is returned with a machine-readable reason, so "no candidates" is always distinguishable from "filtered out". Verified live on `clickhouse_analytics` + `crm`: `account_id` → hub `Account` @ `crm.accounts.account_id` with `query_events` / `usage_metrics` as references — exactly the requirement's stated example. Also fixed `DEFAULT_TYPE_MAP`, which had no ClickHouse entries, so `UInt64`/`UInt8` fell through to `"string"` and the type-compatibility gate would have rejected a ClickHouse `UInt64` key against a PostgreSQL `bigint`. Consumer side (Phase-12 E1 partitioner routing, R2RML join keys) remains open — drift alert `P6.7-E1-ROUTING`. Applied from prd_patches `r2g_P6.7_20260815`. |
 | **P12.1 Conceptual label uniqueness in CSI** | **August 2026** | Reported downstream with benchmark evidence: two entities emitting the same attribute label (`Contract.renewalDate` / `Opportunity.renewalDate`) made every question mentioning it ambiguous by construction for a consumer deriving a flat vocabulary, and renaming six colliding labels by hand moved that benchmark 0% → 25% on three-source questions and 60% → 69% overall, after four algorithmic attempts in the consuming repo moved nothing. Resolved at extraction time under `export-csi --label-policy` (`qualify` \| `roles` \| `warn` \| `off`), with collisions always recorded in `provenance.labelCollisions`. Measured over the six shipped catalogs: `roles` leaves **zero** duplicate labels everywhere, where `qualify` cannot resolve `id` in `crm_demo` / `library_graph`; classification totals 34 semantic / 23 owner-canonical / 6 identity with **zero** ambiguous (mixed-role) cases. `qualify` remains the default pending a benchmark comparison of the two policies in the consuming repo. Applied from prd_patches `r2g_P12.1-LABELS_20260815`. |
+| **Phase 13 — LPG target layout** | **September 2026** | Added a selectable ArangoDB target shape: `graph_layout: pg` (default, unchanged) or `lpg` (one node collection with a `labels` array, one edge collection with a `type` property). Collapsing the per-type collections exposes two hazards that lose data *silently* — `customers/1` and `orders/1` both become `nodes/1`, and two edge types joining the same pair share one `_key` — so node keys are label-namespaced and edge keys lead with the type. Filtering is restored by **vertex-centric indexes** over copies of each edge's endpoint labels (`[_from, type, toLabels[*]]` and the inbound mirror); the copies are load-bearing, since labels left on the neighbour node are unreachable from an index on the edge collection. **Measured, not assumed:** a traversal uses those indexes only with the **nested** per-collection/per-direction/per-level `indexHint` — the flat `indexHint: 'name'` form is silently ignored, not even `forceIndexHint` overrides it — which made the limitation look fundamental when it was syntactic. Verified against live ArangoDB 3.12.9 for both directions including the array-expanded label field; the unhinted fallback is pinned by a test so the reason the hint exists stays visible. P13.6 (pipeline routing) and P13.7 (layout-aware CSI export) remain planned. Applied from prd_patches `r2g_P13_20260902`. |
 
 The source files `PRD-gemini.md` and `PRD-notebooklm.md` remain in the repository for reference and are superseded by this file.
