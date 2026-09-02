@@ -136,9 +136,25 @@ def label_predicate(field: str, *, mode: str = "has", bind: str = "label") -> st
       label came from.
     - chained array operators (``ALL ANY ==``) are a **syntax error**.
 
-    A ``FILTER`` on ``e`` inside the traversal avoids all of this: AQL applies
-    it per hop (so "every hop satisfies it" falls out naturally), and it is the
-    only form the vertex-centric index can serve.
+    Note what is *not* wrong with ``[*]``: it is **not** slow. The optimizer
+    pushes ``p.edges[*].f ALL == @v`` into the traverser as a *global edge
+    condition* and serves it from the vertex-centric index — measured on
+    3.12.9. On a **scalar** field that makes it the right tool (the depth-ranged
+    templates use it for ``type``). The problem is specific to list-valued
+    fields, where the pushed-down condition is fast **and wrong**: it matches
+    nothing, which is worse than a slow correct filter.
+
+    So for a label array there is no correct pushed-down all-hops form. The
+    choices are an inline array filter —
+    ``LENGTH(p.edges[* FILTER @l IN CURRENT.toLabels]) == LENGTH(p.edges)`` —
+    which is correct but post-filtered, or restricting the label test to a
+    single hop (where ``e`` *is* the only edge and the VCI serves it), or
+    testing the destination vertex's own ``labels``, which is what the
+    depth-ranged templates do.
+
+    Beware also that ``e`` is not a shortcut for "every edge": at depth > 1 it
+    is the **final** edge of the emitted path, so a ``FILTER`` on ``e`` in a
+    multi-hop traversal constrains only the last hop.
     """
     if mode not in LABEL_MODES:
         raise ValueError(f"label mode must be one of {LABEL_MODES}, got {mode!r}")
@@ -205,29 +221,51 @@ def traversal_templates(lpg: LpgLayout) -> Dict[str, str]:
             f"  LIMIT @limit\n"
             f"  RETURN n"
         ),
+        # Multi-hop: "every hop is of this type, and the vertex I land on has
+        # this label". The type test uses the ``[*] ALL ==`` form deliberately —
+        # on a SCALAR field it is correct, and the optimizer pushes it into the
+        # traverser as a global edge condition served by the VCI. A ``FILTER``
+        # on ``e`` would be wrong here: at depth > 1 ``e`` is only the FINAL
+        # edge of the emitted path, so it constrains the last hop and lets paths
+        # through non-matching earlier edges. The label test goes on the
+        # destination vertex ``v`` rather than the edge's copy, because that is
+        # what "landed on an X" means at any depth — and because no ``[*]`` form
+        # can correctly test a LIST field across hops (see label_predicate).
         "outbound_by_type": (
             f"WITH {node}\n"
-            f"FOR v, e IN 1..@depth OUTBOUND @start {edge_c}\n"
+            f"FOR v, e, p IN 1..@depth OUTBOUND @start {edge_c}\n"
             f"  {traversal_index_hint(lpg, 'outbound')}\n"
-            f"  FILTER e.{type_f} == @type\n"
-            f"  FILTER @toLabel IN e.{to_l}\n"
+            f"  FILTER p.edges[*].{type_f} ALL == @type\n"
+            f"  FILTER @toLabel IN v.{label_f}\n"
             f"  RETURN {{vertex: v, edge: e}}"
         ),
         "inbound_by_type": (
             f"WITH {node}\n"
-            f"FOR v, e IN 1..@depth INBOUND @start {edge_c}\n"
+            f"FOR v, e, p IN 1..@depth INBOUND @start {edge_c}\n"
             f"  {traversal_index_hint(lpg, 'inbound')}\n"
-            f"  FILTER e.{type_f} == @type\n"
-            f"  FILTER @fromLabel IN e.{from_l}\n"
+            f"  FILTER p.edges[*].{type_f} ALL == @type\n"
+            f"  FILTER @fromLabel IN v.{label_f}\n"
             f"  RETURN {{vertex: v, edge: e}}"
         ),
-        # One hop, no depth binding — the shape most likely to be index-checked.
+        # Single hop: `e` IS the only edge, so the edge-variable filters are
+        # exactly right — and this is the shape the VCIs were designed for,
+        # since type + the far endpoint's copied label are both in the index.
         "neighbors_by_type": (
             f"WITH {node}\n"
             f"FOR v, e IN 1..1 OUTBOUND @start {edge_c}\n"
             f"  {traversal_index_hint(lpg, 'outbound')}\n"
             f"  FILTER e.{type_f} == @type\n"
             f"  FILTER @toLabel IN e.{to_l}\n"
+            f"  RETURN v"
+        ),
+        # The inbound mirror, so the [_to, type, fromLabels[*]] index has a
+        # single-hop template that actually exercises its label field.
+        "inbound_neighbors_by_type": (
+            f"WITH {node}\n"
+            f"FOR v, e IN 1..1 INBOUND @start {edge_c}\n"
+            f"  {traversal_index_hint(lpg, 'inbound')}\n"
+            f"  FILTER e.{type_f} == @type\n"
+            f"  FILTER @fromLabel IN e.{from_l}\n"
             f"  RETURN v"
         ),
     }

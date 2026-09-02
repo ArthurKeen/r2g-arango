@@ -262,16 +262,34 @@ class TestLpgGraphDefinition:
 
 
 class TestLpgTraversalTemplates:
-    def test_filters_match_the_indexed_fields(self):
-        t = traversal_templates(LPG)["outbound_by_type"]
+    def test_single_hop_filters_match_the_indexed_fields(self):
+        t = traversal_templates(LPG)["neighbors_by_type"]
         assert "e.type == @type" in t
         assert "@toLabel IN e.toLabels" in t
 
-    def test_label_test_avoids_the_ALL_over_scalar_no_op(self):
-        """`arr[*] ALL == x` over a one-element array is trivially true — a
-        filter that reads as restrictive and restricts nothing."""
-        for q in traversal_templates(LPG).values():
-            assert "ALL ==" not in q
+    def test_multi_hop_type_filter_constrains_every_hop(self):
+        """At depth > 1 `e` is only the FINAL edge, so a FILTER on it lets
+        paths through non-matching earlier edges. The `[*] ALL ==` form is the
+        correct all-hops test AND is pushed into the traverser as a global edge
+        condition served by the VCI (measured on 3.12.9)."""
+        t = traversal_templates(LPG)["outbound_by_type"]
+        assert "p.edges[*].type ALL == @type" in t
+        assert "e.type == @type" not in t
+
+    def test_multi_hop_label_filter_tests_the_destination_vertex(self):
+        """No `[*]` form can correctly test a LIST field across hops, so the
+        label test moves to the vertex actually landed on."""
+        t = traversal_templates(LPG)["outbound_by_type"]
+        assert "@toLabel IN v.labels" in t
+        assert "IN e.toLabels" not in t
+
+    def test_no_star_form_is_applied_to_a_label_array(self):
+        """`[*] ALL ==` is right for a SCALAR field (pushed down, VCI-served)
+        but silently matches nothing on a list field, so it must never be
+        pointed at a label array."""
+        for name, q in traversal_templates(LPG).items():
+            for list_field in ("toLabels", "fromLabels", "labels"):
+                assert f"p.edges[*].{list_field}" not in q, name
 
     def test_traversals_name_their_vertex_collection(self):
         """Missing WITH passes on single-server and fails on cluster (err 1521)."""

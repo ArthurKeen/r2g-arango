@@ -697,3 +697,78 @@ class TestLpgMultiLabel:
         ok_edge_var = base + "@label IN e.toLabels RETURN v._key"
         assert list(db.aql.execute(ok_positional, bind_vars=bind)) == ["A_1"]
         assert list(db.aql.execute(ok_edge_var, bind_vars=bind)) == ["A_1"]
+
+
+@requires_arango
+class TestLpgMultiHopSemantics:
+    """Depth > 1: `e` is the FINAL edge, not every edge.
+
+    A `FILTER` on `e` therefore constrains only the last hop and lets paths
+    through non-matching earlier edges — which is why the depth-ranged
+    templates use the `[*] ALL ==` form for the edge type. On a SCALAR field
+    that form is both correct and pushed into the traverser as a global edge
+    condition served by the VCI; the earlier `e`-based template silently
+    over-returned.
+    """
+
+    def _seed(self, db):
+        nodes = db.create_collection(LPG.node_collection)
+        edges = db.create_collection(LPG.edge_collection, edge=True)
+        for spec in vertex_indexes(LPG):
+            nodes.add_index(spec)
+        for spec in edge_indexes(LPG):
+            edges.add_index(spec)
+        nodes.insert_many([
+            {"_key": "O_1", "labels": ["Order"]},
+            {"_key": "M_1", "labels": ["Mid"]}, {"_key": "M_2", "labels": ["Mid"]},
+            {"_key": "A_1", "labels": ["Account"]}, {"_key": "A_2", "labels": ["Account"]},
+        ])
+        # A_1 is reached by good->good; A_2 by bad->good.
+        edges.insert_many([
+            {"_from": "nodes/O_1", "_to": "nodes/M_1", "type": "good",
+             "fromLabels": ["Order"], "toLabels": ["Mid"]},
+            {"_from": "nodes/M_1", "_to": "nodes/A_1", "type": "good",
+             "fromLabels": ["Mid"], "toLabels": ["Account"]},
+            {"_from": "nodes/O_1", "_to": "nodes/M_2", "type": "bad",
+             "fromLabels": ["Order"], "toLabels": ["Mid"]},
+            {"_from": "nodes/M_2", "_to": "nodes/A_2", "type": "good",
+             "fromLabels": ["Mid"], "toLabels": ["Account"]},
+        ])
+
+    def _bind(self):
+        return {"start": f"{LPG.node_collection}/O_1", "depth": 2,
+                "type": "good", "toLabel": "Account"}
+
+    def test_every_hop_must_match_the_type(self, arango_test_db):
+        _, db = arango_test_db
+        self._seed(db)
+        rows = sorted(
+            r["vertex"]["_key"]
+            for r in db.aql.execute(traversal_templates(LPG)["outbound_by_type"],
+                                    bind_vars=self._bind())
+        )
+        # A_2 sits behind a 'bad' first hop and must not be returned.
+        assert rows == ["A_1"]
+
+    def test_the_all_form_is_pushed_into_the_traverser(self, arango_test_db):
+        """`[*] ALL ==` on a scalar is not a post-filter: it becomes a global
+        edge condition and is served by the vertex-centric index."""
+        _, db = arango_test_db
+        self._seed(db)
+        ex = db.aql.explain(traversal_templates(LPG)["outbound_by_type"],
+                            bind_vars=self._bind())
+        assert any(node.get("globalEdgeConditions")
+                   for node in ex["nodes"] if node["type"] == "TraversalNode")
+        assert uses_vertex_centric_index(ex)
+        assert not [n for n in ex["nodes"] if n["type"] == "FilterNode"]
+
+    def test_an_edge_variable_filter_would_leak(self, arango_test_db):
+        """Pins the bug the template fix removed, so it cannot return."""
+        _, db = arango_test_db
+        self._seed(db)
+        leaky = (
+            f"WITH {LPG.node_collection}\n"
+            f"FOR v, e IN 1..@depth OUTBOUND @start {LPG.edge_collection}\n"
+            f"  FILTER e.type == @type FILTER @toLabel IN e.toLabels RETURN v._key"
+        )
+        assert sorted(db.aql.execute(leaky, bind_vars=self._bind())) == ["A_1", "A_2"]
