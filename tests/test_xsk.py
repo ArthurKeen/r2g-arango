@@ -32,7 +32,6 @@ from r2g.xsk import (
     infer_shared_keys,
 )
 
-
 # ── Fixtures ─────────────────────────────────────────────────────────
 
 
