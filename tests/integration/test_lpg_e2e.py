@@ -25,6 +25,8 @@ from r2g.lpg import (
     edge_indexes,
     graph_edge_definition,
     indexes_used,
+    label_predicate,
+    traversal_index_hint,
     traversal_templates,
     uses_vertex_centric_index,
     vertex_indexes,
@@ -575,3 +577,123 @@ class TestLpgCdcLive:
         for d in tx.transform(self._event("DELETE", "orders", old={"id": 10, "account_id": 1})):
             writer.apply_delta(d)
         assert not db.collection(LPG.node_collection).has("Order_10")
+
+
+@requires_arango
+class TestLpgMultiLabel:
+    """Multi-label vertices: the case the `labels` array exists for.
+
+    r2g's loader writes exactly one label per node today, so these tests seed
+    multi-label documents directly — the point is that the *layout and its
+    indexes* stay correct when a node carries several labels, which is what a
+    consumer (or a future multi-label mapping) will rely on.
+    """
+
+    def _seed(self, db):
+        nodes = db.create_collection(LPG.node_collection)
+        edges = db.create_collection(LPG.edge_collection, edge=True)
+        for spec in vertex_indexes(LPG):
+            nodes.add_index(spec)
+        for spec in edge_indexes(LPG):
+            edges.add_index(spec)
+        nodes.insert_many([
+            {"_key": "O_1", "labels": ["Order"]},
+            {"_key": "A_1", "labels": ["Account", "Customer", "Premium"]},
+            {"_key": "A_2", "labels": ["Account"]},
+        ])
+        edges.insert_many([
+            {"_from": "nodes/O_1", "_to": "nodes/A_1", "type": "placedBy",
+             "fromLabels": ["Order"], "toLabels": ["Account", "Customer", "Premium"]},
+            {"_from": "nodes/O_1", "_to": "nodes/A_2", "type": "placedBy",
+             "fromLabels": ["Order"], "toLabels": ["Account"]},
+        ])
+        return nodes, edges
+
+    def _traverse(self, db, predicate, bind):
+        q = (
+            f"WITH {LPG.node_collection}\n"
+            f"FOR v, e IN 1..1 OUTBOUND @start {LPG.edge_collection}\n"
+            f"  {traversal_index_hint(LPG, 'outbound')}\n"
+            f"  FILTER e.type == @type\n"
+            f"  FILTER {predicate}\n"
+            f"  RETURN DISTINCT v._key"
+        )
+        bind_vars = {"start": f"{LPG.node_collection}/O_1", "type": "placedBy", **bind}
+        return sorted(db.aql.execute(q, bind_vars=bind_vars)), db.aql.explain(q, bind_vars=bind_vars)
+
+    def test_single_label_test_finds_multi_label_nodes(self, arango_test_db):
+        _, db = arango_test_db
+        self._seed(db)
+        rows, ex = self._traverse(db, label_predicate("e.toLabels"), {"label": "Account"})
+        assert rows == ["A_1", "A_2"]           # A_1 has 3 labels, A_2 has 1
+        assert uses_vertex_centric_index(ex)     # still index-served
+
+    def test_a_label_unique_to_the_multi_label_node(self, arango_test_db):
+        _, db = arango_test_db
+        self._seed(db)
+        rows, ex = self._traverse(db, label_predicate("e.toLabels"), {"label": "Premium"})
+        assert rows == ["A_1"]
+        assert uses_vertex_centric_index(ex)
+
+    def test_conjunction_requires_every_label(self, arango_test_db):
+        """Cypher `:Account:Premium` — A_2 has Account but not Premium."""
+        _, db = arango_test_db
+        self._seed(db)
+        rows, ex = self._traverse(
+            db, label_predicate("e.toLabels", mode="all", bind="ls"),
+            {"ls": ["Account", "Premium"]},
+        )
+        assert rows == ["A_1"]
+        assert uses_vertex_centric_index(ex)
+
+    def test_disjunction_accepts_either_label(self, arango_test_db):
+        """Cypher `:Premium|Customer`."""
+        _, db = arango_test_db
+        self._seed(db)
+        rows, _ = self._traverse(
+            db, label_predicate("e.toLabels", mode="any", bind="ls"),
+            {"ls": ["Premium", "Nonexistent"]},
+        )
+        assert rows == ["A_1"]
+
+    def test_negation_excludes_the_labelled_node(self, arango_test_db):
+        _, db = arango_test_db
+        self._seed(db)
+        rows, _ = self._traverse(
+            db, label_predicate("e.toLabels", mode="none", bind="ls"), {"ls": ["Premium"]},
+        )
+        assert rows == ["A_2"]
+
+    def test_vertex_label_index_serves_a_multi_label_array(self, arango_test_db):
+        _, db = arango_test_db
+        self._seed(db)
+        q = traversal_templates(LPG)["nodes_by_label"]
+        ex = db.aql.explain(q, bind_vars={"label": "Premium", "limit": 10})
+        assert VERTEX_LABEL_INDEX in indexes_used(ex)
+        rows = [d["_key"] for d in db.aql.execute(q, bind_vars={"label": "Premium", "limit": 10})]
+        assert rows == ["A_1"]
+
+    def test_the_star_path_form_is_silently_wrong(self, arango_test_db):
+        """Why label_predicate refuses to emit `p.edges[*]`.
+
+        For a LIST-valued field the `[*]` form yields a NESTED array, so both
+        the `ALL ==` and the `IN` shapes match nothing — and return an empty
+        result rather than an error. A transpiler emitting either would produce
+        queries that look right and quietly answer nothing.
+        """
+        _, db = arango_test_db
+        self._seed(db)
+        base = (
+            f"WITH {LPG.node_collection}\n"
+            f"FOR v, e, p IN 1..1 OUTBOUND @start {LPG.edge_collection}\n  FILTER "
+        )
+        bind = {"start": f"{LPG.node_collection}/O_1", "label": "Premium"}
+        broken_all = base + "p.edges[*].toLabels ALL == @label RETURN v._key"
+        broken_in = base + "@label IN p.edges[*].toLabels RETURN v._key"
+        assert list(db.aql.execute(broken_all, bind_vars=bind)) == []
+        assert list(db.aql.execute(broken_in, bind_vars=bind)) == []
+        # The correct per-hop forms, for contrast.
+        ok_positional = base + "@label IN p.edges[0].toLabels RETURN v._key"
+        ok_edge_var = base + "@label IN e.toLabels RETURN v._key"
+        assert list(db.aql.execute(ok_positional, bind_vars=bind)) == ["A_1"]
+        assert list(db.aql.execute(ok_edge_var, bind_vars=bind)) == ["A_1"]

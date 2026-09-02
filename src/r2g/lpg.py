@@ -106,6 +106,47 @@ def graph_edge_definition(lpg: LpgLayout) -> Dict[str, Any]:
     }
 
 
+#: How a set of labels is compared against a node's or edge's label array.
+#: These map 1:1 onto Cypher's label expressions, and all three are correct
+#: against a **multi-label** array (verified on 3.12.9):
+#:
+#: - ``has``  — one label present: ``@l IN e.toLabels``            (Cypher ``:A``)
+#: - ``all``  — every label present: ``@ls ALL IN e.toLabels``     (Cypher ``:A:B``)
+#: - ``any``  — at least one present: ``@ls ANY IN e.toLabels``    (Cypher ``:A|B``)
+#: - ``none`` — none present: ``@ls NONE IN e.toLabels``
+LABEL_MODES = ("has", "all", "any", "none")
+
+
+def label_predicate(field: str, *, mode: str = "has", bind: str = "label") -> str:
+    """An AQL predicate testing a label array, in the form that stays correct.
+
+    ``field`` is the full accessor (``e.toLabels``, ``n.labels``) and ``bind``
+    the bind-parameter name (a scalar for ``has``, a list otherwise).
+
+    **Write the filter against the edge variable ``e``, never against
+    ``p.edges[*]``.** For a *list-valued* field the ``[*]`` form expands to a
+    **nested** array — ``[["Account","Premium"]]`` — so on 3.12.9:
+
+    - ``p.edges[*].toLabels ALL == @l`` compares each inner *array* to a scalar
+      and matches nothing: it returns an **empty result, not an error**.
+    - ``@l IN p.edges[*].toLabels`` looks for the scalar among inner arrays and
+      likewise returns nothing.
+    - ``FLATTEN(p.edges[*].toLabels)`` does work, but only expresses *some hop*
+      — it cannot say "every hop", because flattening discards which hop each
+      label came from.
+    - chained array operators (``ALL ANY ==``) are a **syntax error**.
+
+    A ``FILTER`` on ``e`` inside the traversal avoids all of this: AQL applies
+    it per hop (so "every hop satisfies it" falls out naturally), and it is the
+    only form the vertex-centric index can serve.
+    """
+    if mode not in LABEL_MODES:
+        raise ValueError(f"label mode must be one of {LABEL_MODES}, got {mode!r}")
+    if mode == "has":
+        return f"@{bind} IN {field}"
+    return f"@{bind} {mode.upper()} IN {field}"
+
+
 def traversal_index_hint(lpg: LpgLayout, direction: str) -> str:
     """The ``OPTIONS`` clause that points a traversal at its VCI.
 

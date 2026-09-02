@@ -23,6 +23,7 @@ from r2g.lpg import (
     EDGE_OUTBOUND_INDEX,
     edge_indexes,
     graph_edge_definition,
+    label_predicate,
     traversal_index_hint,
     traversal_templates,
     uses_vertex_centric_index,
@@ -615,3 +616,28 @@ class TestLpgCdcRouting:
         doc = next(d for d in deltas if not d.is_edge).document
         assert doc["_key"] == "10"
         assert "labels" not in doc
+
+
+class TestLabelPredicate:
+    """The label-array filter forms, mapped onto Cypher's label expressions."""
+
+    def test_has_one_label(self):
+        assert label_predicate("e.toLabels") == "@label IN e.toLabels"
+
+    def test_conjunction_matches_cypher_colon_a_colon_b(self):
+        assert label_predicate("e.toLabels", mode="all", bind="ls") == "@ls ALL IN e.toLabels"
+
+    def test_disjunction_matches_cypher_a_pipe_b(self):
+        assert label_predicate("e.toLabels", mode="any", bind="ls") == "@ls ANY IN e.toLabels"
+
+    def test_negation(self):
+        assert label_predicate("n.labels", mode="none", bind="ls") == "@ls NONE IN n.labels"
+
+    def test_unknown_mode_is_refused(self):
+        with pytest.raises(ValueError, match="label mode"):
+            label_predicate("e.toLabels", mode="most")
+
+    def test_never_emits_the_nested_star_form(self):
+        """`p.edges[*].toLabels` nests, so ALL ==/IN silently match nothing."""
+        for mode in ("has", "all", "any", "none"):
+            assert "[*]" not in label_predicate("e.toLabels", mode=mode)
