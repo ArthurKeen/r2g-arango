@@ -331,6 +331,13 @@ class ConfigManager:
         the named graph references the collections that actually hold the data
         even after collections are renamed.
         """
+        if config.graph_layout == "lpg":
+            # One edge collection, both endpoints the one node collection: any
+            # type may connect to any type, with the constraint carried by the
+            # edge's `type` / endpoint-label fields rather than by the schema.
+            from r2g.lpg import graph_edge_definition
+
+            return [graph_edge_definition(config.lpg)]
         target_by_source = ConfigManager.target_by_source_table(config)
         defs: list[dict[str, Any]] = []
         for edge in config.edges:

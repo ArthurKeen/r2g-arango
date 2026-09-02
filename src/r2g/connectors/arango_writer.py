@@ -333,6 +333,44 @@ class ArangoWriter:
             return True
         return False
 
+    def ensure_indexes(
+        self,
+        collection: str,
+        specs: list[dict[str, Any]],
+        *,
+        edge: bool = False,
+    ) -> None:
+        """Create the given indexes on ``collection``, idempotently.
+
+        The collection is ensured first, and an edge collection **must** be
+        created with ``edge=True``: creating it as a document collection
+        succeeds quietly, then ``create_graph`` fails with ERR 1944 and
+        traversals return nothing — a failure that surfaces far from its cause.
+
+        Named specs make re-provisioning a no-op: ArangoDB returns the existing
+        index when one with the same definition is already present.
+        """
+        self.ensure_collection(collection, edge=edge)
+        coll = self.db.collection(collection)
+        for spec in specs:
+            try:
+                coll.add_index(spec)
+                logger.info(
+                    "arango_index_ensured",
+                    collection=collection,
+                    name=spec.get("name"),
+                    fields=spec.get("fields"),
+                )
+            except Exception as err:  # noqa: BLE001 — surfaced, never silent
+                logger.warning(
+                    "arango_index_failed",
+                    collection=collection,
+                    name=spec.get("name"),
+                    fields=spec.get("fields"),
+                    error=str(err),
+                )
+                raise
+
     def create_named_graph(
         self,
         graph_name: str,

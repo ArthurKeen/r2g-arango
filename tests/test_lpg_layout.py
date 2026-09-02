@@ -11,6 +11,16 @@ and edge ``_key`` collisions between two edge types joining the same pair.
 
 from __future__ import annotations
 
+from r2g.config import ConfigManager
+from r2g.lpg import (
+    EDGE_INBOUND_INDEX,
+    EDGE_OUTBOUND_INDEX,
+    edge_indexes,
+    graph_edge_definition,
+    traversal_templates,
+    uses_vertex_centric_index,
+    vertex_indexes,
+)
 from r2g.transformers.edge_transformer import EdgeTransformer
 from r2g.transformers.node_transformer import NodeTransformer
 from r2g.types import (
@@ -166,3 +176,111 @@ class TestLpgConfig:
         back = MappingConfig.model_validate(cfg.model_dump())
         assert back.graph_layout == "lpg"
         assert (back.lpg.node_collection, back.lpg.edge_collection) == ("v", "e")
+
+
+# ── indexes / graph definition / templates ───────────────────────────
+
+
+class TestLpgIndexes:
+    def test_vertex_index_expands_the_label_array(self):
+        (idx,) = vertex_indexes(LPG)
+        assert idx["fields"] == ["labels[*]"]
+        assert idx["type"] == "persistent"
+
+    def test_vertex_centric_indexes_lead_with_the_traversal_endpoint(self):
+        out, inb = edge_indexes(LPG)
+        # _from/_to must lead: that is the lookup the traversal performs.
+        assert out["fields"] == ["_from", "type", "toLabels[*]"]
+        assert inb["fields"] == ["_to", "type", "fromLabels[*]"]
+
+    def test_each_index_expands_at_most_one_array(self):
+        """ArangoDB permits a single array expansion per persistent index."""
+        for idx in (*vertex_indexes(LPG), *edge_indexes(LPG)):
+            assert sum(1 for f in idx["fields"] if f.endswith("[*]")) <= 1
+
+    def test_index_names_are_stable_for_idempotent_provisioning(self):
+        assert {i["name"] for i in edge_indexes(LPG)} == {
+            EDGE_OUTBOUND_INDEX,
+            EDGE_INBOUND_INDEX,
+        }
+
+    def test_field_names_follow_the_configured_layout(self):
+        custom = LpgLayout(type_field="rel", to_labels_field="dstLabels")
+        out, _ = edge_indexes(custom)
+        assert out["fields"] == ["_from", "rel", "dstLabels[*]"]
+
+
+class TestLpgGraphDefinition:
+    def test_single_edge_definition_over_one_node_collection(self):
+        d = graph_edge_definition(LPG)
+        assert d["edge_collection"] == "edges"
+        assert d["from_vertex_collections"] == ["nodes"]
+        assert d["to_vertex_collections"] == ["nodes"]
+
+    def test_config_manager_returns_exactly_one_definition(self):
+        cfg = MappingConfig(source_schema="public", graph_layout="lpg")
+        cfg.edges = [
+            EdgeDefinition(
+                edge_collection=n,
+                from_collection="orders",
+                to_collection="accounts",
+                from_fields=["account_id"],
+                to_fields=["id"],
+            )
+            for n in ("placedBy", "billedTo")
+        ]
+        # Two edge types, but the LPG layout is one edge collection.
+        assert len(ConfigManager.graph_edge_definitions(cfg)) == 1
+
+    def test_pg_layout_still_yields_one_definition_per_edge(self):
+        cfg = MappingConfig(source_schema="public")
+        cfg.collections = {
+            "accounts": CollectionMapping(source_table="accounts", target_collection="Account"),
+            "orders": CollectionMapping(source_table="orders", target_collection="Order"),
+        }
+        cfg.edges = [
+            EdgeDefinition(
+                edge_collection=n,
+                from_collection="orders",
+                to_collection="accounts",
+                from_fields=["account_id"],
+                to_fields=["id"],
+            )
+            for n in ("placedBy", "billedTo")
+        ]
+        assert len(ConfigManager.graph_edge_definitions(cfg)) == 2
+
+
+class TestLpgTraversalTemplates:
+    def test_filters_match_the_indexed_fields(self):
+        t = traversal_templates(LPG)["outbound_by_type"]
+        assert "e.type == @type" in t
+        assert "@toLabel IN e.toLabels" in t
+
+    def test_label_test_avoids_the_ALL_over_scalar_no_op(self):
+        """`arr[*] ALL == x` over a one-element array is trivially true — a
+        filter that reads as restrictive and restricts nothing."""
+        for q in traversal_templates(LPG).values():
+            assert "ALL ==" not in q
+
+    def test_traversals_name_their_vertex_collection(self):
+        """Missing WITH passes on single-server and fails on cluster (err 1521)."""
+        for name, q in traversal_templates(LPG).items():
+            if "OUTBOUND" in q or "INBOUND" in q:
+                assert q.startswith("WITH nodes"), name
+
+    def test_entry_point_query_uses_the_label_field(self):
+        assert "@label IN n.labels" in traversal_templates(LPG)["nodes_by_label"]
+
+
+class TestExplainAssertion:
+    def test_detects_a_vertex_centric_index_in_a_plan(self):
+        plan = {"plan": {"nodes": [{"indexes": [{"name": EDGE_OUTBOUND_INDEX}]}]}}
+        assert uses_vertex_centric_index(plan) is True
+
+    def test_rejects_a_plan_that_fell_back_to_the_edge_index(self):
+        plan = {"plan": {"nodes": [{"indexes": [{"name": "edge"}]}]}}
+        assert uses_vertex_centric_index(plan) is False
+
+    def test_empty_plan_is_not_a_pass(self):
+        assert uses_vertex_centric_index({}) is False
