@@ -705,3 +705,40 @@ class TestOptInLabelIndexes:
             lpg=LpgLayout(index_edge_labels=True),
         )
         assert MappingConfig.model_validate(cfg.model_dump()).lpg.index_edge_labels is True
+
+
+class TestTemporalLpgGuard:
+    """P13.12: temporal mode is collection-per-type and has no LPG awareness,
+    so combining it with the LPG layout would build per-type proxy collections
+    beside the shared pair — a half-and-half graph, with no error. Refuse."""
+
+    def _handler(self, layout, *, temporal):
+        from r2g.cdc.handler import CDCHandler
+
+        cfg = MappingConfig(source_schema="public", graph_layout=layout)
+        cfg.collections = {
+            "accounts": CollectionMapping(source_table="accounts", target_collection="Account")
+        }
+        return CDCHandler(
+            writer=MagicMock(spec=ArangoWriter),
+            schema=Schema(tables={"accounts": _accounts()}),
+            config=cfg,
+            temporal=temporal,
+        )
+
+    def test_temporal_plus_lpg_is_refused(self):
+        with pytest.raises(NotImplementedError, match="LPG graph layout"):
+            self._handler("lpg", temporal=True)
+
+    def test_the_error_names_both_ways_out(self):
+        try:
+            self._handler("lpg", temporal=True)
+        except NotImplementedError as exc:
+            assert "graph_layout: pg" in str(exc) and "without --temporal" in str(exc)
+
+    def test_lpg_without_temporal_is_fine(self):
+        """The LPG delta path itself works — only the temporal combination is out."""
+        assert self._handler("lpg", temporal=False) is not None
+
+    def test_temporal_without_lpg_is_fine(self):
+        assert self._handler("pg", temporal=True) is not None

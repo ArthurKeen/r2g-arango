@@ -87,6 +87,25 @@ class CDCHandler:
         self.temporal = temporal
         self._temporal_applier = None
         if temporal:
+            # Temporal mode builds a proxy/version structure per entity TYPE
+            # (ProxyIn_<X> / ProxyOut_<X>), which is a collection-per-type
+            # design. The LPG layout puts every type in one shared collection.
+            # Run both and the target ends up half in each shape — per-type
+            # proxy collections sitting beside `nodes`/`edges` — with no error
+            # at any point, because each half succeeds on its own terms.
+            #
+            # Refuse instead. The combination is unimplemented, not merely
+            # untested (P13.12): the streaming and delta paths were taught the
+            # layout, the temporal path was not.
+            if config.graph_layout == "lpg":
+                raise NotImplementedError(
+                    "Temporal mode does not support the LPG graph layout yet "
+                    "(graph_layout: lpg with --temporal). Temporal writes create "
+                    "per-type proxy collections, which would sit beside the "
+                    "shared node/edge collections and leave the graph half in "
+                    "each shape — silently. Use graph_layout: pg for temporal "
+                    "CDC, or run LPG without --temporal."
+                )
             from r2g.temporal.applier import TemporalApplier
 
             self._temporal_applier = TemporalApplier(writer, temporal_config)
