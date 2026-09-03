@@ -742,3 +742,64 @@ class TestTemporalLpgGuard:
 
     def test_temporal_without_lpg_is_fine(self):
         assert self._handler("pg", temporal=True) is not None
+
+
+class TestMultiLabelProduction:
+    """P13.13: a collection can emit several labels per node.
+
+    `target_collection` stays the PRIMARY label — it alone drives the `_key`
+    namespace and the CSI physical `typeValue` — so adding labels widens what a
+    node answers to without relocating it.
+    """
+
+    def _acc(self, *extra):
+        return CollectionMapping(source_table="accounts", target_collection="Account",
+                                 extra_labels=list(extra))
+
+    def test_labels_property_puts_the_primary_first(self):
+        assert self._acc("Customer", "Premium").labels == ["Account", "Customer", "Premium"]
+
+    def test_labels_are_deduped_and_primary_is_never_repeated(self):
+        assert self._acc("Account", "Customer", "Customer").labels == ["Account", "Customer"]
+
+    def test_node_carries_every_label(self):
+        doc = NodeTransformer(_accounts(), self._acc("Customer", "Premium"),
+                              lpg=LPG).transform_row({"id": 1, "name": "Acme"})
+        assert doc["labels"] == ["Account", "Customer", "Premium"]
+
+    def test_key_still_uses_only_the_primary_label(self):
+        """Adding labels must not move an existing document."""
+        one = NodeTransformer(_accounts(), self._acc(), lpg=LPG).transform_row({"id": 1})
+        many = NodeTransformer(_accounts(), self._acc("Customer"), lpg=LPG).transform_row({"id": 1})
+        assert one["_key"] == many["_key"] == "Account_1"
+
+    def test_edge_copies_carry_the_endpoints_full_label_set(self):
+        """The load-bearing one: the copies are what traversals filter against,
+        so an edge carrying only the primary label while its endpoint carries
+        three makes every filter on the other two silently miss."""
+        doc = _edge_tx(lpg=LPG, to_labels=["Account", "Customer", "Premium"]).transform_row(
+            {"id": 7, "account_id": 42})
+        assert doc["toLabels"] == ["Account", "Customer", "Premium"]
+
+    def test_edge_copies_default_to_the_single_label(self):
+        doc = _edge_tx(lpg=LPG).transform_row({"id": 7, "account_id": 42})
+        assert doc["toLabels"] == ["Account"]
+
+    def test_extra_labels_omitted_from_a_default_mapping(self):
+        """Byte-stability: a pre-P13.13 mapping must not gain the field."""
+        assert "extra_labels" not in self._acc().model_dump()
+
+    def test_extra_labels_round_trip(self):
+        cm = self._acc("Customer")
+        assert CollectionMapping.model_validate(cm.model_dump()).labels == ["Account", "Customer"]
+
+    def test_csi_reports_the_full_conceptual_label_set(self):
+        cfg = MappingConfig(source_schema="public", graph_layout="lpg")
+        cfg.collections = {"accounts": self._acc("Customer", "Premium")}
+        doc = mapping_to_csi(cfg, Schema(tables={"accounts": _accounts()}))
+        entity = doc["conceptualModel"]["entities"][0]
+        assert entity["labels"] == ["Account", "Customer", "Premium"]
+        # The physical typeValue stays the PRIMARY label — the CSI schema
+        # permits only one, and identity is built on it.
+        assert doc["arangoPhysicalMapping"]["entities"]["Account"]["typeValue"] == "Account"
+        validate_csi(doc)

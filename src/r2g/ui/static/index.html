@@ -3332,6 +3332,22 @@ function showSourceProps(tableName) {
   body.innerHTML = html;
 }
 
+function setExtraLabels(collKey, raw) {
+  const coll = editState.collections[collKey];
+  if (!coll) return;
+  const primary = coll.targetCollection || collKey;
+  const seen = new Set([primary]);
+  const labels = [];
+  for (const part of String(raw || '').split(',')) {
+    const label = part.trim();
+    // The primary label is implicit, so listing it again would duplicate it in
+    // the emitted `labels` array.
+    if (label && !seen.has(label)) { seen.add(label); labels.push(label); }
+  }
+  coll.extraLabels = labels;
+  markDirty();
+}
+
 function showTargetProps(collKey) {
   const header = document.getElementById('props-header');
   const body = document.getElementById('props-body');
@@ -3362,6 +3378,30 @@ function showTargetProps(collKey) {
           onchange="editCollection(this.dataset.coll, 'isJoinTable', this.checked)">
       </div>
     </div>`;
+
+  // Extra labels only mean something in the LPG layout, where a node's type
+  // lives in a `labels` array rather than in its collection name.
+  if ((editState.graphLayout || 'pg') === 'lpg') {
+    const extra = (coll.extraLabels || []).join(', ');
+    html += `
+    <div class="prop-group">
+      <div class="prop-group-title">Labels (LPG)</div>
+      <div class="prop-row">
+        <span class="prop-label">Primary</span>
+        <span class="prop-value">${escHtml(targetName)}</span>
+      </div>
+      <div class="prop-row">
+        <span class="prop-label">Additional</span>
+        <input class="prop-input" data-coll="${escHtml(collKey)}" value="${escHtml(extra)}"
+          placeholder="Customer, Premium"
+          onchange="setExtraLabels(this.dataset.coll, this.value)">
+      </div>
+      <p style="color:var(--text-muted);font-size:11px;margin:6px 0 0">
+        Comma-separated. A node carries the primary label plus these. The primary
+        stays the key prefix, so adding labels never moves a document.
+      </p>
+    </div>`;
+  }
 
   if (fmEntries.length) {
     html += `<div class="prop-group"><div class="prop-group-title">Field Renames</div>`;
@@ -4085,6 +4125,7 @@ function buildMappingPayload() {
       collection_type: c.collectionType || 'document',
       is_join_table: !!c.isJoinTable,
     };
+    if (c.extraLabels && c.extraLabels.length) entry.extra_labels = c.extraLabels;
     if (c.fieldMappings && Object.keys(c.fieldMappings).length) entry.field_mappings = c.fieldMappings;
     if (c.excludeFields && c.excludeFields.length) entry.exclude_fields = c.excludeFields;
     if (c.includeFields) entry.include_fields = c.includeFields;
@@ -4457,6 +4498,7 @@ function applyConfigToEditState(config) {
       fieldMappings: c.field_mappings || c.fieldMappings || {},
       excludeFields: c.exclude_fields || c.excludeFields || [],
       includeFields: c.include_fields || c.includeFields || null,
+      extraLabels: c.extra_labels || c.extraLabels || [],
       fieldExpressions: rawFx.map(fx => ({
         target: fx.target,
         sources: fx.sources || [],

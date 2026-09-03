@@ -41,6 +41,14 @@ class NodeTransformer:
             if collection_mapping is not None
             else table_def.name
         )
+        # The full label set written to the document (P13.13). ``self.label``
+        # stays the PRIMARY label and remains the sole basis for the ``_key``
+        # namespace, so adding labels to a mapping never relocates an existing
+        # document — only widens what it answers to.
+        if label is not None or collection_mapping is None:
+            self.labels = [self.label]
+        else:
+            self.labels = collection_mapping.labels
         self._compiled_expressions: list[tuple[FieldExpression, Optional[CompiledExpression]]] = []
         # Expressions that compile-fail locally but are valid AQL are pushed
         # down to ArangoDB per batch (P5c.1.5). They are *not* added to
@@ -180,7 +188,7 @@ class NodeTransformer:
         """Attach the LPG type carriers: the label array and the origin table."""
         if self.lpg is None:
             return doc
-        doc[self.lpg.label_field] = [self.label]
+        doc[self.lpg.label_field] = list(self.labels)
         doc[self.lpg.source_field] = self.table_def.name
         return doc
 

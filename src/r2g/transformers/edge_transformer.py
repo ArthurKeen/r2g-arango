@@ -23,6 +23,8 @@ class EdgeTransformer:
         lpg: LpgLayout | None = None,
         from_label: str | None = None,
         to_label: str | None = None,
+        from_labels: list[str] | None = None,
+        to_labels: list[str] | None = None,
         edge_type: str | None = None,
     ) -> None:
         self.edge_def = edge_def
@@ -43,6 +45,14 @@ class EdgeTransformer:
         self.lpg = lpg
         self.from_label = from_label or self.from_name
         self.to_label = to_label or self.to_name
+        # The endpoints' FULL label sets, copied onto the edge (P13.13). These
+        # must match what NodeTransformer wrote: the copies are a
+        # denormalization the traversal filters against, so an edge carrying
+        # only the primary label while its endpoint carries three makes every
+        # filter on the other two silently miss. The single-label default keeps
+        # pre-P13.13 behaviour.
+        self.from_labels = list(from_labels) if from_labels else [self.from_label]
+        self.to_labels = list(to_labels) if to_labels else [self.to_label]
         self.edge_type = edge_type or edge_def.edge_collection
         if lpg is not None:
             self.from_name = lpg.node_collection
@@ -66,8 +76,8 @@ class EdgeTransformer:
         if self.lpg is None:
             return doc
         doc[self.lpg.type_field] = self.edge_type
-        doc[self.lpg.from_labels_field] = [self.from_label]
-        doc[self.lpg.to_labels_field] = [self.to_label]
+        doc[self.lpg.from_labels_field] = list(self.from_labels)
+        doc[self.lpg.to_labels_field] = list(self.to_labels)
         doc[self.lpg.source_field] = self.source_table.name
         return doc
 

@@ -94,8 +94,17 @@ class DeltaTransformer:
             key_separator=self.config.key_separator,
             from_name=target_by_source.get(edge_def.from_collection),
             to_name=target_by_source.get(edge_def.to_collection),
+            # Full endpoint label sets, matching what the node documents carry
+            # (P13.13) — a CDC-written edge must be filterable identically to a
+            # bulk-loaded one, or the two paths disagree on the same graph.
+            from_labels=self._labels_for_source_table(edge_def.from_collection),
+            to_labels=self._labels_for_source_table(edge_def.to_collection),
             lpg=self._lpg,
         )
+
+    def _labels_for_source_table(self, source_table: str) -> list[str] | None:
+        entry = self._cm_by_table.get(source_table)
+        return entry[1].labels if entry is not None else None
 
     def _node_collection(self, cm: Any) -> str:
         """Where a document delta is written for this mapping."""

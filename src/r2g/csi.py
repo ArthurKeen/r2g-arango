@@ -498,10 +498,20 @@ def mapping_to_csi(
         entity_name_by_collection[cm.target_collection] = name
         prop_names = _entity_property_names(cm, tables.get(cm.source_table))
         property_roles.update(_property_roles(cm, name, prop_names, pk_columns, fk_columns))
+        # Conceptual labels: the entity name, plus any additional LPG labels the
+        # mapping declares (P13.13), so a consumer sees the full set a node
+        # answers to. The *physical* `typeValue` below stays the primary label —
+        # the CSI schema allows only one there, and the primary is what the
+        # `_key` namespace and the entity's identity are built on.
+        entity_labels = [name]
+        for extra in cm.extra_labels:
+            candidate = owl_entity_name(extra)
+            if candidate not in entity_labels:
+                entity_labels.append(candidate)
         conceptual_entities.append(
             {
                 "name": name,
-                "labels": [name],
+                "labels": entity_labels,
                 "properties": [{"name": owl_property_name(p)} for p in prop_names],
             }
         )

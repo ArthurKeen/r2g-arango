@@ -4,7 +4,14 @@ import pytest
 
 from r2g.catalog import CatalogManager
 from r2g.config import ConfigManager
-from r2g.types import Column, LpgLayout, MappingConfig, Schema, Table
+from r2g.types import (
+    CollectionMapping,
+    Column,
+    LpgLayout,
+    MappingConfig,
+    Schema,
+    Table,
+)
 from r2g.ui.server import create_app
 
 
@@ -1413,3 +1420,42 @@ class TestGraphModelSelection:
         client.put(f"/api/projects/{name}/mapping", json=MappingConfig().model_dump())
         back = client.get(f"/api/projects/{name}/mapping").json()
         assert back.get("graph_layout", "pg") == "pg"
+
+
+class TestExtraLabelsRoundTrip:
+    """P13.13: extra labels set in the Studio must survive the save/load cycle,
+    and a mapping that never used them must keep its on-disk shape."""
+
+    def _project(self, client, tmp_path, name):
+        client.post("/api/sources", json={
+            "name": "src", "source_type": "postgresql",
+            "connection_string": "postgresql://u:p@localhost/db",
+        })
+        ConfigManager.save_config(MappingConfig(), str(tmp_path / "mapping.yaml"))
+        client.post("/api/projects", json={
+            "name": name, "source_name": "src",
+            "mapping_config_path": str(tmp_path / "mapping.yaml"),
+        })
+        return name
+
+    def _cfg(self, *extra):
+        cfg = MappingConfig(source_schema="public", graph_layout="lpg")
+        cfg.collections = {
+            "accounts": CollectionMapping(source_table="accounts",
+                                          target_collection="Account",
+                                          extra_labels=list(extra))
+        }
+        return cfg
+
+    def test_extra_labels_survive_save_and_load(self, client, tmp_path):
+        name = self._project(client, tmp_path, "lbl_proj")
+        client.put(f"/api/projects/{name}/mapping",
+                   json=self._cfg("Customer", "Premium").model_dump())
+        back = client.get(f"/api/projects/{name}/mapping").json()
+        assert back["collections"]["accounts"]["extra_labels"] == ["Customer", "Premium"]
+
+    def test_absent_when_unused(self, client, tmp_path):
+        name = self._project(client, tmp_path, "lbl_none")
+        client.put(f"/api/projects/{name}/mapping", json=self._cfg().model_dump())
+        back = client.get(f"/api/projects/{name}/mapping").json()
+        assert "extra_labels" not in back["collections"]["accounts"]

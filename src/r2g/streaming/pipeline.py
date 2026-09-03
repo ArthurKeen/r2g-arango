@@ -152,6 +152,13 @@ class StreamingPipeline:
         """The :class:`LpgLayout` when this project opted in, else ``None``."""
         return self.config.lpg if self.config.graph_layout == "lpg" else None
 
+    def _labels_for_source_table(self, source_table: str) -> list[str] | None:
+        """The full LPG label set for the collection mapping a table lands in."""
+        for cm in self.config.collections.values():
+            if cm.source_table == source_table:
+                return cm.labels
+        return None
+
     def _prepare_lpg_collections(self) -> None:
         """Create (and optionally drop) the two shared LPG collections **once**.
 
@@ -448,9 +455,11 @@ class StreamingPipeline:
             key_separator=self.config.key_separator,
             from_name=target_by_source.get(edge_def.from_collection),
             to_name=target_by_source.get(edge_def.to_collection),
-            # Endpoint labels derive from the resolved from_name/to_name before
-            # both are redirected at the single node collection; edge_type
-            # defaults to edge_def.edge_collection.
+            # The endpoints' FULL label sets, so the copies on the edge match
+            # what the node documents carry (P13.13). Passing only the primary
+            # label would make filters on any additional label silently miss.
+            from_labels=self._labels_for_source_table(edge_def.from_collection),
+            to_labels=self._labels_for_source_table(edge_def.to_collection),
             lpg=lpg,
         )
 

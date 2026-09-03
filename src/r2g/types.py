@@ -244,6 +244,32 @@ class CollectionMapping(BaseModel):
     exclude_fields: List[str] = Field(default_factory=list)
     include_fields: Optional[List[str]] = None
     field_expressions: List[FieldExpression] = Field(default_factory=list)
+    #: Additional LPG labels this collection's nodes carry, beyond
+    #: ``target_collection`` (P13.13). Empty means the node carries exactly one
+    #: label, its ``target_collection`` — the historical behaviour.
+    #:
+    #: ``target_collection`` stays the **primary** label and is not repeated
+    #: here: it remains the identity used for the ``_key`` namespace and for the
+    #: CSI physical mapping, so adding labels never moves an existing document.
+    #: Declared last and omitted while empty, so mappings written before P13.13
+    #: serialize byte-identically.
+    extra_labels: List[str] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _serialize_collection(self, handler: Any) -> dict[str, Any]:
+        full = handler(self)
+        if not full.get("extra_labels"):
+            full.pop("extra_labels", None)
+        return full
+
+    @property
+    def labels(self) -> List[str]:
+        """The full label set: the primary label first, then extras, deduped."""
+        out = [self.target_collection]
+        for label in self.extra_labels:
+            if label and label not in out:
+                out.append(label)
+        return out
 
 
 NameCase = Literal["preserve", "snake", "camel", "pascal"]
