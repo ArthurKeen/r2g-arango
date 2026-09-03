@@ -659,3 +659,34 @@ class TestCreateValueSamplerDispatch:
 
     def test_unsupported_returns_none(self):
         assert create_value_sampler("snowflake", "snowflake://u:p@a/DB") is None
+
+
+class TestCandidateKeyTargeting:
+    """RSA >= 0.7.1 targets any candidate key, not only the primary key.
+
+    r2g re-exports RSA's engine, so this is r2g's *contract with* the dependency
+    rather than a test of the dependency itself: the pin allows any 0.7.x, and
+    P6.7 shared-key inference is built on exactly this shape — a surrogate PK
+    beside a natural business key. Before 0.7.1 this schema inferred NOTHING.
+    """
+
+    def _schema(self):
+        return Schema(tables={
+            "accounts": Table(name="accounts", columns=[
+                Column(name="row_id", data_type="integer", is_primary_key=True),
+                Column(name="account_id", data_type="text", is_unique=True),
+                Column(name="name", data_type="text")], primary_key=["row_id"]),
+            "orders": Table(name="orders", columns=[
+                Column(name="id", data_type="integer", is_primary_key=True),
+                Column(name="account_id", data_type="text")], primary_key=["id"]),
+        })
+
+    def test_targets_a_natural_candidate_key_not_just_the_pk(self):
+        res = infer_foreign_keys(self._schema(), options=InferenceOptions(min_confidence=0.0))
+        assert res, "no candidates: RSA < 0.7.1 targeted only primary keys"
+        assert any(c.foreign_table == "accounts" and c.foreign_columns == ["account_id"]
+                   for c in res), [(c.foreign_table, c.foreign_columns) for c in res]
+
+    def test_the_surrogate_pk_is_not_the_chosen_target(self):
+        res = infer_foreign_keys(self._schema(), options=InferenceOptions(min_confidence=0.0))
+        assert not any(c.foreign_columns == ["row_id"] for c in res)

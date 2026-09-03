@@ -71,7 +71,7 @@ dependencies = [
     # (0.3.0), and the dbt/OSI data-catalog connectors (0.4.0) r2g builds on, and
     # it is what the test suite (incl. the introspection parity audit) validates
     # against.
-    "relational-schema-analyzer>=0.4.0,<0.5.0",
+    "relational-schema-analyzer>=0.7.2,<0.8.0",
 ]
 
 # Optional extras let users install only what they need:
