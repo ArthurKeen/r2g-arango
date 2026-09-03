@@ -907,3 +907,101 @@ class TestOptInLabelIndexLive:
         assert EDGE_OUTBOUND_LABEL_INDEX in indexes_used(db.aql.explain(q, bind_vars=bind))
         rows = list(db.aql.execute(q, bind_vars=bind))
         assert len(rows) == len(set(rows)) == 3
+
+
+@requires_arango
+class TestMultiLabelProductionLive:
+    """P13.13 through the real loader: declare extra_labels, load, then query.
+
+    The other multi-label class seeds documents by hand, which proves the layout
+    and indexes but never exercises the producer. This drives the pipeline, so
+    the node documents, the edge label copies and the queries are all checked
+    against what r2g actually writes.
+    """
+
+    def _load(self, db_name):
+        schema = Schema(tables={
+            "accounts": Table(name="accounts", columns=[
+                Column(name="id", data_type="integer", is_primary_key=True),
+                Column(name="name", data_type="text")], primary_key=["id"]),
+            "orders": Table(name="orders", columns=[
+                Column(name="id", data_type="integer", is_primary_key=True),
+                Column(name="account_id", data_type="integer")], primary_key=["id"]),
+        })
+        config = MappingConfig(source_schema="public", graph_layout="lpg")
+        config.collections = {
+            "accounts": CollectionMapping(
+                source_table="accounts", target_collection="Account",
+                extra_labels=["Customer", "Premium"]),
+            "orders": CollectionMapping(source_table="orders", target_collection="Order"),
+        }
+        config.edges = [EdgeDefinition(
+            edge_collection="placedBy", from_collection="orders", to_collection="accounts",
+            from_fields=["account_id"], to_fields=["id"])]
+        rows = {"accounts": [{"id": 1, "name": "Acme"}, {"id": 2, "name": "Globex"}],
+                "orders": [{"id": 10, "account_id": 1}, {"id": 11, "account_id": 2}]}
+        writer = ArangoWriter(endpoint=ARANGO_ENDPOINT, database=db_name,
+                              username=ARANGO_USER, password=ARANGO_PASSWORD)
+        StreamingPipeline(source_connector=_Connector(rows), arango_writer=writer,
+                          schema=schema, config=config).run(graph_name="ml_graph")
+
+    def _neighbours(self, db, predicate, bind):
+        q = (f"WITH {LPG.node_collection}\n"
+             f"FOR v, e IN 1..1 OUTBOUND @start {LPG.edge_collection}\n"
+             f"  {traversal_index_hint(LPG, 'outbound')}\n"
+             f"  FILTER e.type == @type AND {predicate}\n  RETURN v._key")
+        return list(db.aql.execute(q, bind_vars={
+            "start": f"{LPG.node_collection}/Order_10", "type": "placedBy", **bind}))
+
+    def test_loader_writes_every_declared_label(self, arango_test_db):
+        name, db = arango_test_db
+        self._load(name)
+        labels = {d["_key"]: d["labels"] for d in db.collection(LPG.node_collection).all()}
+        assert labels["Account_1"] == ["Account", "Customer", "Premium"]
+        assert labels["Order_10"] == ["Order"]
+
+    def test_key_uses_only_the_primary_label(self, arango_test_db):
+        """Adding labels must not relocate a document."""
+        name, db = arango_test_db
+        self._load(name)
+        keys = {d["_key"] for d in db.collection(LPG.node_collection).all()}
+        assert keys == {"Account_1", "Account_2", "Order_10", "Order_11"}
+
+    def test_edge_copies_match_the_node_documents(self, arango_test_db):
+        """The invariant nothing in the type system enforces."""
+        name, db = arango_test_db
+        self._load(name)
+        node_labels = {d["_key"]: d["labels"]
+                       for d in db.collection(LPG.node_collection).all()}
+        for e in db.collection(LPG.edge_collection).all():
+            assert e["toLabels"] == node_labels[e["_to"].split("/", 1)[1]]
+            assert e["fromLabels"] == node_labels[e["_from"].split("/", 1)[1]]
+
+    def test_filtering_on_a_non_primary_label_works(self, arango_test_db):
+        """The point of the feature — Premium is not the collection name."""
+        name, db = arango_test_db
+        self._load(name)
+        assert self._neighbours(db, label_predicate("e.toLabels"),
+                                {"label": "Premium"}) == ["Account_1"]
+
+    def test_label_set_operators_over_the_loaded_graph(self, arango_test_db):
+        name, db = arango_test_db
+        self._load(name)
+        assert self._neighbours(db, label_predicate("e.toLabels", mode="all", bind="ls"),
+                                {"ls": ["Account", "Premium"]}) == ["Account_1"]
+        assert self._neighbours(db, label_predicate("e.toLabels", mode="none", bind="ls"),
+                                {"ls": ["Premium"]}) == []
+
+    def test_three_labels_do_not_duplicate_the_traversal(self, arango_test_db):
+        name, db = arango_test_db
+        self._load(name)
+        rows = self._neighbours(db, label_predicate("e.toLabels"), {"label": "Account"})
+        assert rows == ["Account_1"]   # once, not three times
+
+    def test_entry_point_finds_nodes_by_a_non_primary_label(self, arango_test_db):
+        name, db = arango_test_db
+        self._load(name)
+        keys = [d["_key"] for d in db.aql.execute(
+            traversal_templates(LPG)["nodes_by_label"],
+            bind_vars={"label": "Premium", "limit": 10})]
+        assert sorted(keys) == ["Account_1", "Account_2"]
