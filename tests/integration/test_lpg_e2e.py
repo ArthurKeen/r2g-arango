@@ -24,6 +24,7 @@ from r2g.lpg import (
     EDGE_OUTBOUND_INDEX,
     EDGE_OUTBOUND_LABEL_INDEX,
     VERTEX_LABEL_INDEX,
+    all_hops_label_predicate,
     edge_indexes,
     graph_edge_definition,
     indexes_used,
@@ -1005,3 +1006,89 @@ class TestMultiLabelProductionLive:
             traversal_templates(LPG)["nodes_by_label"],
             bind_vars={"label": "Premium", "limit": 10})]
         assert sorted(keys) == ["Account_1", "Account_2"]
+
+
+@requires_arango
+class TestAllHopsPredicateWithShippedIndexes:
+    """The combination r2g actually ships, which nothing else covered.
+
+    Two findings had to be checked *together* rather than separately: the
+    all-hops label predicate is pushed into the traverser, and the edge indexes
+    must not contain the label array. The pushdown was originally measured with
+    an array index present, so it was never confirmed that it survives on the
+    flat index — the one r2g provisions. It does, which means there is no
+    trade-off: the flat index yields the vertex-centric lookup, the pushdown and
+    the correct answer at once.
+
+    The array index also pushes down, and is wrong: duplication COMPOUNDS across
+    hops (a 3-label target then a 2-label target yields 3 x 2 = 6 copies of one
+    path), so it is fast and six times wrong here.
+    """
+
+    def _seed(self, db, index_fields, name):
+        nodes = db.create_collection(LPG.node_collection)
+        edges = db.create_collection(LPG.edge_collection, edge=True)
+        edges.add_index({"type": "persistent", "fields": index_fields, "name": name})
+        nodes.insert_many([{"_key": k} for k in ("O", "M1", "M2", "A1", "A2")])
+        # A1 reached by two hops that both carry Account; A2's second hop does not.
+        edges.insert_many([
+            {"_from": "nodes/O", "_to": "nodes/M1", "type": "t",
+             "toLabels": ["Account", "Premium", "Gold"]},
+            {"_from": "nodes/M1", "_to": "nodes/A1", "type": "t",
+             "toLabels": ["Account", "Premium"]},
+            {"_from": "nodes/O", "_to": "nodes/M2", "type": "t", "toLabels": ["Account"]},
+            {"_from": "nodes/M2", "_to": "nodes/A2", "type": "t", "toLabels": ["Warehouse"]},
+        ])
+
+    @staticmethod
+    def _inline_filter_pushdown(db) -> bool:
+        """Inline-`FILTER` pushdown arrived in 3.12.11.
+
+        Correctness of the predicate is invariant across versions; only whether
+        the optimizer moves it into the traverser changes. Gating the assertion
+        keeps this test honest on an older server instead of asserting a
+        property that release cannot have.
+        """
+        raw = db.version()
+        parts = []
+        for chunk in str(raw).split("-")[0].split("."):
+            try:
+                parts.append(int(chunk))
+            except ValueError:
+                break
+        return tuple(parts) >= (3, 12, 11)
+
+    def _run(self, db, name):
+        hint = f"OPTIONS {{indexHint:{{edges:{{outbound:{{base:['{name}']}}}}}}}}"
+        q = (f"FOR v, e, p IN 2..2 OUTBOUND @start {LPG.edge_collection} {hint}\n"
+             f"  FILTER {all_hops_label_predicate('toLabels', bind='label')}\n"
+             f"  RETURN v._key")
+        bind = {"start": f"{LPG.node_collection}/O", "label": "Account"}
+        rows = list(db.aql.execute(q, bind_vars=bind))
+        return rows, db.aql.explain(q, bind_vars=bind)
+
+    def test_flat_index_gives_index_pushdown_and_correctness_together(self, arango_test_db):
+        _, db = arango_test_db
+        self._seed(db, ["_from", "type"], "vci_flat")
+        rows, ex = self._run(db, "vci_flat")
+        assert rows == ["A1"], rows                    # correct, exactly once
+        assert "vci_flat" in indexes_used(ex)          # the VCI is used
+        if self._inline_filter_pushdown(db):
+            # 3.12.11+: the label test is ALSO pushed into the traverser, so the
+            # flat index gives the lookup, the pushdown and the right answer.
+            assert any(n.get("globalEdgeConditions")
+                       for n in ex["nodes"] if n["type"] == "TraversalNode")
+            assert not [n for n in ex["nodes"] if n["type"] == "FilterNode"]
+
+    def test_array_index_is_pushed_down_and_compounds_the_duplication(self, arango_test_db):
+        """Pins why the array field stays out of the index: the failure is not
+        slowness, it is a fast wrong answer that multiplies across hops."""
+        _, db = arango_test_db
+        self._seed(db, ["_from", "type", "toLabels[*]"], "vci_arr")
+        rows, ex = self._run(db, "vci_arr")
+        # 3 labels on hop 1 x 2 on hop 2 = 6 copies of one path. The multiplier
+        # compounds per hop, so it is not bounded by any single node's labels.
+        assert rows == ["A1"] * 6, rows
+        if self._inline_filter_pushdown(db):
+            assert any(n.get("globalEdgeConditions")
+                       for n in ex["nodes"] if n["type"] == "TraversalNode")
