@@ -167,6 +167,35 @@ class MosaicLevels(BaseModel):
         return {k: v for k, v in self.fields.items() if exceeds_threshold(v, threshold)}
 
 
+def sensitive_columns(
+    schema: "Schema",
+    *,
+    threshold: str = "confidential",
+    tag_levels: Optional[dict[str, str]] = None,
+) -> frozenset[str]:
+    """Columns at/above ``threshold``, as ``{"table.column", ...}`` (Phase 9).
+
+    The single definition of "must not be value-sampled", so the sampling gate
+    and the load gate answer the same question the same way. Returns fully
+    qualified ``table.column`` names; callers that also accept bare column names
+    should union both forms.
+
+    Value sampling reads real rows to compute a statistic (FK value-overlap,
+    functional-dependency ratios). Those statistics do not carry the values off
+    the machine the way LLM sampling does, but reading regulated columns at all
+    is a policy decision, so it follows the same default-deny-with-escape-hatch
+    rule the loader uses: excluded unless the caller explicitly allows it.
+    """
+    out: set[str] = set()
+    for tname, table in schema.tables.items():
+        for col in table.columns:
+            level = tier_of(col.classification, tag_levels=tag_levels)
+            if exceeds_threshold(level, threshold):
+                out.add(f"{tname}.{col.name}")
+                out.add(col.name)
+    return frozenset(out)
+
+
 def _column_levels(schema: Schema, tag_levels: dict[str, str]) -> dict[str, dict[str, str]]:
     """Per-table ``{column: level}`` from annotated schema columns."""
     out: dict[str, dict[str, str]] = {}

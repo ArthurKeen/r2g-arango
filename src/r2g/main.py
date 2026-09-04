@@ -2305,6 +2305,14 @@ def source_infer_fks(
         "--min-confidence",
         help="Drop candidates below this confidence (0..1)",
     ),
+    allow_sensitive: bool = typer.Option(
+        False, "--allow-sensitive",
+        help="Value-sample above-threshold classified columns anyway (explicit opt-out)",
+    ),
+    sensitivity_threshold: str = typer.Option(
+        "confidential", "--sensitivity-threshold",
+        help="Classification level at/above which columns are excluded from sampling",
+    ),
     accept: bool = typer.Option(
         False,
         "--accept",
@@ -2357,6 +2365,22 @@ def source_infer_fks(
                 f"[yellow]--sample is only supported for PostgreSQL, MySQL, SQL Server, and CSV sources (got "
                 f"'{normalize_source_type(source.source_type)}'); falling back to name-only inference.[/yellow]"
             )
+
+    # Phase-9 gate: wrap the sampler so classified columns are never probed.
+    # The overlap statistic never leaves the process, but reading a Restricted /
+    # PII column is a policy decision r2g already answers one way at load time.
+    if sampler is not None and not allow_sensitive:
+        from r2g.fk_inference import gated_sampler
+
+        gated = gated_sampler(
+            sampler, snap.schema_data, threshold=sensitivity_threshold
+        )
+        if gated is not sampler:
+            console.print(
+                "[dim]Phase 9: classified columns excluded from value-overlap "
+                "sampling (use --allow-sensitive to include).[/dim]"
+            )
+        sampler = gated
 
     opts = InferenceOptions(min_confidence=min_confidence, sample_overlap=bool(sampler))
     try:
@@ -2605,9 +2629,16 @@ def source_analyze_denorm(
         "--no-sample-columns",
         help=(
             "Comma-separated columns to never value-sample (bare 'col' or "
-            "'table.col'); use for sensitive/PII columns. Phase-9 classifications "
-            "will gate this automatically once available."
+            "'table.col'). Additional to the automatic Phase-9 gate below."
         ),
+    ),
+    allow_sensitive: bool = typer.Option(
+        False, "--allow-sensitive",
+        help="Value-sample above-threshold classified columns anyway (explicit opt-out)",
+    ),
+    sensitivity_threshold: str = typer.Option(
+        "confidential", "--sensitivity-threshold",
+        help="Classification level at/above which columns are excluded from sampling",
     ),
     as_json: bool = typer.Option(False, "--json", help="Emit findings as JSON"),
 ) -> None:
@@ -2654,6 +2685,20 @@ def source_analyze_denorm(
             )
 
     excluded = frozenset(c.strip() for c in no_sample_columns.split(",") if c.strip())
+    # Phase-9 gate: classified columns are excluded from value sampling by
+    # default, matching the loader's rule (excluded unless --allow-sensitive).
+    # Previously `no_sample_columns` was populated ONLY from the flag above, so
+    # the gate existed but nothing derived it from the classification map.
+    if not allow_sensitive:
+        from r2g.classification import sensitive_columns
+
+        auto = sensitive_columns(snap.schema_data, threshold=sensitivity_threshold)
+        if auto:
+            console.print(
+                f"[dim]Phase 9: {len(auto) // 2} classified column(s) excluded from "
+                f"sampling (use --allow-sensitive to include).[/dim]"
+            )
+        excluded = excluded | auto
     opts = AnalyzeOptions(
         sample=bool(sampler),
         sample_limit=sample_limit,

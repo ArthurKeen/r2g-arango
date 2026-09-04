@@ -74,7 +74,13 @@ class DenormFinding(BaseModel):
 class AnalyzeOptions:
     """Knobs that shape what the analyzer considers / returns.
 
-    ``no_sample_columns`` and ``is_sampleable`` are the classification gate: a
+    ``no_sample_columns`` and ``is_sampleable`` implement the classification
+    gate, but they do not *derive* it — this dataclass takes whatever set the
+    caller supplies. The CLI and API populate it from the Phase-9 classification
+    map unless ``--allow-sensitive`` is passed; a direct programmatic caller gets
+    no automatic protection and must pass the set itself (see
+    ``r2g.classification.sensitive_columns``). Stated explicitly because the
+    previous wording implied the gate was automatic here, which it never was: a
     column that must not be value-sampled (e.g. a Phase-9 Restricted / PII
     column) is never passed to the sampler. ``no_sample_columns`` accepts bare
     column names and ``"table.column"`` qualified names; ``is_sampleable`` is the

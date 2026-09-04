@@ -33,7 +33,7 @@ accepted suggestions use the existing ``EdgeDefinition`` model (see
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 # The heuristic engine, options, the InferredForeignKey model, and the concrete
 # value samplers are shared with ``relational-schema-analyzer`` (RSA extracted them
@@ -111,6 +111,94 @@ def infer_foreign_keys(
         InferredForeignKey.model_validate(ifk.model_dump())
         for ifk in _rsa_infer_foreign_keys(schema, options=options, sampler=sampler)
     ]
+
+
+# ── Classification gate (Phase 9) ────────────────────────────────────
+
+
+class GatedSampler:
+    """Wraps a value sampler so classified columns are never probed.
+
+    FK value-overlap sampling reads real rows. It emits only a ratio, so values
+    never leave the process — but reading a Restricted/PII column at all is a
+    policy decision, and r2g already answers it one way at load time (excluded
+    unless ``--allow-sensitive``). This makes the sampling path answer it the
+    same way instead of having no opinion.
+
+    Wrapping rather than changing the engine keeps the gate in r2g: the
+    inference engine itself lives in ``relational-schema-analyzer`` and has no
+    concept of classification. Any probe touching an excluded column returns
+    ``None``, which every caller already treats as "no measurement available"
+    and degrades to name-only scoring.
+    """
+
+    def __init__(self, inner: Any, excluded: frozenset[str]) -> None:
+        self._inner = inner
+        self._excluded = excluded
+
+    def _blocked(self, table: str, *columns: str) -> bool:
+        return any(
+            c in self._excluded or f"{table}.{c}" in self._excluded for c in columns
+        )
+
+    def __call__(self, local_table, local_column, foreign_table, foreign_column):
+        # The FK-overlap probe: block if EITHER side is classified, since the
+        # overlap statistic is computed from both.
+        if self._blocked(local_table, local_column) or self._blocked(
+            foreign_table, foreign_column
+        ):
+            logger.debug(
+                "fk_sample_skipped_classified",
+                table=local_table, column=local_column,
+                foreign_table=foreign_table, foreign_column=foreign_column,
+            )
+            return None
+        return self._inner(local_table, local_column, foreign_table, foreign_column)
+
+    def distinct_ratio(self, table: str, column: str):
+        if self._blocked(table, column):
+            return None
+        return self._inner.distinct_ratio(table, column)
+
+    def group_single_valued(self, table, determinant_columns, dependent_column):
+        if self._blocked(table, *determinant_columns, dependent_column):
+            return None
+        return self._inner.group_single_valued(table, determinant_columns, dependent_column)
+
+    def delimiter_rate(self, table: str, column: str, delimiter: str):
+        if self._blocked(table, column):
+            return None
+        return self._inner.delimiter_rate(table, column, delimiter)
+
+    def sample_values(self, table: str, column: str, limit: int = 5) -> list:
+        if self._blocked(table, column):
+            return []
+        return self._inner.sample_values(table, column, limit)
+
+    def __getattr__(self, name: str) -> Any:
+        # Anything not explicitly gated passes through, so the wrapper cannot
+        # silently drop a probe added later — but a NEW value probe would then
+        # be ungated, which is why every known probe is listed above.
+        return getattr(self._inner, name)
+
+
+def gated_sampler(
+    sampler: Any,
+    schema: Optional[Schema] = None,
+    *,
+    allow_sensitive: bool = False,
+    threshold: str = "confidential",
+) -> Any:
+    """Wrap ``sampler`` with the Phase-9 gate unless explicitly allowed."""
+    if sampler is None or allow_sensitive or schema is None:
+        return sampler
+    from r2g.classification import sensitive_columns
+
+    excluded = sensitive_columns(schema, threshold=threshold)
+    if not excluded:
+        return sampler
+    logger.info("fk_sampler_gated", excluded_columns=len(excluded), threshold=threshold)
+    return GatedSampler(sampler, excluded)
 
 
 # ── Concrete value samplers ─────────────────────────────────────────
