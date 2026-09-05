@@ -40,7 +40,10 @@ def rung(n_edges, n_nodes):
     nd = LabelDictionary("n"); nd.extend(NODE_VOCAB)
     ed = LabelDictionary("e"); ed.extend(EDGE_VOCAB)
     rng = random.Random(9)
-    client = ArangoClient(hosts=ENDPOINT)
+    # An array index over 20 labels x millions of edges takes minutes to build.
+    # python-arango's default 60s read timeout aborts the CLIENT while the server
+    # keeps building, which looks like a failure and is really a measurement bug.
+    client = ArangoClient(hosts=ENDPOINT, request_timeout=3600)
     sysdb = client.db("_system", username="root", password=PW)
     name = f"soak_{n_edges}"
     sysdb.delete_database(name, ignore_missing=True); sysdb.create_database(name)
@@ -93,5 +96,5 @@ if __name__ == "__main__":
     print("indexes built AFTER load, timed separately\n")
     print(f"{'edges':>10} {'load':>8} {'edges/s':>9} {'bitmask':>10} {'array':>10} "
           f"{'ratio':>7} {'idx MB':>9} {'arango mem':>10}")
-    for ne, nn in [(2_000_000, 400_000), (5_000_000, 1_000_000), (10_000_000, 2_000_000)]:
+    for ne, nn in [(5_000_000, 1_000_000), (10_000_000, 2_000_000)]:
         rung(ne, nn)
