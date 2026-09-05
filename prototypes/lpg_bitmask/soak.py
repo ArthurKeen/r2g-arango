@@ -1,4 +1,4 @@
-"""Hunt the index-build cliff at the customer's real label shape.
+"""Hunt the index-build cliff at a high label density.
 
 The scaling ladder built indexes BEFORE loading, so index maintenance was folded
 into throughput and could not be seen on its own. Here the data is loaded bare
@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dictionary import LabelDictionary
 
 ENDPOINT, PW = "http://localhost:8540", "r2g_test_2026"
-# The customer's shape: 20 labels on every node and every edge.
+# The dense case: 20 labels on every node and every edge.
 NODE_VOCAB = [f"NL{i:02d}" for i in range(30)]
 EDGE_VOCAB = [f"EL{i:02d}" for i in range(25)]
 LPN = LPE = 20
