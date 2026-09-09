@@ -48,31 +48,39 @@ def pluralize(word: str) -> str:
 
     Intentionally simple (no irregular-noun table): ``y`` after a consonant →
     ``ies``; sibilant endings (``s``/``x``/``z``/``ch``/``sh``) → ``es``; else
-    append ``s``. Used only for fuzzy name matching, never for stored names.
+    append ``s``. Matching is case-insensitive and the appended suffix follows
+    the case of the word's last letter (``ACCOUNT`` → ``ACCOUNTS``) — CC-12
+    naming must not depend on the physical case of a source's identifiers.
     """
     if not word:
         return word
-    if word.endswith("y") and len(word) > 1 and word[-2] not in "aeiou":
-        return word[:-1] + "ies"
-    if word.endswith(("s", "x", "z", "ch", "sh")):
-        return word + "es"
-    return word + "s"
+    lower = word.lower()
+    upper_tail = word[-1].isupper()
+    if lower.endswith("y") and len(word) > 1 and lower[-2] not in "aeiou":
+        return word[:-1] + ("IES" if upper_tail else "ies")
+    if lower.endswith(("s", "x", "z", "ch", "sh")):
+        return word + ("ES" if upper_tail else "es")
+    return word + ("S" if upper_tail else "s")
 
 
 def singularize(word: str) -> str:
     """Best-effort English singular, the inverse of :func:`pluralize`.
 
     ``ies`` → ``y``; ``ses``/``ches``/``shes``/``xes``/``zes`` → drop ``es``; a
-    trailing ``s`` (but not ``ss``) → drop ``s``. Used only for fuzzy name
-    matching (e.g. ``orders`` ↔ ``order``), never for stored names.
+    trailing ``s`` (but not ``ss``) → drop ``s``. Matching is case-insensitive
+    (``USAGE_METRICS``'s ``METRICS`` singularizes like ``metrics``) and the
+    replacement follows the case of the trailing letter, so Snowflake-style
+    uppercase identifiers produce the same conceptual class as their lowercase
+    spelling (ArthurKeen/r2g-arango#4).
     """
     if not word:
         return word
-    if word.endswith("ies") and len(word) > 3:
-        return word[:-3] + "y"
-    if word.endswith(("ses", "ches", "shes", "xes", "zes")):
+    lower = word.lower()
+    if lower.endswith("ies") and len(word) > 3:
+        return word[:-3] + ("Y" if word[-1].isupper() else "y")
+    if lower.endswith(("ses", "ches", "shes", "xes", "zes")):
         return word[:-2]
-    if word.endswith("s") and not word.endswith("ss"):
+    if lower.endswith("s") and not lower.endswith("ss"):
         return word[:-1]
     return word
 

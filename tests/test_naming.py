@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from r2g.naming import apply_naming_convention, convert_identifier, split_identifier
+from r2g.naming import (
+    apply_naming_convention,
+    convert_identifier,
+    pluralize,
+    singularize,
+    split_identifier,
+)
 from r2g.types import (
     CollectionMapping,
     Column,
@@ -31,6 +37,49 @@ class TestSplitIdentifier:
     )
     def test_split(self, name, expected):
         assert split_identifier(name) == expected
+
+
+class TestSingularizePluralizeCase:
+    """Regression for ArthurKeen/r2g-arango#4: CC-12 naming must not depend on
+    the physical case of a source's identifiers (Snowflake uppercases unquoted
+    names — ``USAGE_METRICS`` must yield the same class as ``usage_metrics``)."""
+
+    @pytest.mark.parametrize(
+        ("word", "expected"),
+        [
+            ("METRICS", "METRIC"),
+            ("metrics", "metric"),
+            ("COMPANIES", "COMPANY"),
+            ("companies", "company"),
+            ("ADDRESSES", "ADDRESS"),
+            ("STATUSES", "STATUS"),
+            ("CLASS", "CLASS"),  # double-s guard, any case
+            ("class", "class"),
+            ("", ""),
+        ],
+    )
+    def test_singularize_case_insensitive(self, word, expected):
+        assert singularize(word) == expected
+
+    @pytest.mark.parametrize(
+        ("word", "expected"),
+        [
+            ("ACCOUNT", "ACCOUNTS"),
+            ("account", "accounts"),
+            ("COMPANY", "COMPANIES"),
+            ("BOX", "BOXES"),
+            ("box", "boxes"),
+            ("", ""),
+        ],
+    )
+    def test_pluralize_case_insensitive(self, word, expected):
+        assert pluralize(word) == expected
+
+    @pytest.mark.parametrize("table", ["USAGE_METRICS", "usage_metrics", "UsageMetrics"])
+    def test_owl_entity_name_is_case_invariant(self, table):
+        from r2g.csi import owl_entity_name
+
+        assert owl_entity_name(table) == "UsageMetric"
 
 
 class TestConvertIdentifier:
