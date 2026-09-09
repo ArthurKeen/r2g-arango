@@ -27,12 +27,16 @@ catalog_app = typer.Typer(help="Connect to external data catalogs (discovery)")
 entitlements_app = typer.Typer(help="Governance: classification entitlement reports (Phase 9)")
 ontology_app = typer.Typer(help="LLM-assisted ontology derivation (Phase 10)")
 shared_keys_app = typer.Typer(help="Cross-source shared-key (join key) inference (P6.7)")
+forge_app = typer.Typer(
+    help="Federation Forge: reverse generation — ontology -> schema + data (ADR-0006)"
+)
 app.add_typer(source_app, name="source")
 app.add_typer(project_app, name="project")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(entitlements_app, name="entitlements")
 app.add_typer(ontology_app, name="ontology")
 app.add_typer(shared_keys_app, name="shared-keys")
+app.add_typer(forge_app, name="forge")
 console = Console()
 log = get_logger(__name__)
 
@@ -3765,6 +3769,79 @@ def secrets_status() -> None:
         console.print(
             f"[yellow]No key file at {path}. It will be created the next time the catalog is opened.[/yellow]"
         )
+
+
+@forge_app.command("generate")
+def forge_generate(
+    ontology_path: str = typer.Option(
+        ...,
+        "--ontology",
+        "-O",
+        help="Conceptual ontology JSON: a bare conceptualModel or a full CSI v1 document",
+    ),
+    dialect: str = typer.Option(
+        "postgres", "--dialect", help="Target dialect (walking skeleton: postgres only)"
+    ),
+    seed: int = typer.Option(
+        0, "--seed", help="RNG seed; the same seed reproduces byte-identical artifacts"
+    ),
+    rows_per_entity: int = typer.Option(
+        10, "--rows-per-entity", help="Synthesized rows per entity"
+    ),
+    out_dir: str = typer.Option(
+        "forge-out",
+        "--out-dir",
+        "-o",
+        help="Directory for forge.sql / forge.load.sql / forge.rows.json",
+    ),
+) -> None:
+    """Generate a physical schema + seeded synthetic data from an ontology.
+
+    The reverse of r2g's forward pipeline (ADR-0006, the Federation Forge):
+    the generated schema, loaded and re-introspected through ``ingest-schema``
+    -> Auto-Map -> ``export-csi``, must reproduce the input ontology. Refused
+    ontologies (naming that cannot roundtrip, colliding labels) fail here at
+    generate time with an explanation — never later at compare time. See
+    ``docs/internal/PLAN-federation-forge.md``.
+    """
+    from r2g.forge import ForgeError, load_ontology_file
+    from r2g.forge import generate as forge_generate_artifacts
+
+    # Validated before the try: typer.Exit is an Exception, so raising it
+    # inside would be swallowed by the generic handler below (see export-csi).
+    if rows_per_entity < 1:
+        console.print(f"[red]--rows-per-entity must be >= 1 (got {rows_per_entity}).[/red]")
+        raise typer.Exit(code=2)
+
+    try:
+        ontology = load_ontology_file(ontology_path)
+        artifacts = forge_generate_artifacts(
+            ontology, dialect=dialect, seed=seed, rows_per_entity=rows_per_entity
+        )
+    except ForgeError as e:
+        # A refused ontology or unsupported request is a caller problem, kin
+        # to bad arguments — report the reason and exit 2.
+        console.print(f"[red]Forge refused:[/red] {e}")
+        raise typer.Exit(code=2)
+    except Exception as e:
+        log.exception("forge_generate_failed", ontology=ontology_path)
+        console.print(f"[red]Failed to generate:[/red] {e}")
+        raise typer.Exit(code=1)
+
+    try:
+        paths = artifacts.write_to(out_dir)
+        total_rows = sum(len(r) for r in artifacts.rows.values())
+        console.print(
+            f"[green]Forged[/green] {len(ontology.entities)} entities, "
+            f"{len(ontology.relationships)} relationships, {total_rows} rows "
+            f"[dim](dialect {dialect}, seed {seed})[/dim]"
+        )
+        for path in paths:
+            console.print(f"  [dim]{path}[/dim]")
+    except Exception as e:
+        log.exception("forge_write_failed", out_dir=out_dir)
+        console.print(f"[red]Failed to write artifacts:[/red] {e}")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
