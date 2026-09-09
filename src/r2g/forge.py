@@ -385,12 +385,20 @@ def generate(
 
 
 def load_ontology_file(path: str) -> ForgeOntology:
-    """Read a conceptual ontology (bare or full CSI v1 document) from JSON."""
-    with open(path, "r", encoding="utf-8") as fh:
-        try:
-            document = json.load(fh)
-        except json.JSONDecodeError as exc:
-            raise ForgeError(f"{path} is not valid JSON: {exc}") from exc
+    """Read a conceptual ontology (bare or full CSI v1 document) from JSON.
+
+    Unreadable or malformed input is a caller problem and raises
+    :class:`ForgeError` (never a bare ``OSError``), so the CLI reports it as a
+    refusal with the reason attached.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            try:
+                document = json.load(fh)
+            except json.JSONDecodeError as exc:
+                raise ForgeError(f"{path} is not valid JSON: {exc}") from exc
+    except OSError as exc:
+        raise ForgeError(f"cannot read ontology file {path}: {exc}") from exc
     if not isinstance(document, dict):
         raise ForgeError(f"{path} must contain a JSON object")
     return ForgeOntology.from_conceptual(document)

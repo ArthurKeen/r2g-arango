@@ -141,10 +141,11 @@ def test_bad_rows_per_entity_exits_2(ontology_file):
     assert "rows-per-entity" in result.output
 
 
-def test_missing_ontology_file_exits_1(tmp_path):
+def test_missing_ontology_file_is_a_refusal(tmp_path):
     result = runner.invoke(
         app,
         ["forge", "generate", "--ontology", str(tmp_path / "absent.json")],
     )
-    assert result.exit_code == 1
-    assert "Failed to generate" in result.output
+    assert result.exit_code == 2
+    assert "Forge refused" in result.output
+    assert "cannot read ontology file" in result.output

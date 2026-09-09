@@ -231,6 +231,10 @@ class TestLoadOntologyFile:
         ontology = load_ontology_file(str(path))
         assert {e.name for e in ontology.entities} == {"Account", "Contact", "Ticket"}
 
+    def test_missing_file_is_a_forge_error(self, tmp_path):
+        with pytest.raises(ForgeError, match="cannot read ontology file"):
+            load_ontology_file(str(tmp_path / "absent.json"))
+
     def test_rejects_invalid_json(self, tmp_path):
         path = tmp_path / "bad.json"
         path.write_text("{not json")
