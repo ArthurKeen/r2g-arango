@@ -20,6 +20,12 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (CSI → MappingBundle → `arango-sparql-py`).
   - `r2g export-r2rml` (`src/r2g/r2rml.py`) emits **R2RML** for the relational leg
     (R2RML → Ontop).
+  - **Bitemporal provenance passthrough (CDF §3.13.5).** `mapping_to_csi`
+    (`src/r2g/csi.py`) now threads the four bitemporal keys — `transactionTime`,
+    `validTime`, `validTimeSource`, and `predecessorFingerprint` — onto the CSI
+    `provenance` envelope when supplied, so r2g forwards the valid-time /
+    transaction-time stamping produced upstream without minting or reshaping it.
+    Converged with `arango-schema-analyzer` and `relational-schema-analyzer`.
 - **ClickHouse source connector — federation mapping *and* ETL** (new
   `r2g-arango[clickhouse]` extra). `ClickHouseConnector` introspects
   `system.tables`/`system.columns` (sorting-key PK via `is_in_primary_key`,
