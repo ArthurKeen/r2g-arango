@@ -178,6 +178,28 @@ def test_provenance_shape():
     assert prov["confidence"] == 1.0
 
 
+def test_provenance_bitemporal_passthrough():
+    # Forward producer must pass the four bitemporal keys through so the downstream
+    # temporal store (CDF) gets both clocks — converged with arango-schema-analyzer
+    # §3.13.5 and the RSA twin. Absent by default (kept out of the pure path).
+    plain = mapping_to_csi(_sample_config())["provenance"]
+    assert "validTime" not in plain and "transactionTime" not in plain
+
+    prov = mapping_to_csi(
+        _sample_config(),
+        generated_at="2026-07-14T00:00:00+00:00",
+        transaction_time="2026-07-14T00:00:00+00:00",
+        valid_time={"from": "2026-01-01T00:00:00+00:00"},
+        valid_time_source="fingerprint-continuity",
+        predecessor_fingerprint="sha256:prev",
+    )["provenance"]
+    assert prov["transactionTime"] == "2026-07-14T00:00:00+00:00"
+    assert prov["validTime"] == {"from": "2026-01-01T00:00:00+00:00"}
+    assert prov["validTimeSource"] == "fingerprint-continuity"
+    assert prov["predecessorFingerprint"] == "sha256:prev"
+    validate_csi(mapping_to_csi(_sample_config(), valid_time={"from": "2026-01-01T00:00:00+00:00"}))
+
+
 def test_source_ref_defaults_to_source_schema():
     doc = mapping_to_csi(_sample_config())
     assert doc["provenance"]["source"]["ref"] == "shop"

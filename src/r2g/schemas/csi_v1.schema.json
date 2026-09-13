@@ -101,7 +101,15 @@
           }
         },
         "generatedAt": { "type": ["string", "null"] },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "transactionTime": { "type": ["string", "null"] },
+        "validTime": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": { "from": { "type": "string" } }
+        },
+        "validTimeSource": { "type": "string", "enum": ["observed", "fingerprint-continuity"] },
+        "predecessorFingerprint": { "type": ["string", "null"] }
       }
     }
   }
