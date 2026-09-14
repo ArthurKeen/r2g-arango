@@ -707,17 +707,31 @@ def mapping_to_csi(
 
 
 def csi_schema() -> Dict[str, Any]:
-    """Load the vendored ``CSI v1`` JSON Schema."""
-    text = (
-        resources.files("r2g.schemas")
-        .joinpath("csi_v1.schema.json")
-        .read_text(encoding="utf-8")
-    )
+    """Load the ``CSI v1`` JSON Schema.
+
+    ``arango-schema-analyzer`` owns the authoritative copy
+    (``schema_analyzer/csi/v1/csi.schema.json``). When that package is importable
+    its schema is used, so r2g can never validate against a stale copy; otherwise
+    the vendored copy in ``r2g.schemas`` is the fallback (r2g does not depend on
+    the analyzer at runtime). ``tests/test_csi.py`` asserts the two agree.
+    """
+    try:
+        text = (
+            resources.files("schema_analyzer.csi.v1")
+            .joinpath("csi.schema.json")
+            .read_text(encoding="utf-8")
+        )
+    except (ModuleNotFoundError, FileNotFoundError, TypeError):
+        text = (
+            resources.files("r2g.schemas")
+            .joinpath("csi_v1.schema.json")
+            .read_text(encoding="utf-8")
+        )
     return json.loads(text)
 
 
 def validate_csi(document: Dict[str, Any]) -> None:
-    """Validate ``document`` against the vendored ``CSI v1`` schema.
+    """Validate ``document`` against the ``CSI v1`` schema (see :func:`csi_schema`).
 
     Raises:
         jsonschema.ValidationError: if the document is not CSI-valid.

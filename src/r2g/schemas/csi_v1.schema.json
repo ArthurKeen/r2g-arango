@@ -108,7 +108,7 @@
           "additionalProperties": true,
           "properties": { "from": { "type": "string" } }
         },
-        "validTimeSource": { "type": "string", "enum": ["observed", "fingerprint-continuity"] },
+        "validTimeSource": { "type": "string", "enum": ["catalog", "event", "file", "fingerprint-continuity", "observed"] },
         "predecessorFingerprint": { "type": ["string", "null"] }
       }
     }
