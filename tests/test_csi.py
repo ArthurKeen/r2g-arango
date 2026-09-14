@@ -279,6 +279,115 @@ def test_export_csi_cli(tmp_path):
     assert {e["name"] for e in doc["conceptualModel"]["entities"]} == {"User", "Order"}
 
 
+def test_export_csi_cli_forwards_rsa_bitemporal_stamps(tmp_path):
+    """A schema.json stamped by RSA >= 0.8.0 reaches CSI provenance unchanged."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from r2g.main import app
+
+    (tmp_path / "mapping.yaml").write_text(
+        "source_schema: shop\ncollections:\n  users:\n    source_table: users\n    target_collection: User\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "schema.json").write_text(
+        json.dumps(
+            {
+                "tables": {"users": {"name": "users", "columns": [{"name": "id", "data_type": "integer"}]}},
+                "transaction_time": "2026-09-14T00:00:00+00:00",
+                "valid_from": "2026-06-01T00:00:00+00:00",
+                "valid_time_source": "catalog",
+                "predecessor_fingerprint": "sha256:prev",
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.csi.json"
+    result = CliRunner().invoke(
+        app,
+        [
+            "export-csi",
+            "--config",
+            str(tmp_path / "mapping.yaml"),
+            "--schema",
+            str(tmp_path / "schema.json"),
+            "--source-type",
+            "snowflake",
+            "-o",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    prov = json.loads(out.read_text(encoding="utf-8"))["provenance"]
+    assert prov["transactionTime"] == "2026-09-14T00:00:00+00:00"
+    assert prov["validTime"] == {"from": "2026-06-01T00:00:00+00:00"}
+    assert prov["validTimeSource"] == "catalog"  # a catalog-dated schema must validate
+    assert prov["predecessorFingerprint"] == "sha256:prev"
+
+
+def test_export_csi_cli_without_stamps_emits_none(tmp_path):
+    """No schema, or an unstamped one, adds no bitemporal keys (byte-stable output)."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from r2g.main import app
+
+    (tmp_path / "mapping.yaml").write_text(
+        "source_schema: shop\ncollections:\n  users:\n    source_table: users\n    target_collection: User\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.csi.json"
+    result = CliRunner().invoke(
+        app, ["export-csi", "--config", str(tmp_path / "mapping.yaml"), "-o", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    prov = json.loads(out.read_text(encoding="utf-8"))["provenance"]
+    assert not {"transactionTime", "validTime", "validTimeSource", "predecessorFingerprint"} & prov.keys()
+
+
+@pytest.mark.parametrize("source", ["catalog", "event", "file", "fingerprint-continuity", "observed"])
+def test_csi_schema_admits_every_rsa_valid_time_source(source):
+    """RSA's tool contract emits five validTimeSource values; the CSI schema must admit all."""
+    doc = mapping_to_csi(
+        MappingConfig(
+            source_schema="shop",
+            collections={"users": CollectionMapping(source_table="users", target_collection="User")},
+        ),
+        None,
+        source_type="postgresql",
+        transaction_time="2026-09-14T00:00:00+00:00",
+        valid_time={"from": "2026-06-01T00:00:00+00:00"},
+        valid_time_source=source,
+    )
+    validate_csi(doc)
+
+
+def test_vendored_csi_schema_matches_installed_analyzer():
+    """The vendored CSI schema must not drift from arango-schema-analyzer's copy.
+
+    Skipped when the analyzer is not installed. Expected to fail against analyzer
+    releases before 0.13.1, which still carry the two-value validTimeSource enum.
+    """
+    import json
+    from importlib import resources
+
+    schema_analyzer = pytest.importorskip("schema_analyzer")
+    version = tuple(int(x) for x in getattr(schema_analyzer, "__version__", "0").split(".")[:3] if x.isdigit())
+    if version and version < (0, 13, 1):
+        pytest.xfail("analyzer < 0.13.1 carries the two-value validTimeSource enum")
+    theirs = json.loads(
+        resources.files("schema_analyzer.csi.v1").joinpath("csi.schema.json").read_text(encoding="utf-8")
+    )
+    ours = json.loads(
+        resources.files("r2g.schemas").joinpath("csi_v1.schema.json").read_text(encoding="utf-8")
+    )
+    theirs.pop("description", None)
+    ours.pop("description", None)
+    assert ours == theirs
+
+
 # ── Attribute-label collisions ───────────────────────────────────────
 #
 # Two entities in ONE document emitting the same attribute label make that word

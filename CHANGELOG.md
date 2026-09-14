@@ -7,6 +7,34 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-09-14
+
+### Added
+
+- **Bitemporal provenance passthrough (CDF §3.13.5).** `mapping_to_csi`
+  (`src/r2g/csi.py`) threads the four bitemporal keys — `transactionTime`,
+  `validTime`, `validTimeSource`, and `predecessorFingerprint` — onto the CSI
+  `provenance` envelope when supplied, and **`r2g export-csi` now forwards them
+  from the schema** (`--schema` pointing at a `schema.json` stamped by
+  relational-schema-analyzer >= 0.8.0). r2g neither mints nor reshapes them.
+  Converged with `arango-schema-analyzer` 0.13 and `relational-schema-analyzer`
+  0.8. (Recorded under 0.4.0 in error on 2026-09-12; 0.4.0 shipped 2026-08-21
+  without it.)
+
+### Changed
+
+- **`relational-schema-analyzer` band raised to `>=0.8.0,<0.9.0`.** The 0.7 band
+  excluded the release that carries the bitemporal stamps this version forwards.
+- **CSI schema: `validTimeSource` admits all five RSA values** (`catalog`,
+  `event`, `file`, `fingerprint-continuity`, `observed`). The two-value enum
+  rejected any catalog-dated relational schema at `export-csi` validation.
+- **CSI schema is no longer trusted from the vendored copy alone.**
+  `csi_schema()` prefers `arango-schema-analyzer`'s authoritative copy when that
+  package is importable and falls back to the vendored file otherwise;
+  `tests/test_csi.py::test_vendored_csi_schema_matches_installed_analyzer` fails
+  the build if the two ever differ (contextual-data-fabric unified-architecture
+  paper, step 2).
+
 ## [0.4.0] — 2026-08-21
 
 ### Added
@@ -20,12 +48,6 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (CSI → MappingBundle → `arango-sparql-py`).
   - `r2g export-r2rml` (`src/r2g/r2rml.py`) emits **R2RML** for the relational leg
     (R2RML → Ontop).
-  - **Bitemporal provenance passthrough (CDF §3.13.5).** `mapping_to_csi`
-    (`src/r2g/csi.py`) now threads the four bitemporal keys — `transactionTime`,
-    `validTime`, `validTimeSource`, and `predecessorFingerprint` — onto the CSI
-    `provenance` envelope when supplied, so r2g forwards the valid-time /
-    transaction-time stamping produced upstream without minting or reshaping it.
-    Converged with `arango-schema-analyzer` and `relational-schema-analyzer`.
 - **ClickHouse source connector — federation mapping *and* ETL** (new
   `r2g-arango[clickhouse]` extra). `ClickHouseConnector` introspects
   `system.tables`/`system.columns` (sorting-key PK via `is_in_primary_key`,
