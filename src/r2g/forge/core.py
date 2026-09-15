@@ -26,8 +26,8 @@ from typing import Any, Dict, List
 
 from pydantic import BaseModel, Field
 
-from .csi import owl_entity_name, owl_property_name
-from .naming import convert_identifier, pluralize
+from ..csi import owl_entity_name, owl_property_name
+from ..naming import convert_identifier, pluralize
 
 #: Conceptual JSON types the skeleton synthesizes, and the one canonical
 #: roundtrip-stable Postgres spelling for each (PLAN F-3): the generated DDL
