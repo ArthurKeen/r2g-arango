@@ -171,7 +171,7 @@ class TestHelp:
         assert "--poll-interval" in output
         assert "--batch-size" in output
         assert "--endpoint" in output
-        assert "SCHEMA_FILE" in output
+        assert "schema_file" in output.lower()  # metavar case varies by Typer version
         assert "--conflict-policy" in output
         assert "--temporal" in output
         assert "--ttl-seconds" in output
@@ -189,7 +189,7 @@ class TestHelp:
         assert "--batch-size" in output
         assert "--endpoint" in output
         assert "--conflict-policy" in output
-        assert "SCHEMA_FILE" in output
+        assert "schema_file" in output.lower()  # metavar case varies by Typer version
         assert "--temporal" in output
         assert "--ttl-seconds" in output
         assert "--smart-field" in output

@@ -1,5 +1,7 @@
 # Design: r2g ↔ relational-schema-analyzer compatibility layer
 
+> **Status 2026-09-15 — historical.** RSA became a core runtime dependency as this design proposed; the band cited below (`>=0.2.0,<0.3.0`) has since moved to **`>=0.8.0,<0.9.0`** (r2g 0.4.1). Read `pyproject.toml` for the current pin.
+
 > **Scope.** This is the design for the **compatibility layer** — ADR
 > `PLAN-rsa-dependency-reversal.md` **step 2** (introduce `r2g.types` re-exports
 > backed by RSA types) and the **step 3** migration concerns it forces. It is the

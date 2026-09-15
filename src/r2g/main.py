@@ -588,6 +588,9 @@ def export_csi(
         mapping = ConfigManager.load_config(config_path)
         schema = Schema.load_from_file(schema_file) if schema_file else None
         generated_at = datetime.now(timezone.utc).isoformat()
+        # Forward the bitemporal stamps RSA >= 0.8.0 records on the physical schema
+        # (DESIGN-ADDENDUM-bitemporal): r2g neither mints nor reshapes them.
+        valid_from = getattr(schema, "valid_from", None) if schema is not None else None
         doc = mapping_to_csi(
             mapping,
             schema,
@@ -595,6 +598,12 @@ def export_csi(
             source_ref=source_ref,
             generated_at=generated_at,
             label_policy=label_policy,
+            transaction_time=getattr(schema, "transaction_time", None) if schema is not None else None,
+            valid_time={"from": valid_from} if valid_from else None,
+            valid_time_source=getattr(schema, "valid_time_source", None) if schema is not None else None,
+            predecessor_fingerprint=(
+                getattr(schema, "predecessor_fingerprint", None) if schema is not None else None
+            ),
         )
         if validate:
             validate_csi(doc)
