@@ -4,6 +4,18 @@ import pytest
 
 from r2g.types import Column, ForeignKey, Schema, Table
 
+
+@pytest.fixture(autouse=True)
+def _wide_terminal(monkeypatch):
+    """Pin a wide terminal for the whole suite.
+
+    Typer/Rich wrap ``--help`` output to the terminal width; CI's narrow default
+    (80) splits option/argument tokens across lines and breaks the substring
+    assertions in the CLI help tests. Forcing a wide width keeps them stable
+    regardless of where the suite runs.
+    """
+    monkeypatch.setenv("COLUMNS", "200")
+
 SAMPLE_ROWS = [
     ("1", "Alice", "alice@example.com", "30", "true"),
     ("2", "Bob", "bob@example.com", "25", "true"),
