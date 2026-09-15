@@ -126,7 +126,7 @@ def test_refused_ontology_exits_2_with_reason(tmp_path):
 def test_unsupported_dialect_exits_2(ontology_file):
     result = runner.invoke(
         app,
-        ["forge", "generate", "--ontology", str(ontology_file), "--dialect", "clickhouse"],
+        ["forge", "generate", "--ontology", str(ontology_file), "--dialect", "duckdb"],
     )
     assert result.exit_code == 2
     assert "dialect" in result.output
