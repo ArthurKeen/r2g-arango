@@ -27,7 +27,7 @@ CLICKHOUSE_TYPE_FOR_JSON_TYPE: Dict[str, str] = {
 }
 
 
-def fk_intent_comment(fk_column: str, references: str, key: str) -> str:
+def fk_intent_comment(references: str, key: str) -> str:
     """The machine-readable FK intent stored as a column comment."""
     return f"forge:foreign-key -> {references}({key})"
 
@@ -56,7 +56,7 @@ class ClickHouseDialect(SqlDialect):
             physical_type = f"Nullable({physical_type})"
         line = f"{col.name} {physical_type}"
         if col.references is not None:
-            comment = fk_intent_comment(col.name, col.references, table.primary_key.name)
+            comment = fk_intent_comment(col.references, table.primary_key.name)
             line += f" COMMENT '{comment}'"
         return line
 

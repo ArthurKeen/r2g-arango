@@ -211,7 +211,7 @@ class TestClickHouseDialect:
 
     def test_fk_intent_recorded_as_column_comment_and_header(self):
         ddl = generate(sample_ontology(), dialect="clickhouse", seed=1).ddl
-        assert f"account_id Int64 COMMENT '{fk_intent_comment('account_id', 'accounts', 'id')}'" in ddl
+        assert f"account_id Int64 COMMENT '{fk_intent_comment('accounts', 'id')}'" in ddl
         assert "-- FOREIGN KEY intent: contacts.account_id -> accounts(id)  [contactsToAccounts]" in ddl
         load = generate(sample_ontology(), dialect="clickhouse", seed=1).load_sql
         lines = load.splitlines()
