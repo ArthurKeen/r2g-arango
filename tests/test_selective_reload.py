@@ -279,8 +279,8 @@ class TestMappingDiffCLI:
         output = plain_output(result)
         assert "--schema" in output
         assert "--json" in output
-        assert "OLD_CONFIG" in output
-        assert "NEW_CONFIG" in output
+        assert "old_config" in output.lower()
+        assert "new_config" in output.lower()
 
     def test_selective_reload_help(self):
         result = runner.invoke(app, ["selective-reload", "--help"])

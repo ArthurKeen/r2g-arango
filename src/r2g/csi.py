@@ -440,6 +440,10 @@ def mapping_to_csi(
     generated_at: Optional[str] = None,
     confidence: Optional[float] = None,
     label_policy: str = "qualify",
+    transaction_time: Optional[str] = None,
+    valid_time: Optional[Dict[str, Any]] = None,
+    valid_time_source: Optional[str] = None,
+    predecessor_fingerprint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Emit a forward ``CSI v1`` document from an r2g :class:`MappingConfig`.
 
@@ -663,6 +667,18 @@ def mapping_to_csi(
     }
     if confidence is not None:
         provenance["confidence"] = confidence
+    # Bitemporal stamping (CSI v1.1) — pass valid/transaction time through so the downstream
+    # temporal store (contextual-data-fabric) gets both clocks from the forward producer too.
+    # Converged with arango-schema-analyzer §3.13.5 and the RSA twin; kept out of the pure
+    # path like generatedAt, so the CLI/caller (which knows the source's valid time) supplies them.
+    if transaction_time is not None:
+        provenance["transactionTime"] = transaction_time
+    if valid_time is not None:
+        provenance["validTime"] = valid_time
+    if valid_time_source is not None:
+        provenance["validTimeSource"] = valid_time_source
+    if predecessor_fingerprint is not None:
+        provenance["predecessorFingerprint"] = predecessor_fingerprint
     # Recorded even when every collision was auto-qualified: a consumer (or a
     # curator) must be able to see that two entities meant the same word, and
     # which rename resolved it. Omitted entirely when there were none, so
@@ -691,17 +707,31 @@ def mapping_to_csi(
 
 
 def csi_schema() -> Dict[str, Any]:
-    """Load the vendored ``CSI v1`` JSON Schema."""
-    text = (
-        resources.files("r2g.schemas")
-        .joinpath("csi_v1.schema.json")
-        .read_text(encoding="utf-8")
-    )
+    """Load the ``CSI v1`` JSON Schema.
+
+    ``arango-schema-analyzer`` owns the authoritative copy
+    (``schema_analyzer/csi/v1/csi.schema.json``). When that package is importable
+    its schema is used, so r2g can never validate against a stale copy; otherwise
+    the vendored copy in ``r2g.schemas`` is the fallback (r2g does not depend on
+    the analyzer at runtime). ``tests/test_csi.py`` asserts the two agree.
+    """
+    try:
+        text = (
+            resources.files("schema_analyzer.csi.v1")
+            .joinpath("csi.schema.json")
+            .read_text(encoding="utf-8")
+        )
+    except (ModuleNotFoundError, FileNotFoundError, TypeError):
+        text = (
+            resources.files("r2g.schemas")
+            .joinpath("csi_v1.schema.json")
+            .read_text(encoding="utf-8")
+        )
     return json.loads(text)
 
 
 def validate_csi(document: Dict[str, Any]) -> None:
-    """Validate ``document`` against the vendored ``CSI v1`` schema.
+    """Validate ``document`` against the ``CSI v1`` schema (see :func:`csi_schema`).
 
     Raises:
         jsonschema.ValidationError: if the document is not CSI-valid.

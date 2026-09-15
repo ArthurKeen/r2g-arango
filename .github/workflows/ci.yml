@@ -31,6 +31,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      # Keep every interpreter's result visible — a failure on one must not
+      # cancel (and mask) the others.
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
@@ -41,7 +44,11 @@ jobs:
       - name: Install dependencies
         # [all] pulls in every optional connector/UI/MCP extra so the full test
         # suite can import them; [test] adds pytest/pytest-cov.
-        run: pip install -e ".[all,test]"
+        # 3.12 ships no setuptools/pkg_resources; upgrade the build frontend so
+        # pip resolves to modern binary wheels instead of building sdists.
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -e ".[all,test]"
       - name: Run tests with coverage
         run: >
           pytest tests/ --tb=short -m "not integration"
@@ -59,7 +66,9 @@ jobs:
       - name: Start PostgreSQL + MySQL + SQL Server + ArangoDB
         run: docker compose up -d --wait
       - name: Install dependencies
-        run: pip install -e ".[all,test]"
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -e ".[all,test]"
       - name: Run integration tests
         env:
           PG_CONN: postgresql://r2g:r2g_test_2026@localhost:5432/northwind

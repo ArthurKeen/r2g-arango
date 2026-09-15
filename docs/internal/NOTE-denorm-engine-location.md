@@ -1,5 +1,7 @@
 # Note — the denormalization engine's location blocks end-to-end testing
 
+> **Status 2026-09-15 — historical.** The pin discussed below moved twice since this was written: to `>=0.7.2,<0.8.0` and then, in r2g 0.4.1, to **`relational-schema-analyzer>=0.8.0,<0.9.0`** (RSA 0.8.0 is on PyPI). The version table and "the pin is the blocker" section describe the situation as of 2026-08; they are kept for the reasoning, not the numbers.
+
 **From:** `relational-schema-analyzer` (RSA) maintainer · **Date:** 2026-08-25
 **Subject:** Phase 11's engine lives here; its measurement layer lives in RSA. Neither
 side can be tested end to end.
