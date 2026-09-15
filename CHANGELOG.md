@@ -7,6 +7,14 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Federation Forge walking skeleton** (`src/r2g/forge.py`, `r2g forge` CLI;
+  contextual-data-fabric ADR-0006, D-4). `generate(ontology, dialect, seed)` returns
+  `ForgeArtifacts(ddl, load_sql, rows)` for **Postgres only**, with naive seeded
+  synthesis and declared PK/FK always emitted; the integration test proves
+  `introspect(generate(O)) ≡ O`. Plan in `docs/internal/PLAN-federation-forge.md`
+  (F-1..F-6).
+
 ### Changed
 - **`snowflake` extra floor raised to `>=3.12,<4.0`.** Earlier
   `snowflake-connector-python` releases hard-pin `pyarrow==10.0.1`, which has no
@@ -15,6 +23,12 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matrix. 3.12+ loosen the pin and ship cp312 wheels.
 
 ### Fixed
+- **`singularize` / `pluralize` are case-insensitive.** Snowflake uppercases
+  unquoted identifiers and the suffix rules only matched lowercase, so
+  `USAGE_METRICS` produced the plural class `UsageMetrics`. Replacement suffixes
+  now follow the case of the word's trailing letter (`USAGE_METRICS` →
+  `UsageMetric`); removes the forced-lowercase workaround downstream consumers
+  carried (fixes ArthurKeen/r2g-arango#4).
 - **CI green again on the 3.10/3.11/3.12 matrix.** The 3.12 dependency-install
   failure above cascaded (via `fail-fast`) into cancelled 3.10/3.11 legs; the
   matrix now sets `fail-fast: false` and upgrades pip/setuptools/wheel before
