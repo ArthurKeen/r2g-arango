@@ -86,7 +86,10 @@ dependencies = [
 postgres = ["psycopg[binary]>=3.1.0,<4.0"]
 mysql = ["pymysql>=1.1.0,<2.0"]
 sqlserver = ["pymssql>=2.2.0,<3.0"]
-snowflake = ["snowflake-connector-python>=3.0.0,<4.0"]
+# Floor at 3.12: earlier releases hard-pin pyarrow==10.0.1, which has no cp312
+# wheel and fails to build from sdist on Python 3.12. 3.12+ loosen that pin and
+# ship cp312 wheels.
+snowflake = ["snowflake-connector-python>=3.12,<4.0"]
 clickhouse = ["clickhouse-connect>=0.7,<1.0"]
 kafka = ["confluent-kafka>=2.3.0,<3.0"]
 ui = ["fastapi>=0.110.0,<1.0", "uvicorn[standard]>=0.27.0,<1.0", "httpx>=0.27.0,<1.0"]

@@ -421,6 +421,13 @@ def create_app(
             for source_name in schemas:
                 source = catalog.get_source(source_name)
                 snap = catalog.get_latest_snapshot(source_name)
+                if source is None or snap is None:
+                    # Unreachable in practice — `schemas` only holds sources that
+                    # passed the None-guards above — but keep the types honest.
+                    skipped.append(
+                        {"source": source_name, "reason": "source or snapshot missing"}
+                    )
+                    continue
                 try:
                     sampler = create_value_sampler(
                         source.source_type,

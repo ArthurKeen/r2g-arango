@@ -7,6 +7,20 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`snowflake` extra floor raised to `>=3.12,<4.0`.** Earlier
+  `snowflake-connector-python` releases hard-pin `pyarrow==10.0.1`, which has no
+  cp312 wheel and fails to build from sdist on Python 3.12 (missing
+  `pkg_resources`), breaking `pip install -e ".[all,test]"` and the whole test
+  matrix. 3.12+ loosen the pin and ship cp312 wheels.
+
+### Fixed
+- **CI green again on the 3.10/3.11/3.12 matrix.** The 3.12 dependency-install
+  failure above cascaded (via `fail-fast`) into cancelled 3.10/3.11 legs; the
+  matrix now sets `fail-fast: false` and upgrades pip/setuptools/wheel before
+  install. Also fixed 4 mypy `union-attr` errors in `src/r2g/ui/server.py`
+  (cross-source sampler loop re-fetched `source`/`snapshot` without a None-guard).
+
 ## [0.4.1] — 2026-09-14
 
 ### Added
