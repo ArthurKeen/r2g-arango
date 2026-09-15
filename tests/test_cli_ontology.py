@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 
+import click
 import pytest
 from typer.testing import CliRunner
 
@@ -121,8 +122,12 @@ class TestOntologySuggest:
     def test_help(self):
         result = runner.invoke(app, ["ontology", "suggest", "--help"])
         assert result.exit_code == 0
-        assert "--apply" in result.output
-        assert "--domain" in result.output
+        # Unstyle: newer Typer/Rich inject ANSI styling into --help that can split
+        # option tokens in the raw output (platform-dependent). Match the other
+        # help tests, which assert against the unstyled text.
+        output = click.unstyle(result.output)
+        assert "--apply" in output
+        assert "--domain" in output
 
     def test_preview_shows_proposed_edge_and_does_not_write(self, project, monkeypatch):
         name, mapping_path = project
