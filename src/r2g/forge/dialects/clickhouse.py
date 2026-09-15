@@ -73,8 +73,11 @@ class ClickHouseDialect(SqlDialect):
             for e in plan.edges
         ]
         body = super().render_loader(plan, rows, seed)
-        first, _, rest = body.partition("\n")
-        return "\n".join([first, *header, rest]) if header else body
+        if not header:
+            return body
+        lines = body.split("\n")
+        # After the two standard header lines ("-- Federation Forge…", "-- dialect…").
+        return "\n".join(lines[:2] + header + lines[2:])
 
 
 __all__ = ["CLICKHOUSE_TYPE_FOR_JSON_TYPE", "ClickHouseDialect", "fk_intent_comment"]
