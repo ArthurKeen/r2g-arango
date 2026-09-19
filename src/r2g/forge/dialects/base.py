@@ -74,73 +74,101 @@ def sql_literal(value: Any, *, true: str = "TRUE", false: str = "FALSE") -> str:
     return f"'{escaped}'"
 
 
-def split_sql_statements(sql: str) -> List[str]:
+def split_sql_statements(sql: str, *, backslash_escapes: bool = False) -> List[str]:
     """Split a loader/DDL script into individual statements.
 
     Drops comments and splits on ``;`` outside quoted text, so drivers that
     execute one statement per call (ClickHouse HTTP, Snowflake
     ``cursor.execute``) can replay a script verbatim.
 
-    This is a public helper and gets pointed at hand-written scripts, not only
-    at the forge's own output, so it recognises four things the first version
-    did not:
+    Public, and pointed at hand-written scripts as well as the forge's own
+    output, so it understands:
 
-    * ``--`` anywhere on a line, not only at its start. A trailing
-      ``-- note; more`` previously split into a bogus statement and corrupted
-      the one after it.
-    * ``"quoted identifiers"``. Only ``'`` was tracked, so an apostrophe inside
-      a double-quoted name (``"O'Brien"``) flipped the scanner into
-      string-mode and swallowed every ``;`` that followed.
-    * ``/* block comments */``.
-    * Doubled quotes as escapes (``''`` and ``""``) inside their own quoting.
+    * ``--`` line comments anywhere on a line, and ``/* block */`` comments;
+    * ``'literals'`` and ``"quoted identifiers"``, with ``''`` / ``""`` doubling;
+    * ``$$ dollar quoted $$`` bodies (Postgres function definitions);
+    * ```backtick identifiers``` (ClickHouse, MySQL).
+
+    ``backslash_escapes`` is **off** by default, which is standard SQL: with
+    ``standard_conforming_strings`` on, Postgres reads ``'C:\\'`` as a complete
+    literal ending in a backslash. ClickHouse and MySQL instead treat ``\\`` as
+    an escape, so a caller replaying a script for those engines should pass
+    ``True``. Guessing per-engine here would silently corrupt the other.
+
+    Unterminated quoting or an unclosed ``/*`` raises :class:`ForgeError` rather
+    than returning a truncated list: an earlier version ran to end-of-input and
+    dropped every remaining statement, so a stray ``/*`` meant the tail of a
+    script was never executed and nothing said so.
     """
     statements: List[str] = []
     current: List[str] = []
-    in_single = False   # '...' literal
-    in_double = False   # "..." identifier
     i, n = 0, len(sql)
+    state = None          # None | "'" | '"' | "`" | "$$"
+
+    def flush() -> None:
+        statement = "".join(current).strip()
+        if statement:
+            statements.append(statement)
+        current.clear()
+
     while i < n:
         ch = sql[i]
         nxt = sql[i + 1] if i + 1 < n else ""
-        if not in_single and not in_double:
+        if state is None:
             if ch == "-" and nxt == "-":
                 end = sql.find("\n", i)
-                i = n if end == -1 else end      # keep the newline as whitespace
+                i = n if end == -1 else end       # newline survives as whitespace
                 continue
             if ch == "/" and nxt == "*":
                 end = sql.find("*/", i + 2)
-                i = n if end == -1 else end + 2
+                if end == -1:
+                    raise ForgeError(
+                        "unterminated /* block comment; refusing to drop the "
+                        "rest of the script silently"
+                    )
+                i = end + 2
+                continue
+            if ch == "$" and nxt == "$":
+                state = "$$"
+                current.append(ch)
+                current.append(nxt)
+                i += 2
                 continue
             if ch == ";":
-                statement = "".join(current).strip()
-                if statement:
-                    statements.append(statement)
-                current = []
+                flush()
                 i += 1
                 continue
-            if ch == "'":
-                in_single = True
-            elif ch == '"':
-                in_double = True
-        elif in_single and ch == "'":
-            if nxt == "'":                       # '' escape, stays inside
+            if ch in "'\"`":
+                state = ch
+        elif state == "$$":
+            if ch == "$" and nxt == "$":
+                state = None
                 current.append(ch)
                 current.append(nxt)
                 i += 2
                 continue
-            in_single = False
-        elif in_double and ch == '"':
-            if nxt == '"':                       # "" escape, stays inside
+        elif ch == "\\" and backslash_escapes and state in ("'", '"'):
+            current.append(ch)
+            if nxt:
+                current.append(nxt)
+                i += 2
+                continue
+        elif ch == state:
+            if nxt == state:                      # '' / "" / `` doubling
                 current.append(ch)
                 current.append(nxt)
                 i += 2
                 continue
-            in_double = False
+            state = None
         current.append(ch)
         i += 1
-    trailing = "".join(current).strip()
-    if trailing:
-        statements.append(trailing)
+
+    if state is not None:
+        raise ForgeError(
+            f"unterminated {'dollar quoting' if state == '$$' else repr(state) + ' quoting'} "
+            f"at end of script; refusing to return a truncated statement list"
+        )
+    flush()
     return statements
 
 

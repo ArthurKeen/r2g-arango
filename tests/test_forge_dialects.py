@@ -25,6 +25,7 @@ from r2g.forge import (
     get_dialect,
     plan_schema,
     split_sql_statements,
+    synthesize_rows,
 )
 from r2g.forge.core import (
     ROLE_FOREIGN_KEY,
@@ -222,6 +223,9 @@ class TestSqlHelpers:
             ("'' escape inside a literal", "INSERT INTO t VALUES ('it''s; fine');\nSELECT 2;"),
             ("semicolon inside a plain literal", "INSERT INTO t VALUES ('a;b');\nSELECT 2;"),
             ("no trailing semicolon", "SELECT 1;\nSELECT 2"),
+            ("dollar-quoted body", "CREATE FUNCTION f() AS $$ SELECT 1; $$ LANGUAGE sql;\nSELECT 2;"),
+            ("backtick identifier", "CREATE TABLE `a;b` (x Int64);\nSELECT 2;"),
+            ("backslash is literal in standard SQL", "INSERT INTO t VALUES ('C:\\');\nSELECT 2;"),
         ],
     )
     def test_split_survives_sql_it_did_not_generate(self, label, sql):
@@ -235,6 +239,28 @@ class TestSqlHelpers:
         corrupted one after it.
         """
         assert len(split_sql_statements(sql)) == 2, label
+
+    def test_backslash_escapes_are_opt_in_for_clickhouse_and_mysql(self):
+        """Standard SQL reads a backslash literally; ClickHouse and MySQL treat
+        it as an escape. Guessing would corrupt whichever engine guessed wrong,
+        so the caller names which rules apply."""
+        sql = "INSERT INTO t VALUES ('it\\'s; x');\nSELECT 2;"
+        assert len(split_sql_statements(sql, backslash_escapes=True)) == 2
+
+    @pytest.mark.parametrize(
+        "label,sql",
+        [
+            ("unterminated block comment", "SELECT 1; /* oops\nSELECT 2;"),
+            ("unterminated literal", "SELECT 'oops;\nSELECT 2;"),
+            ("unterminated identifier", 'SELECT "oops;\nSELECT 2;'),
+        ],
+    )
+    def test_unterminated_quoting_raises_rather_than_truncating(self, label, sql):
+        """Regression: these ran to end-of-input and silently dropped every
+        remaining statement, so a stray `/*` meant the tail of a script was
+        never executed and nothing said so."""
+        with pytest.raises(ForgeError, match="unterminated"):
+            split_sql_statements(sql)
 
     @pytest.mark.parametrize("name", SQL_DIALECTS)
     def test_generated_scripts_split_into_one_statement_per_table_or_row(self, name):
@@ -438,3 +464,22 @@ def test_sample_conceptual_still_refused_when_type_missing_for_any_dialect():
     for name in SUPPORTED_DIALECTS:
         with pytest.raises(ForgeError, match="unsupported type"):
             generate(ForgeOntology.from_conceptual(doc), dialect=name, seed=1)
+
+
+class TestDivergentKeysRenderEndToEnd:
+    """A plan whose key is not named `id` must render AND load.
+
+    The parent-key regression test asserted only on ``render_ddl``, so it passed
+    while ``synthesize_rows`` still stamped every row with the SURROGATE_KEY
+    literal — each dialect emitted DDL its own loader could not populate, and
+    the one test that existed to defend the divergent case never called the
+    loader that would have caught it.
+    """
+
+    @pytest.mark.parametrize("name", ["postgres", "snowflake", "clickhouse"])
+    def test_loader_populates_the_columns_the_ddl_declares(self, name):
+        plan = TestForeignKeyReferencesTheParent._plan_with_divergent_keys()
+        rows = synthesize_rows(plan, seed=1, rows_per_entity=3)
+        assert sorted(rows["accounts"][0]) == ["account_pk"]
+        loader = get_dialect(name).render_loader(plan, rows, 1)   # must not KeyError
+        assert "account_pk" in loader.lower()

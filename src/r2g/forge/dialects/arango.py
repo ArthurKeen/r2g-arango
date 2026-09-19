@@ -43,12 +43,18 @@ ARANGO_TYPE_FOR_JSON_TYPE: Dict[str, str] = {
 }
 
 
-def edge_projection(edge: EdgePlan) -> Dict[str, Any]:
-    """How one edge collection is derived from the from-table's rows."""
+def edge_projection(edge: EdgePlan, from_key: str = SURROGATE_KEY) -> Dict[str, Any]:
+    """How one edge collection is derived from the from-table's rows.
+
+    ``from_key`` is the from-table's primary key, passed in rather than assumed:
+    the edge's ``_key`` and ``_from`` are built from it, so hardcoding
+    SURROGATE_KEY produced dangling edges (and a silent exit 0) for any plan
+    whose key is named otherwise.
+    """
     return {
         "name": edge.edge_collection,
         "relationship": edge.relationship,
-        "from": {"collection": edge.from_table, "field": SURROGATE_KEY},
+        "from": {"collection": edge.from_table, "field": from_key},
         "to": {"collection": edge.to_table, "field": edge.fk_column},
     }
 
@@ -58,11 +64,21 @@ def render_manifest(plan: SchemaPlan) -> Dict[str, Any]:
     return {
         "forgeManifestVersion": MANIFEST_VERSION,
         "dialect": ArangoDialect.name,
+        # Kept for manifests written before per-collection keys; every reader
+        # should prefer the collection's own ``keyField``.
         "keyField": SURROGATE_KEY,
         "collections": [
-            {"name": t.table, "entity": t.entity, "type": "document"} for t in plan.tables
+            {
+                "name": t.table,
+                "entity": t.entity,
+                "type": "document",
+                "keyField": t.primary_key.name,
+            }
+            for t in plan.tables
         ],
-        "edgeCollections": [edge_projection(e) for e in plan.edges],
+        "edgeCollections": [
+            edge_projection(e, plan.table(e.from_table).primary_key.name) for e in plan.edges
+        ],
         "graph": {
             "name": GRAPH_NAME,
             "edgeDefinitions": [
@@ -79,10 +95,11 @@ def project_documents(manifest: Dict[str, Any], rows: Rows) -> Dict[str, List[Di
     Pure and deterministic; the generated loader script applies the identical
     rule, so the library and script paths cannot drift.
     """
-    key_field = manifest["keyField"]
+    default_key = manifest.get("keyField", "id")
     out: Dict[str, List[Dict[str, Any]]] = {}
     for collection in manifest["collections"]:
         name = collection["name"]
+        key_field = collection.get("keyField", default_key)
         out[name] = [{"_key": str(row[key_field]), **row} for row in rows[name]]
     for edge in manifest["edgeCollections"]:
         src, dst = edge["from"], edge["to"]
@@ -117,10 +134,11 @@ import sys
 
 
 def project_documents(manifest, rows):
-    key_field = manifest["keyField"]
+    default_key = manifest.get("keyField", "id")
     out = {{}}
     for collection in manifest["collections"]:
         name = collection["name"]
+        key_field = collection.get("keyField", default_key)
         out[name] = [{{"_key": str(row[key_field]), **row}} for row in rows[name]]
     for edge in manifest["edgeCollections"]:
         src, dst = edge["from"], edge["to"]

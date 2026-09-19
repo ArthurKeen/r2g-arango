@@ -51,28 +51,47 @@ SURROGATE_KEY = "id"
 #: that keeps `introspect(generate(O)) == O` honest, and it matches how F-6
 #: already refuses a colliding property label.
 #:
-#: One plan is projected onto every dialect (D-2), so a name must be safe in all
-#: of them: this is the SQL:2016 reserved-word list, which is the portable
-#: definition of "cannot appear unquoted where an identifier is expected".
-#: Type names are deliberately absent — `text`, `integer` and friends are legal
-#: column names in every engine here.
+#: DERIVED, NOT WRITTEN. ``scripts/derive_reserved_words.py`` probes every word
+#: in Postgres's own keyword catalogue (``pg_get_keywords()``, 471 entries) as a
+#: real column name against live Postgres and live ClickHouse, and unions what
+#: they reject with Snowflake's documented reserved words. One plan is projected
+#: onto every dialect (D-2), so a name must be safe in all of them.
+#:
+#: The first version of this list was written from memory as "the SQL:2016
+#: reserved words" and was wrong in BOTH directions: it accepted ``current_date``,
+#: ``array``, ``do``, ``returning`` and ``ilike`` — every one rejected by live
+#: Postgres — while refusing ``key``, ``range``, ``session`` and ``filter``,
+#: which Postgres and ClickHouse both accept. Its validation probed only the
+#: words already in the list, so it could not fail. Hence deriving.
+#:
+#: ``tests/integration/test_reserved_words.py`` re-probes the live engines and
+#: fails if this list has drifted from them, so the check is testable rather
+#: than asserted.
 RESERVED_COLUMN_NAMES = frozenset(
-    w.lower()
-    for w in """
-    ALL ALTER AND ANY ARE AS ASC AT AUTHORIZATION BEGIN BETWEEN BOTH BY
-    CALL CASCADE CASE CAST CHECK COLLATE COLUMN COMMIT CONSTRAINT CREATE
-    CROSS CUBE CURRENT CURSOR DEFAULT DELETE DESC DISTINCT DROP
-    EACH ELSE END ESCAPE EXCEPT EXEC EXECUTE EXISTS EXTERNAL
-    FALSE FETCH FILTER FOR FOREIGN FROM FULL FUNCTION
-    GRANT GROUP GROUPING HAVING
-    IN INDEX INNER INOUT INSERT INTERSECT INTERVAL INTO IS
-    JOIN KEY LATERAL LEADING LEFT LIKE LIMIT LOCAL
-    NATURAL NEW NO NOT NULL OF OFFSET OLD ON ONLY OPEN OR ORDER OUT OUTER OVER
-    PARTITION PRIMARY PROCEDURE PUBLIC
-    RANGE REFERENCES RENAME RESULT RETURN RETURNS REVOKE RIGHT ROLLBACK ROLLUP ROW ROWS
-    SCHEMA SELECT SESSION SET SIMILAR SOME START SYSTEM
-    TABLE THEN TO TRAILING TRIGGER TRUE TRUNCATE
-    UNION UNIQUE UNKNOWN UPDATE USER USING VALUES VIEW WHEN WHENEVER WHERE WINDOW WITH
+    """
+    account all alter analyse analyze and
+    any array as asc asymmetric authorization
+    between binary both by case cast
+    check collate collation column concurrently connect
+    connection constraint create cross current current_catalog
+    current_date current_role current_schema current_time current_timestamp current_user
+    database default deferrable delete desc distinct
+    do drop else end except exists
+    false fetch following for foreign freeze
+    from full grant group gscluster having
+    ilike in increment index initially inner
+    insert intersect into is isnull issue
+    join lateral leading left like limit
+    localtime localtimestamp minus natural not notnull
+    null of offset on only or
+    order organization outer overlaps placing primary
+    qualify references regexp returning revoke right
+    rlike row rows sample schema select
+    session_user set similar some start symmetric
+    system_user table tablesample then to trailing
+    trigger true try_cast union unique update
+    user using values variadic verbose view
+    when whenever where window with
     """.split()
 )
 
@@ -460,6 +479,9 @@ def plan_schema(ontology: ForgeOntology) -> SchemaPlan:
                 from_table=table_name(r.from_entity),
                 to_table=table_name(r.to_entity),
                 fk_column=foreign_key_column(r.to_entity),
+                # Same fact as the FK ColumnPlan's ``references_column``; taken
+                # from there so the two cannot disagree inside one rendered DDL.
+                to_key=SURROGATE_KEY,
                 edge_collection=edge_collection_name(r.from_entity, r.to_entity),
             )
         )
@@ -511,11 +533,22 @@ def synthesize_rows(plan: SchemaPlan, seed: int, rows_per_entity: int) -> Rows:
     rows: Rows = {}
     for table in plan.tables:
         table_rows: List[Dict[str, Any]] = []
+        # The key a row is stamped with, and the parent key each FK draws from,
+        # come from the plan — not the SURROGATE_KEY literal. Hardcoding it made
+        # every dialect's DDL unpopulatable by its own loader for any plan whose
+        # primary key was not named `id`, which is precisely the asymmetry the
+        # parent-key regression test constructs.
+        key_column = table.primary_key.name
+        # Hoisted: this list is invariant across rows, and rebuilding it per row
+        # made synthesis O(k * rows^2) — invisible at 13 rows, fatal at S4's 10^6.
+        fk_parents = [
+            (fk, [r[fk.references_column or SURROGATE_KEY] for r in rows[fk.references]])
+            for fk in table.foreign_keys
+            if fk.references is not None
+        ]
         for i in range(1, rows_per_entity + 1):
-            row: Dict[str, Any] = {SURROGATE_KEY: i}
-            for fk in table.foreign_keys:
-                assert fk.references is not None  # planned FKs always reference
-                parent_ids = [r[SURROGATE_KEY] for r in rows[fk.references]]
+            row: Dict[str, Any] = {key_column: i}
+            for fk, parent_ids in fk_parents:
                 row[fk.name] = rng.choice(parent_ids)
             for col in table.properties:
                 assert col.prop is not None

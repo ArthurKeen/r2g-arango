@@ -121,7 +121,15 @@ class TestOntologyValidation:
         with pytest.raises(ForgeError, match="surrogate"):
             ForgeOntology.from_conceptual(doc)
 
-    @pytest.mark.parametrize("prop", ["primary", "order", "select", "group", "check"])
+    @pytest.mark.parametrize(
+        "prop",
+        [
+            "primary", "order", "select", "group", "check",
+            # every one of these was ACCEPTED by the first version of the list
+            # and rejected by live Postgres — the failure F-7 exists to prevent
+            "currentDate", "currentUser", "array", "do", "returning", "ilike",
+        ],
+    )
     def test_rejects_reserved_column_name(self, prop):
         """A reserved word cannot be a generated column.
 
@@ -136,12 +144,29 @@ class TestOntologyValidation:
         with pytest.raises(ForgeError, match="reserved word"):
             ForgeOntology.from_conceptual(doc)
 
-    @pytest.mark.parametrize("prop", ["statusCode", "label", "textBody", "integerish", "keyword"])
+    @pytest.mark.parametrize(
+        "prop",
+        [
+            "statusCode", "label", "textBody", "integerish", "keyword",
+            # every one of these was REFUSED by the first version and is
+            # accepted by live Postgres and ClickHouse both; `key` especially
+            # is an ordinary property name
+            "key", "range", "session", "result", "filter", "partition",
+        ],
+    )
     def test_accepts_ordinary_names_that_merely_look_sqlish(self, prop):
-        """The list is SQL:2016 reserved words, not keywords: type names and
-        common nouns stay usable. Verified against live Postgres and ClickHouse
-        — of the words this refuses, zero are accepted by both engines AND
-        needed; of the words it allows, none break either engine."""
+        """Ordinary names stay usable.
+
+        The claim that used to sit here — "of the words it allows, none break
+        either engine" — was false, and false for a reason worth remembering:
+        it was checked by probing the words already in the list, so the probe
+        could only confirm it. `current_date`, `array`, `do`, `returning` and
+        `ilike` were all allowed and all rejected by live Postgres.
+
+        The list is now derived from the engines rather than asserted
+        (scripts/derive_reserved_words.py), and
+        tests/integration/test_reserved_words.py re-probes them so drift fails
+        loudly instead of shipping."""
         doc = sample_conceptual()
         doc["entities"][0]["properties"].append({"name": prop, "type": "string"})
         ForgeOntology.from_conceptual(doc)   # must not raise
