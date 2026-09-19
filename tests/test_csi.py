@@ -369,13 +369,34 @@ def test_vendored_csi_schema_matches_installed_analyzer():
 
     Skipped when the analyzer is not installed. Expected to fail against analyzer
     releases before 0.13.1, which still carry the two-value validTimeSource enum.
+
+    The version is read from distribution metadata, not ``schema_analyzer.__version__``
+    — the package does not define that attribute, so the original ``getattr(..., "0")``
+    fallback parsed ``(0,)``, compared it against ``(0, 13, 1)``, and xfailed on every
+    analyzer ever released. The guard silently disabled itself: measured 2026-09-15 with
+    analyzer 0.14.0 installed, this test reported ``xfailed`` and never compared the two
+    schemas at all. A drift guard that cannot read a version must still run.
     """
     import json
     from importlib import resources
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as dist_version
 
-    schema_analyzer = pytest.importorskip("schema_analyzer")
-    version = tuple(int(x) for x in getattr(schema_analyzer, "__version__", "0").split(".")[:3] if x.isdigit())
-    if version and version < (0, 13, 1):
+    pytest.importorskip("schema_analyzer")
+
+    analyzer_version: tuple[int, ...] = ()
+    for dist in ("arangodb-schema-analyzer", "arango-schema-analyzer", "schema-analyzer"):
+        try:
+            raw = dist_version(dist)
+        except PackageNotFoundError:
+            continue
+        analyzer_version = tuple(
+            int(x) for x in raw.split(".")[:3] if x.isdigit()
+        )
+        break
+    # An undeterminable version means compare anyway: skipping here is how the
+    # guard went quiet for three analyzer releases.
+    if analyzer_version and analyzer_version < (0, 13, 1):
         pytest.xfail("analyzer < 0.13.1 carries the two-value validTimeSource enum")
     theirs = json.loads(
         resources.files("schema_analyzer.csi.v1").joinpath("csi.schema.json").read_text(encoding="utf-8")
