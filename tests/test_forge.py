@@ -6,6 +6,8 @@ normalizers — ``csi.owl_entity_name`` / ``csi.owl_property_name`` and
 introspection roundtrip lives in ``tests/integration/test_forge_roundtrip.py``.
 """
 
+from pathlib import Path
+
 import pytest
 
 from r2g.config import pg_type_to_json_type
@@ -85,6 +87,40 @@ class TestTypeInverse:
     def test_every_generated_pg_type_roundtrips_through_the_real_map(self):
         for json_type, pg_type in PG_TYPE_FOR_JSON_TYPE.items():
             assert pg_type_to_json_type(pg_type) == json_type
+
+
+class TestPlanCitations:
+    """Every `PLAN F-n` a refusal cites must resolve to a heading in the plan.
+
+    The reserved-word refusal shipped citing `PLAN F-2` — the CC-12 normalizer
+    inverse — for a rule F-2 says nothing about, and F-7 did not yet exist. A
+    developer following the reference landed on an unrelated rule, which is
+    worse than citing nothing. The plan's F-sections were corrected four times
+    in one day; this is the check that makes the next drift fail loudly.
+    """
+
+    @staticmethod
+    def _plan_headings() -> set:
+        import re
+
+        plan = Path(__file__).resolve().parents[1] / "docs/internal/PLAN-federation-forge.md"
+        return set(re.findall(r"^### (F-\d+)", plan.read_text(encoding="utf-8"), re.M))
+
+    def test_every_cited_rule_exists(self):
+        import re
+
+        src = Path(__file__).resolve().parents[1] / "src/r2g"
+        cited = {
+            (path.relative_to(src.parent), rule)
+            for path in src.rglob("*.py")
+            for rule in re.findall(r"PLAN (F-\d+)", path.read_text(encoding="utf-8"))
+        }
+        headings = self._plan_headings()
+        dangling = sorted({f"{p}: {r}" for p, r in cited if r not in headings})
+        assert not dangling, (
+            f"these cite a PLAN rule with no heading in "
+            f"docs/internal/PLAN-federation-forge.md: {dangling}"
+        )
 
 
 class TestOntologyValidation:

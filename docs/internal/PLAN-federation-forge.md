@@ -163,6 +163,41 @@ reject and the forge accepts, and a word both accept that the forge refuses.
 Implementation: `RESERVED_COLUMN_NAMES` in `src/r2g/forge/core.py`, enforced in
 `ForgeOntology.validate_for_forge`.
 
+
+### F-8 · A dialect renders what the plan gives it and derives nothing itself
+
+The seam is advertised for extension — "one module following `dialects/base.py`
+plus one registry line" — so the rule a new dialect must follow belongs here,
+beside F-3's type table and F-6's collision refusal. Two halves, both learned
+the hard way on 2026-09-19.
+
+**Cross-table facts live in the plan.** A foreign-key `ColumnPlan` carries
+`references` (the parent table) *and* `references_column` (the column it points
+at **in that parent**); an `EdgePlan` carries `to_key`, read off the same
+`ColumnPlan` so the two cannot disagree. The specific error this rules out is
+reaching for `table.primary_key` to name a referenced column — that is the key
+of the table the constraint sits *on*, not the one it points *at*. Every dialect
+did exactly that, and all of them were right by accident, because `plan_schema`
+gives every table the same `SURROGATE_KEY`.
+
+**Every emitted identifier goes through `physical_table` / `physical_column`** —
+in comments and header lines as much as in DDL. A dialect that folds identifiers
+(Snowflake uppercases both) must fold them everywhere, or it emits DDL its own
+loader cannot target, and machine-readable FK intent naming tables that do not
+exist.
+
+**Testing this needs a deliberately lopsided fixture, and that is the part worth
+remembering.** Neither failure is expressible in the shipped fixtures: every
+planned table shares one surrogate key, and three of the four dialects map
+identifiers to themselves. A regression test written the obvious way — a plan
+from `plan_schema`, a stock dialect — *passes against the live bug*. A test that
+defends either half must construct the asymmetry on purpose: a plan whose parent
+and child keys differ (`TestForeignKeyReferencesTheParent`), or a subclass that
+folds (`test_ddl_routes_every_name_through_the_seam`). Both bugs survived review
+and a green suite precisely because the first tests written for them could not
+have failed.
+
+
 ## S2 dialects — the other three launch-set targets behind one seam
 
 ADR-0006 D-4 names Postgres, Snowflake-SQL, ClickHouse-SQL, and Arango
