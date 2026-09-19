@@ -216,8 +216,13 @@ def test_loaded_data_matches_artifacts_and_spine_joins(loaded_federation):
     try:
         for table, rows in artifacts.rows.items():
             assert client.command(f"SELECT count() FROM {table}") == ROWS_PER_ENTITY == len(rows)
+        # NOT a LEFT JOIN with `WHERE a.id = 0`: that relied on ClickHouse's
+        # join_use_nulls=0 default filling non-matches with 0. Under
+        # join_use_nulls=1 — common in analytics profiles — unmatched rows come
+        # back NULL, `a.id = 0` is never true, and the assertion could no longer
+        # fail no matter how many dangling FKs the synthesizer produced.
         orphans = client.command(
-            "SELECT count() FROM contacts c LEFT JOIN accounts a ON c.account_id = a.id WHERE a.id = 0"
+            "SELECT count() FROM contacts WHERE account_id NOT IN (SELECT id FROM accounts)"
         )
         assert orphans == 0
     finally:

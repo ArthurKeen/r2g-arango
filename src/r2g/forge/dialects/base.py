@@ -12,6 +12,7 @@ contract tests (type table completeness, byte-identical rows) for free.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar, List, Mapping
 
@@ -52,10 +53,23 @@ class ForgeDialect(ABC):
 
 
 def check_type_table(dialect: ForgeDialect) -> None:
-    """Refuse a dialect whose type table does not cover every JSON type."""
-    missing = [t for t in JSON_TYPES if t not in dialect.type_for_json]
+    """Refuse a dialect whose type table does not cover every JSON type.
+
+    ``name`` and ``type_for_json`` are annotation-only ClassVars on the ABC, so
+    a dialect that simply omits one used to fail with ``AttributeError`` — and
+    because the registry runs this at import time, that surfaced as
+    ``import r2g.forge`` blowing up rather than a ForgeError naming the dialect.
+    """
+    name = getattr(dialect, "name", None) or type(dialect).__name__
+    table = getattr(dialect, "type_for_json", None)
+    if table is None:
+        raise ForgeError(
+            f"dialect {name!r} declares no `type_for_json` table; a dialect must "
+            f"map every JSON type in {sorted(JSON_TYPES)}"
+        )
+    missing = [t for t in JSON_TYPES if t not in table]
     if missing:
-        raise ForgeError(f"dialect {dialect.name!r} declares no physical type for {missing}")
+        raise ForgeError(f"dialect {name!r} declares no physical type for {missing}")
 
 
 # ── Shared SQL machinery ────────────────────────────────────────────────
@@ -69,7 +83,15 @@ def sql_literal(value: Any, *, true: str = "TRUE", false: str = "FALSE") -> str:
     if isinstance(value, bool):
         return true if value else false
     if isinstance(value, (int, float)):
-        return repr(value)
+        # repr() happily renders inf/nan as `inf`/`nan` and an IntEnum as
+        # `<E.A: 1>` — none of which is a SQL literal, and all of which would
+        # land in a loader that only fails when the engine parses it. Rows are
+        # caller-supplied (re-read from forge.rows.json, where json.load turns
+        # `Infinity` back into a float), so this is reachable without the
+        # synthesizer ever producing one.
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ForgeError(f"{value!r} has no SQL literal form")
+        return repr(int(value) if isinstance(value, int) else value)
     escaped = str(value).replace("'", "''")
     return f"'{escaped}'"
 

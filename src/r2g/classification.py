@@ -24,6 +24,7 @@ from typing import Iterable, Optional
 
 from pydantic import BaseModel, Field
 
+from r2g.naming import edge_collection_name as _edge_name
 from r2g.types import Classification, CollectionMapping, MappingConfig, Schema
 
 # Ordered low→high. Index is the rank; comparisons use the rank.
@@ -268,7 +269,7 @@ def recompute_mosaic(
         to_cols = col_levels.get(edge.to_collection, {})
         contributors.extend(from_cols.get(f, PUBLIC) for f in edge.from_fields)
         contributors.extend(to_cols.get(f, PUBLIC) for f in edge.to_fields)
-        label = edge.edge_collection or f"{edge.from_collection}_to_{edge.to_collection}"
+        label = edge.edge_collection or _edge_name(edge.from_collection, edge.to_collection)
         result.edges[label] = max_sensitivity(contributors)
 
     return result

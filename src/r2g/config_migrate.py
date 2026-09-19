@@ -9,6 +9,7 @@ from copy import deepcopy
 from typing import Any
 
 from r2g.config import _is_likely_join_table
+from r2g.naming import edge_collection_name as _edge_name
 from r2g.types import (
     CollectionMapping,
     EdgeDefinition,
@@ -148,7 +149,7 @@ def migrate_config(
         for fk in table.foreign_keys:
             sig = _fk_to_edge_sig(table_name, fk)
             if sig not in existing_edge_sigs:
-                base = f"{table_name}_to_{fk.foreign_table}"
+                base = _edge_name(table_name, fk.foreign_table)
                 edge_name = base
                 if edge_name in edge_names_used:
                     suffix = "_".join(fk.columns)

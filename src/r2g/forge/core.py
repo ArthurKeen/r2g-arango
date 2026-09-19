@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
+from r2g.naming import edge_collection_name as _edge_name
+
 from ..csi import owl_entity_name, owl_property_name
 from ..naming import convert_identifier, pluralize
 
@@ -364,8 +366,12 @@ def foreign_key_column(to_entity: str) -> str:
 def edge_collection_name(from_entity: str, to_entity: str) -> str:
     """The edge collection r2g's forward Auto-Map derives for an FK
     (``config.ConfigManager.generate_default_config``): ``<from>_to_<to>``.
-    The ``arango`` dialect emits exactly this name so ASA reads it back."""
-    return f"{table_name(from_entity)}_to_{table_name(to_entity)}"
+    The ``arango`` dialect emits exactly this name so ASA reads it back.
+
+    Delegates to :func:`r2g.naming.edge_collection_name` rather than restating
+    the rule: the roundtrip only holds while the Forge and Auto-Map agree, and
+    they cannot agree by coincidence across two hand-written copies."""
+    return _edge_name(table_name(from_entity), table_name(to_entity))
 
 
 def expected_relationship_type(from_entity: str, to_entity: str) -> str:

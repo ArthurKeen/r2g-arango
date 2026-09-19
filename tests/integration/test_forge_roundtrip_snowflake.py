@@ -98,9 +98,13 @@ def forge_schema() -> Iterator[Tuple[Any, str, str]]:
     cur = conn.cursor()
     try:
         cur.execute(f"CREATE SCHEMA {database}.{schema}")
-    except snowflake.errors.ProgrammingError as exc:
+    except BaseException as exc:
+        # Every exit from here closes the connection. Catching only
+        # ProgrammingError leaked it on DatabaseError ("No active warehouse"),
+        # OperationalError and any network reset — the outer try/finally below
+        # has not been entered yet, so nothing else would have.
         conn.close()
-        if "Insufficient privileges" in str(exc):
+        if isinstance(exc, snowflake.errors.ProgrammingError) and "Insufficient privileges" in str(exc):
             pytest.skip(
                 f"role {kwargs.get('role')!r} may not CREATE SCHEMA on {database}; "
                 "set SNOWFLAKE_FORGE_ROLE to a role that can"

@@ -34,6 +34,24 @@ from r2g.types import (
 _WORD_RE = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z0-9]+|[A-Z]+|[0-9]+")
 
 
+def edge_collection_name(from_table: str, to_table: str) -> str:
+    """The edge collection r2g's forward Auto-Map derives for a foreign key.
+
+    One rule, one home. This string was written out longhand in five places —
+    ``config.generate_default_config``, ``config_migrate``, ``fk_inference``,
+    ``classification`` and the Federation Forge — with nothing linking them,
+    while the Forge's whole correctness claim (``introspect(generate(O)) == O``)
+    depends on its copy matching Auto-Map's byte for byte. Changing the rule in
+    one place used to leave the Forge emitting the old name and every live
+    roundtrip failing on a confusing relationship mismatch rather than at the
+    line that changed.
+
+    Callers that must disambiguate a collision append their own suffix (Auto-Map
+    appends the FK's columns); this returns the undisambiguated base.
+    """
+    return f"{from_table}_to_{to_table}"
+
+
 def split_identifier(name: str) -> list[str]:
     """Break ``name`` into normalized word tokens (order preserved)."""
     words: list[str] = []
