@@ -1,4 +1,4 @@
-# PLAN — Federation Forge: the reverse generator (walking skeleton)
+# PLAN — Federation Forge: the reverse generator
 
 **Status:** S1 walking skeleton shipped (Postgres, r2g #1); **S2 dialects shipped**
 (snowflake / clickhouse / arango behind the same seam — see "S2 dialects" below)
@@ -259,7 +259,7 @@ type in `DEFAULT_TYPE_MAP` and the CSI), then a one-line entry per dialect.
 | # | Artifact | Where |
 |---|---|---|
 | 1 | This plan | `docs/internal/PLAN-federation-forge.md` |
-| 2 | Generator core: `ForgeOntology` loader/validator, `generate(ontology, dialect="postgres", seed)` → `ForgeArtifacts(ddl, load_sql, rows)` | `src/r2g/forge.py` |
+| 2 | Generator core: `ForgeOntology` loader/validator, `generate(ontology, dialect="postgres", seed)` → `ForgeArtifacts(ddl, load_sql, rows)` | `src/r2g/forge/` (`core`, `generate`, `dialects/`) |
 | 3 | CLI: `r2g forge generate --ontology o.json --seed 421 --out-dir …` (thin body, function-local imports, validate-before-try) | `main.py` sub-app |
 | 4 | Unit tests: determinism (byte-identical re-run), naming inverse through the real `owl_*` normalizers, type inverse through `pg_type_to_json_type`, FK spine agreement, refusal cases | `tests/test_forge.py`, `tests/test_cli_forge.py` |
 | 5 | Live roundtrip: temp PG schema ← DDL+load, `PostgresConnector.get_schema` → `generate_default_config` → `mapping_to_csi` → compare to input ontology (D-3, real pipeline, no forge shortcuts) | `tests/integration/test_forge_roundtrip.py` |

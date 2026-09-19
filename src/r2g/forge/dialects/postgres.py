@@ -1,7 +1,13 @@
 """``postgres`` — the S1 walking-skeleton dialect (PLAN F-3/F-4).
 
 Declared PK/FK constraints, one canonical roundtrip-stable type per JSON type,
-one ``INSERT`` per row. Output is byte-compatible with the skeleton.
+one ``INSERT`` per row.
+
+**Not** byte-compatible with the skeleton, despite what this docstring used to
+claim: moving into the dialect seam dropped the ``(walking skeleton)`` suffix
+from both header lines, so ``forge.sql`` and ``forge.load.sql`` differ from
+pre-package output on line 1. Rows are unchanged. Any checksum or ``diff``
+against skeleton-era artifacts needs regenerating.
 """
 
 from __future__ import annotations

@@ -63,7 +63,15 @@ class ClickHouseDialect(SqlDialect):
         line = f"{self.physical_column(col.name)} {physical_type}"
         if col.references is not None:
             # The parent's key, carried on the plan — not this table's.
-            comment = fk_intent_comment(col.references, col.references_column or SURROGATE_KEY)
+            # Through the seam. This comment is documented as machine-readable
+            # FK intent for a future comment-aware inference, so under a folding
+            # dialect it must name the tables that physically exist — the header
+            # lines already project, and a comment saying `accounts(id)` beside
+            # `CREATE TABLE ACCOUNTS` resolves against nothing.
+            comment = fk_intent_comment(
+                self.physical_table(col.references),
+                self.physical_column(col.references_column or SURROGATE_KEY),
+            )
             line += f" COMMENT '{comment}'"
         return line
 

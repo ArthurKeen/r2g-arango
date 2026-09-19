@@ -134,6 +134,34 @@ class ForgeEntity(BaseModel):
     properties: List[ForgeProperty]
 
 
+def _refuse_unsafe_identifier(identifier: str, owner: str, kind: str) -> None:
+    """Refuse a generated identifier that cannot appear unquoted (PLAN F-7).
+
+    The forge emits identifiers unquoted so Snowflake's uppercase folding is
+    what the CC-12 roundtrip asserts against, so neither of these can be quoted
+    around: the spelling that came back would no longer match the one declared.
+
+    Applied to **tables as well as columns**. The check used to cover only
+    property columns, so an entity named ``Value`` generated ``CREATE TABLE
+    values (``, which Snowflake reserves, and ``3dModel`` generated a table
+    beginning with a digit that no target accepts.
+    """
+    if identifier in RESERVED_COLUMN_NAMES:
+        raise ForgeError(
+            f"{owner} generates the {kind} {identifier!r}, a SQL reserved word. "
+            f"The forge emits identifiers unquoted so Snowflake's folding keeps "
+            f"the CC-12 roundtrip honest, so this cannot be quoted around - "
+            f"rename it (PLAN F-7)."
+        )
+    if not (identifier[:1].isalpha() or identifier.startswith("_")):
+        raise ForgeError(
+            f"{owner} generates the {kind} {identifier!r}, which does not start "
+            f"with a letter or underscore. Postgres and Snowflake refuse such an "
+            f"identifier unquoted, and it cannot be quoted around for the same "
+            f"reason a reserved word cannot (PLAN F-7)."
+        )
+
+
 class ForgeOntology(BaseModel):
     """A validated conceptual ontology — the forge's only input contract.
 
@@ -148,6 +176,21 @@ class ForgeOntology(BaseModel):
 
     @classmethod
     def from_conceptual(cls, document: Dict[str, Any]) -> "ForgeOntology":
+        try:
+            return cls._from_conceptual(document)
+        except ForgeError:
+            raise
+        except Exception as exc:  # malformed input is a caller error, not a crash
+            # Indexing raw dicts leaked KeyError / TypeError / AttributeError /
+            # pydantic ValidationError past `except ForgeError`, so the CLI
+            # logged a traceback and exited 1 ("Failed to generate") where the
+            # documented behaviour is exit 2 ("Forge refused").
+            raise ForgeError(
+                f"malformed conceptual document: {type(exc).__name__}: {exc}"
+            ) from exc
+
+    @classmethod
+    def _from_conceptual(cls, document: Dict[str, Any]) -> "ForgeOntology":
         conceptual = document.get("conceptualModel", document)
         entities = [
             ForgeEntity(
@@ -186,6 +229,7 @@ class ForgeOntology(BaseModel):
             seen_entities.add(e.name)
 
             table = table_name(e.name)
+            _refuse_unsafe_identifier(table, f"entity {e.name!r}", "table")
             if owl_entity_name(table) != e.name:
                 raise ForgeError(
                     f"entity {e.name!r} does not survive the CC-12 naming "
@@ -216,14 +260,7 @@ class ForgeOntology(BaseModel):
                         f"{e.name}.id collides with the generated surrogate "
                         "primary key; declare a domain identifier instead"
                     )
-                if column in RESERVED_COLUMN_NAMES:
-                    raise ForgeError(
-                        f"{e.name}.{p.name!r} generates the column {column!r}, "
-                        f"a SQL reserved word. The forge emits identifiers "
-                        f"unquoted so Snowflake's folding keeps the CC-12 "
-                        f"roundtrip honest, so this cannot be quoted around \u2014 "
-                        f"rename the property (PLAN F-7)."
-                    )
+                _refuse_unsafe_identifier(column, f"{e.name}.{p.name!r}", "column")
                 # Collision-free by construction (F-6): deliberate collisions
                 # are an S3 denormalizer feature, not a skeleton input.
                 owner = label_owner.get(p.name)
@@ -462,15 +499,14 @@ def plan_schema(ontology: ForgeOntology) -> SchemaPlan:
     fk_by_entity: Dict[str, List[ColumnPlan]] = {e.name: [] for e in ontology.entities}
     edges: List[EdgePlan] = []
     for r in ontology.relationships:
-        fk_by_entity[r.from_entity].append(
-            ColumnPlan(
-                name=foreign_key_column(r.to_entity),
-                json_type="integer",
-                role=ROLE_FOREIGN_KEY,
-                references=table_name(r.to_entity),
-                references_column=SURROGATE_KEY,
-            )
+        fk_column = ColumnPlan(
+            name=foreign_key_column(r.to_entity),
+            json_type="integer",
+            role=ROLE_FOREIGN_KEY,
+            references=table_name(r.to_entity),
+            references_column=SURROGATE_KEY,
         )
+        fk_by_entity[r.from_entity].append(fk_column)
         edges.append(
             EdgePlan(
                 relationship=r.type,
@@ -479,9 +515,11 @@ def plan_schema(ontology: ForgeOntology) -> SchemaPlan:
                 from_table=table_name(r.from_entity),
                 to_table=table_name(r.to_entity),
                 fk_column=foreign_key_column(r.to_entity),
-                # Same fact as the FK ColumnPlan's ``references_column``; taken
-                # from there so the two cannot disagree inside one rendered DDL.
-                to_key=SURROGATE_KEY,
+                # Read off the FK ColumnPlan built just above rather than
+                # restated: they are one fact, and when they were two stores a
+                # DDL could name `accounts(account_pk)` in a column comment and
+                # `accounts(id)` in its own header.
+                to_key=fk_column.references_column or SURROGATE_KEY,
                 edge_collection=edge_collection_name(r.from_entity, r.to_entity),
             )
         )

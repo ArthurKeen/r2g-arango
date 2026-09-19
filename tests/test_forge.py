@@ -171,6 +171,48 @@ class TestOntologyValidation:
         doc["entities"][0]["properties"].append({"name": prop, "type": "string"})
         ForgeOntology.from_conceptual(doc)   # must not raise
 
+    # `Order` is deliberately absent: it pluralizes to `orders`, which no
+    # target reserves. Only the singular `order` is.
+    @pytest.mark.parametrize("entity", ["Value", "Row"])
+    def test_rejects_reserved_table_name(self, entity):
+        """The rule covers tables too. It used to check property columns only,
+        so `Value` generated `CREATE TABLE values (` — reserved in Snowflake."""
+        doc = sample_conceptual()
+        doc["entities"].append({"name": entity, "properties": [{"name": "someLabel", "type": "string"}]})
+        with pytest.raises(ForgeError, match="reserved word"):
+            ForgeOntology.from_conceptual(doc)
+
+    @pytest.mark.parametrize(
+        "entity,prop",
+        [("Account", "3dModel"), ("Account", "2ndLine"), ("3dModel", "someProp")],
+    )
+    def test_rejects_identifier_starting_with_a_digit(self, entity, prop):
+        """`3dModel` survives the CC-12 roundtrip (`3d_model` normalizes back to
+        `3dModel`) so every other check passed it, and no target accepts an
+        unquoted identifier that starts with a digit."""
+        doc = sample_conceptual()
+        doc["entities"].append({"name": entity, "properties": [{"name": prop, "type": "string"}]}
+                               if entity != "Account" else
+                               {"name": "Extra", "properties": [{"name": prop, "type": "string"}]})
+        with pytest.raises(ForgeError, match="letter or underscore"):
+            ForgeOntology.from_conceptual(doc)
+
+    @pytest.mark.parametrize(
+        "doc",
+        [
+            {"entities": [{"properties": []}]},
+            {"entities": "nope"},
+            {"conceptualModel": None},
+            {"entities": [{"name": "A", "properties": []}], "relationships": [{"type": "x"}]},
+        ],
+    )
+    def test_malformed_document_is_refused_not_crashed(self, doc):
+        """Indexing raw dicts leaked KeyError / TypeError / AttributeError /
+        pydantic ValidationError past `except ForgeError`, so the CLI logged a
+        traceback and exited 1 where the contract is exit 2, 'Forge refused'."""
+        with pytest.raises(ForgeError, match="malformed conceptual document"):
+            ForgeOntology.from_conceptual(doc)
+
     def test_rejects_name_that_does_not_survive_naming_roundtrip(self):
         # "Goose" -> table "gooses" -> owl_entity_name gives "Goos": the naive
         # pluralize/singularize pair is not an inverse here, so the forge must

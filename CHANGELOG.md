@@ -25,11 +25,23 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ClickHouseConnector` + FK inference (RSA has no ClickHouse connector; D-3's
   two-branch contract asserted both ways; new compose `clickhouse` service on
   8124), and ASA's deterministic baseline for Arango. Plan §"S2 dialects".
-- **Federation Forge walking skeleton** (`src/r2g/forge.py`, `r2g forge` CLI;
-  contextual-data-fabric ADR-0006, D-4). `generate(ontology, dialect, seed)` returns
-  `ForgeArtifacts(ddl, load_sql, rows)` for **Postgres only**, with naive seeded
-  synthesis and declared PK/FK always emitted; the integration test proves
-  `introspect(generate(O)) ≡ O`. Plan in `docs/internal/PLAN-federation-forge.md`
+- **Breaking (Forge input):** a conceptual property or entity whose generated
+  identifier is a SQL reserved word, or starts with a digit, is now refused at
+  `generate` time rather than emitted into DDL the engine rejects at load
+  (PLAN F-7). Ontologies accepted by the walking skeleton may need a property or
+  class renamed — `primary`, `order`, `current_date` and `array` are examples,
+  and an entity named `Value` (table `values`) or `Row` (table `rows`) is now
+  refused too. The list is derived from the engines rather than written:
+  `scripts/derive_reserved_words.py` probes Postgres's own `pg_get_keywords()`
+  against live Postgres and ClickHouse and unions Snowflake's documented set.
+
+- **Federation Forge walking skeleton** (`r2g forge` CLI; contextual-data-fabric
+  ADR-0006, D-4). `generate(ontology, dialect, seed)` returns
+  `ForgeArtifacts(ddl, load_sql, rows)`, with naive seeded synthesis and declared
+  PK/FK always emitted; the integration test proves `introspect(generate(O)) ≡ O`.
+  Landed as a single `src/r2g/forge.py` for Postgres only; superseded within this
+  same unreleased version by the S2 entry above, which makes it a package and adds
+  three dialects. Plan in `docs/internal/PLAN-federation-forge.md`
   (F-1..F-6).
 
 ### Changed

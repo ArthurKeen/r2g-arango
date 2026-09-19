@@ -31,6 +31,7 @@ from r2g.forge.core import (
     ROLE_FOREIGN_KEY,
     ROLE_PRIMARY_KEY,
     ColumnPlan,
+    EdgePlan,
     SchemaPlan,
     TablePlan,
 )
@@ -181,7 +182,21 @@ class TestForeignKeyReferencesTheParent:
                 ),
             ),
         )
-        return SchemaPlan(tables=(parent, child), edges=())
+        # An edge is deliberately present. With `edges=()` the ClickHouse
+        # header path (which reads EdgePlan.to_key) is never rendered, so the
+        # two stores of the parent key could disagree inside one DDL and no
+        # test would see it.
+        edge = EdgePlan(
+            relationship="contactsToAccounts",
+            from_entity="Contact",
+            to_entity="Account",
+            from_table="contacts",
+            to_table="accounts",
+            fk_column="account_id",
+            to_key="account_pk",
+            edge_collection="contacts_to_accounts",
+        )
+        return SchemaPlan(tables=(parent, child), edges=(edge,))
 
     @pytest.mark.parametrize("name", ["postgres", "snowflake"])
     def test_sql_dialects_reference_the_parents_key(self, name):
@@ -197,6 +212,17 @@ class TestForeignKeyReferencesTheParent:
         comment = next(line for line in ddl.splitlines() if "forge:foreign-key" in line)
         assert "accounts(account_pk)" in comment
         assert "contact_pk" not in comment
+
+    def test_clickhouse_header_and_comment_agree_on_the_parent_key(self):
+        """One fact, one answer. `references_column` and `to_key` were separate
+        stores, so a DDL could say `accounts(account_pk)` in a column comment
+        and `accounts(id)` in its own header two lines above."""
+        ddl = get_dialect("clickhouse").render_ddl(self._plan_with_divergent_keys())
+        header = next(line for line in ddl.splitlines() if "FOREIGN KEY intent" in line)
+        comment = next(line for line in ddl.splitlines() if "forge:foreign-key" in line)
+        assert "accounts(account_pk)" in header, header
+        assert "accounts(account_pk)" in comment, comment
+        assert "accounts(id)" not in ddl
 
 
 class TestSqlHelpers:
