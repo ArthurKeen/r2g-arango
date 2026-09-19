@@ -11,16 +11,35 @@ Configure via environment variables or .env file:
   ARANGO_PASSWORD    - ArangoDB root password
   SNOWFLAKE_*        - account/user/auth/warehouse/database for the Forge
                        Snowflake roundtrip (see test_forge_roundtrip_snowflake)
+
+The Forge's Snowflake roundtrip needs CREATE SCHEMA, which a fabric read-only
+role does not have; ``SNOWFLAKE_FORGE_ROLE`` overrides ``SNOWFLAKE_ROLE`` for
+that test alone so the two can differ. See ``.env.example``.
 """
 
 from __future__ import annotations
 
 import os
 import uuid
+from pathlib import Path
 
 import pytest
+from dotenv import load_dotenv
 
-PG_CONN = os.getenv("PG_CONN", "postgresql://postgres@localhost:5432/r2g_test")
+# This docstring has always advertised a .env file and nothing ever loaded one:
+# `load_dotenv` was called only in src/r2g/main.py, on the CLI path. So a value
+# configured in .env was invisible here and the suite skipped as though the
+# service were down — indistinguishable, at a glance, from "not running".
+# Must precede the constants below, which read os.getenv at import time, and the
+# module-level skipif gates that consume them.
+# override=False: an explicit environment variable, and CI's `env:` block, win.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
+
+#: Defaults match docker-compose.yml so `docker compose up` alone is enough.
+#: This one did not: it named user `postgres` and database `r2g_test`, neither
+#: of which the compose stack creates, so every PG test skipped out of the box
+#: while MySQL/MSSQL/ClickHouse/Arango — whose defaults do match — ran.
+PG_CONN = os.getenv("PG_CONN", "postgresql://r2g:r2g_test_2026@localhost:5432/northwind")
 MYSQL_CONN = os.getenv("MYSQL_CONN", "mysql://r2g:r2g_test_2026@localhost:3306/shop")
 MSSQL_CONN = os.getenv("MSSQL_CONN", "mssql://sa:r2g_Test_2026!@localhost:1433/shop")
 OPENMETADATA_ENDPOINT = os.getenv("OPENMETADATA_ENDPOINT", "http://localhost:8585")
