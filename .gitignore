@@ -19,3 +19,25 @@ test_run/
 .claude/
 CLAUDE.md
 .coverage
+.no-drift-gate
+.cursor/.shared-memory-sessions/
+.cursor/hooks.json.pre-update.*
+.cursor/hooks/*.pre-update.*
+
+# Competitive assessment of another vendor's product, kept locally for sizing work.
+# Not ours to publish: this repo pushes to two remotes including arango-solutions,
+# and prototypes/ is otherwise committed wholesale, so an untracked file here is one
+# `git add -A` away from being published. Ignored rather than deleted so the sizing
+# analysis stays available while the customer engagement is live.
+prototypes/research.md
+
+# `r2g forge generate` output. Every file carries a "Regenerate with: r2g forge
+# generate" header — it is build product, not source, and committing it would put
+# a stale copy of generated DDL under review alongside the generator that makes it.
+forge-out/
+
+# Transcript-mined pattern candidates awaiting /pattern-save triage. Local working
+# state, not source: entries carry shell commands and absolute paths harvested from
+# whatever this machine was doing, including unrelated repositories. `.claude/` and
+# `.prd-drift-queue/` are ignored for the same reason.
+.pattern-capture-queue/
