@@ -128,18 +128,28 @@ introspection, so quoting to dodge a reserved word would break the equivalence
 the Forge exists to check. Refusal keeps `introspect(generate(O)) ≡ O` honest,
 and it is what F-6 already does with a colliding label.
 
-The list is **SQL:2016 reserved words**, not any single engine's keyword table:
-one plan is projected onto every dialect (D-2), so a name must be safe in all of
-them. Type names are deliberately absent — `text`, `integer` and friends are
-legal column names in every target here.
+The list is **derived from the engines, not written**. One plan is projected onto
+every dialect (D-2), so a name must be safe in all of them; type names are
+deliberately absent — `text`, `integer` and friends are legal column names in
+every target here.
 
-Validated against the live engines rather than asserted (140 words probed with a
-real `CREATE TABLE`): **zero false negatives** — every word Postgres rejects is
-refused; 61 that Postgres tolerates are refused anyway, of which ClickHouse
-rejects one more (`index`). The ~60 refused-but-portable words (`between`,
-`cascade`, `call`) cost nothing in a generator producing *synthetic* ontologies,
-where renaming a property is free, and buy headroom against Snowflake, which is
-stricter than either and cannot be bulk-probed without spending on the account.
+`scripts/derive_reserved_words.py` probes all 471 entries of Postgres's own
+`pg_get_keywords()` as real column names against live Postgres and live
+ClickHouse, and unions what they reject with Snowflake's documented reserved
+words: 101 + 1 (`index`) + 91 → **137**.
+`tests/integration/test_reserved_words.py` re-probes both engines and fails if
+the checked-in list has drifted, in **both** directions — a word the engines
+reject and the forge accepts, and a word both accept that the forge refuses.
+
+> **This paragraph used to say something else, and it was wrong.** The first
+> list was written from memory as "the SQL:2016 reserved words" and claimed
+> *zero false negatives* from a 140-word probe. It accepted `current_date`,
+> `current_user`, `session_user`, `array`, `do`, `returning`, `ilike` and
+> `binary` — all rejected by live Postgres — and refused `key`, `range`,
+> `session`, `result`, `filter` and `partition`, which Postgres and ClickHouse
+> both accept. The claim was not merely false but unfalsifiable: the probe
+> covered only the words already in the list, so it could not fail. Deriving
+> from the engines is the fix; re-probing in CI is what keeps it fixed.
 
 Implementation: `RESERVED_COLUMN_NAMES` in `src/r2g/forge/core.py`, enforced in
 `ForgeOntology.validate_for_forge`.
