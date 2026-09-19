@@ -77,24 +77,67 @@ def sql_literal(value: Any, *, true: str = "TRUE", false: str = "FALSE") -> str:
 def split_sql_statements(sql: str) -> List[str]:
     """Split a loader/DDL script into individual statements.
 
-    Drops ``--`` comment lines and splits on ``;`` outside single-quoted
-    strings, so drivers that execute one statement per call (ClickHouse HTTP,
-    Snowflake ``cursor.execute``) can replay a script verbatim.
+    Drops comments and splits on ``;`` outside quoted text, so drivers that
+    execute one statement per call (ClickHouse HTTP, Snowflake
+    ``cursor.execute``) can replay a script verbatim.
+
+    This is a public helper and gets pointed at hand-written scripts, not only
+    at the forge's own output, so it recognises four things the first version
+    did not:
+
+    * ``--`` anywhere on a line, not only at its start. A trailing
+      ``-- note; more`` previously split into a bogus statement and corrupted
+      the one after it.
+    * ``"quoted identifiers"``. Only ``'`` was tracked, so an apostrophe inside
+      a double-quoted name (``"O'Brien"``) flipped the scanner into
+      string-mode and swallowed every ``;`` that followed.
+    * ``/* block comments */``.
+    * Doubled quotes as escapes (``''`` and ``""``) inside their own quoting.
     """
-    body = "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
     statements: List[str] = []
     current: List[str] = []
-    in_string = False
-    for ch in body:
-        if ch == "'":
-            in_string = not in_string
-        if ch == ";" and not in_string:
-            statement = "".join(current).strip()
-            if statement:
-                statements.append(statement)
-            current = []
-            continue
+    in_single = False   # '...' literal
+    in_double = False   # "..." identifier
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < n else ""
+        if not in_single and not in_double:
+            if ch == "-" and nxt == "-":
+                end = sql.find("\n", i)
+                i = n if end == -1 else end      # keep the newline as whitespace
+                continue
+            if ch == "/" and nxt == "*":
+                end = sql.find("*/", i + 2)
+                i = n if end == -1 else end + 2
+                continue
+            if ch == ";":
+                statement = "".join(current).strip()
+                if statement:
+                    statements.append(statement)
+                current = []
+                i += 1
+                continue
+            if ch == "'":
+                in_single = True
+            elif ch == '"':
+                in_double = True
+        elif in_single and ch == "'":
+            if nxt == "'":                       # '' escape, stays inside
+                current.append(ch)
+                current.append(nxt)
+                i += 2
+                continue
+            in_single = False
+        elif in_double and ch == '"':
+            if nxt == '"':                       # "" escape, stays inside
+                current.append(ch)
+                current.append(nxt)
+                i += 2
+                continue
+            in_double = False
         current.append(ch)
+        i += 1
     trailing = "".join(current).strip()
     if trailing:
         statements.append(trailing)

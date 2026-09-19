@@ -44,8 +44,10 @@ class ClickHouseDialect(SqlDialect):
             "-- column comments (constraint-stripped shape, ADR-0006 D-3 two-branch contract).",
         ]
         lines.extend(
-            f"-- FOREIGN KEY intent: {e.from_table}.{e.fk_column} -> "
-            f"{e.to_table}({e.to_key})  [{e.relationship}]"
+            f"-- FOREIGN KEY intent: {self.physical_table(e.from_table)}."
+            f"{self.physical_column(e.fk_column)} -> "
+            f"{self.physical_table(e.to_table)}({self.physical_column(e.to_key)})"
+            f"  [{e.relationship}]"
             for e in plan.edges
         )
         return lines
@@ -55,7 +57,10 @@ class ClickHouseDialect(SqlDialect):
         physical_type = self.type_for_json[col.json_type]
         if col.nullable:
             physical_type = f"Nullable({physical_type})"
-        line = f"{col.name} {physical_type}"
+        # Through the seam, not raw: render_loader already projects every name,
+        # so emitting the canonical spelling here would make a folding dialect
+        # (Snowflake uppercases both) produce DDL its own loader cannot target.
+        line = f"{self.physical_column(col.name)} {physical_type}"
         if col.references is not None:
             # The parent's key, carried on the plan — not this table's.
             comment = fk_intent_comment(col.references, col.references_column or SURROGATE_KEY)
@@ -66,12 +71,13 @@ class ClickHouseDialect(SqlDialect):
         return []  # no constraint syntax in ClickHouse; see table_suffix
 
     def table_suffix(self, table: TablePlan) -> str:
-        return f" ENGINE = MergeTree ORDER BY ({table.primary_key.name})"
+        return f" ENGINE = MergeTree ORDER BY ({self.physical_column(table.primary_key.name)})"
 
     def render_loader(self, plan: SchemaPlan, rows: Rows, seed: int) -> str:
         header = [
             f"-- FOREIGN KEY intent (not enforceable in ClickHouse): "
-            f"{e.from_table}.{e.fk_column} -> {e.to_table}({e.to_key})"
+            f"{self.physical_table(e.from_table)}.{self.physical_column(e.fk_column)}"
+            f" -> {self.physical_table(e.to_table)}({self.physical_column(e.to_key)})"
             for e in plan.edges
         ]
         body = super().render_loader(plan, rows, seed)

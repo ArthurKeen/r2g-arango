@@ -91,20 +91,44 @@ def normalized_entities(entities: Iterable[Mapping]) -> Dict[str, Set[str]]:
     normalizing physical property spellings (``account_name``,
     ``ACCOUNT_NAME``) through the real CC-12 property normalizer. Entity names
     already come normalized from every analyzer (``owl_entity_name`` or ASA's
-    ``pascal_case(singularize(...))``)."""
-    return {
-        e["name"]: {owl_property_name(p["name"]) for p in e.get("properties", [])}
-        for e in entities
-    }
+    ``pascal_case(singularize(...))``).
+
+    Refuses duplicate entity names rather than collapsing them. This is half of
+    the ``\u2261`` assertion for all four dialect roundtrips, and a dict comprehension
+    keyed by name silently keeps only the last of any repeat \u2014 so an analyzer (or
+    the forge) reporting one entity twice would compare equal to reporting it
+    once, in every roundtrip at the same time.
+    """
+    out: Dict[str, Set[str]] = {}
+    for e in entities:
+        name = e["name"]
+        if name in out:
+            raise AssertionError(
+                f"duplicate entity {name!r} in the conceptual model \u2014 "
+                f"comparing it would have silently dropped one copy"
+            )
+        out[name] = {owl_property_name(p["name"]) for p in e.get("properties", [])}
+    return out
 
 
 def normalized_relationships(relationships: Iterable[Mapping]) -> Set[Tuple[str, str, str]]:
     """``(type, fromEntity, toEntity)`` with the type normalized through
     ``owl_property_name`` (ASA reports ``CONTACTS_TO_ACCOUNTS``; r2g's CSI
-    emitter already lowerCamels it)."""
-    return {
-        (owl_property_name(r["type"]), r["fromEntity"], r["toEntity"]) for r in relationships
-    }
+    emitter already lowerCamels it).
+
+    Refuses duplicates for the same reason ``normalized_entities`` does: a set
+    comprehension would fold a repeated relationship into one and make a
+    double-report compare equal to a single one."""
+    out: Set[Tuple[str, str, str]] = set()
+    for r in relationships:
+        key = (owl_property_name(r["type"]), r["fromEntity"], r["toEntity"])
+        if key in out:
+            raise AssertionError(
+                f"duplicate relationship {key} in the conceptual model \u2014 "
+                f"comparing it would have silently dropped one copy"
+            )
+        out.add(key)
+    return out
 
 
 def assert_conceptual_model_matches(

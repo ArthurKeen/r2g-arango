@@ -213,6 +213,29 @@ class TestSqlHelpers:
             "CREATE TABLE x (id int)",
         ]
 
+    @pytest.mark.parametrize(
+        "label,sql",
+        [
+            ("trailing comment hiding a semicolon", "SELECT 1 -- note; more\nFROM t;\nSELECT 2;"),
+            ("apostrophe inside a quoted identifier", 'CREATE TABLE "O\'Brien" (a INT);\nSELECT 1;'),
+            ("block comment containing a semicolon", "SELECT 1 /* hi; there */ FROM t;\nSELECT 2;"),
+            ("'' escape inside a literal", "INSERT INTO t VALUES ('it''s; fine');\nSELECT 2;"),
+            ("semicolon inside a plain literal", "INSERT INTO t VALUES ('a;b');\nSELECT 2;"),
+            ("no trailing semicolon", "SELECT 1;\nSELECT 2"),
+        ],
+    )
+    def test_split_survives_sql_it_did_not_generate(self, label, sql):
+        """This helper is public and gets pointed at hand-written scripts, not
+        only at the forge's own output, so a ``;`` must split only when it is
+        really a separator.
+
+        Regression: ``--`` was recognised only at the START of a line, ``"``
+        quoted identifiers were not tracked at all, and block comments were not
+        understood. Each case below previously produced a bogus statement, or a
+        corrupted one after it.
+        """
+        assert len(split_sql_statements(sql)) == 2, label
+
     @pytest.mark.parametrize("name", SQL_DIALECTS)
     def test_generated_scripts_split_into_one_statement_per_table_or_row(self, name):
         artifacts = generate(sample_ontology(), dialect=name, seed=1, rows_per_entity=4)
@@ -285,6 +308,32 @@ class TestClickHouseDialect:
         lines = load.splitlines()
         assert lines[0].startswith("-- Federation Forge") and lines[1].startswith("-- dialect: clickhouse")
         assert lines[2] == "-- FOREIGN KEY intent (not enforceable in ClickHouse): contacts.account_id -> accounts(id)"
+
+    def test_ddl_routes_every_name_through_the_seam(self):
+        """A dialect that folds identifiers must fold them in the DDL too.
+
+        Regression: ``column_ddl``, ``table_suffix`` and both FK-intent header
+        lines emitted canonical names directly while ``render_loader`` always
+        projected them — so a folding subclass produced DDL its own loader
+        could not target. Inert for ClickHouse (identity mapping), which is
+        exactly why a subclass is needed to see it.
+        """
+
+        class Folding(type(get_dialect("clickhouse"))):
+            name = "clickhouse_folding"
+
+            def physical_table(self, table: str) -> str:
+                return table.upper()
+
+            def physical_column(self, column: str) -> str:
+                return column.upper()
+
+        ddl = Folding().render_ddl(plan_schema(sample_ontology()))
+        assert "ACCOUNT_ID" in ddl, "column_ddl did not project the column name"
+        assert "ORDER BY (ID)" in ddl, "table_suffix did not project the key"
+        assert "CONTACTS.ACCOUNT_ID -> ACCOUNTS(ID)" in ddl, "FK header did not project"
+        # the canonical spellings must not survive alongside the folded ones
+        assert "account_id Int64" not in ddl and "ORDER BY (id)" not in ddl
 
     def test_loader_uses_lowercase_boolean_literals(self):
         load = generate(sample_ontology(), dialect="clickhouse", seed=3).load_sql
