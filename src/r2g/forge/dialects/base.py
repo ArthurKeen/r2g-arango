@@ -15,7 +15,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar, List, Mapping
 
-from ..core import JSON_TYPES, ForgeError, Rows, SchemaPlan, TablePlan
+from ..core import JSON_TYPES, SURROGATE_KEY, ForgeError, Rows, SchemaPlan, TablePlan
 
 
 class ForgeDialect(ABC):
@@ -131,9 +131,12 @@ class SqlDialect(ForgeDialect):
         lines = [f"PRIMARY KEY ({self.physical_column(table.primary_key.name)})"]
         for fk in table.foreign_keys:
             assert fk.references is not None
+            # The referenced column belongs to the PARENT. Using this table's
+            # primary key was correct only by coincidence of a uniform surrogate key.
             lines.append(
                 f"FOREIGN KEY ({self.physical_column(fk.name)}) REFERENCES "
-                f"{self.physical_table(fk.references)} ({self.physical_column(table.primary_key.name)})"
+                f"{self.physical_table(fk.references)} "
+                f"({self.physical_column(fk.references_column or SURROGATE_KEY)})"
             )
         return lines
 

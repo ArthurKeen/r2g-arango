@@ -26,6 +26,13 @@ from r2g.forge import (
     plan_schema,
     split_sql_statements,
 )
+from r2g.forge.core import (
+    ROLE_FOREIGN_KEY,
+    ROLE_PRIMARY_KEY,
+    ColumnPlan,
+    SchemaPlan,
+    TablePlan,
+)
 from r2g.forge.dialects.arango import (
     GRAPH_NAME,
     MANIFEST_VERSION,
@@ -122,12 +129,73 @@ class TestSchemaPlan:
             ("tickets_to_contacts", "ticketsToContacts"),
         ]
 
+    def test_fk_carries_the_parent_key_not_the_child_key(self):
+        """``references_column`` names the column in the PARENT table.
+
+        Regression: every dialect rendered ``table.primary_key`` for the
+        referenced column — this table's key, not the parent's. Correct only
+        while every table shares SURROGATE_KEY, which is why it went unseen.
+        """
+        contacts = plan_schema(sample_ontology()).table("contacts")
+        (fk,) = contacts.foreign_keys
+        assert fk.references == "accounts"
+        assert fk.references_column == "id"
+        for edge in plan_schema(sample_ontology()).edges:
+            assert edge.to_key == "id"
+
     def test_plan_is_a_pure_function_of_the_ontology(self):
         assert plan_schema(sample_ontology()) == plan_schema(sample_ontology())
 
     def test_unknown_table_lookup_is_forge_error(self):
         with pytest.raises(ForgeError, match="unknown planned table"):
             plan_schema(sample_ontology()).table("ghosts")
+
+
+class TestForeignKeyReferencesTheParent:
+    """The referenced column must come from the parent table.
+
+    ``plan_schema`` gives every table the same surrogate key, so a real plan
+    cannot distinguish "parent's key" from "child's key". These build a plan
+    where they differ, which is the only way to see the bug.
+    """
+
+    @staticmethod
+    def _plan_with_divergent_keys() -> SchemaPlan:
+        parent = TablePlan(
+            entity="Account",
+            table="accounts",
+            columns=(ColumnPlan(name="account_pk", json_type="integer", role=ROLE_PRIMARY_KEY),),
+        )
+        child = TablePlan(
+            entity="Contact",
+            table="contacts",
+            columns=(
+                ColumnPlan(name="contact_pk", json_type="integer", role=ROLE_PRIMARY_KEY),
+                ColumnPlan(
+                    name="account_id",
+                    json_type="integer",
+                    role=ROLE_FOREIGN_KEY,
+                    references="accounts",
+                    references_column="account_pk",
+                ),
+            ),
+        )
+        return SchemaPlan(tables=(parent, child), edges=())
+
+    @pytest.mark.parametrize("name", ["postgres", "snowflake"])
+    def test_sql_dialects_reference_the_parents_key(self, name):
+        ddl = get_dialect(name).render_ddl(self._plan_with_divergent_keys())
+        fk_line = next(line for line in ddl.splitlines() if "FOREIGN KEY" in line)
+        assert "accounts" in fk_line.lower()
+        # the parent's key, not the child's
+        assert "account_pk" in fk_line.lower()
+        assert "contact_pk" not in fk_line.lower()
+
+    def test_clickhouse_fk_comment_names_the_parents_key(self):
+        ddl = get_dialect("clickhouse").render_ddl(self._plan_with_divergent_keys())
+        comment = next(line for line in ddl.splitlines() if "forge:foreign-key" in line)
+        assert "accounts(account_pk)" in comment
+        assert "contact_pk" not in comment
 
 
 class TestSqlHelpers:
@@ -226,6 +294,20 @@ class TestClickHouseDialect:
 
 
 class TestArangoDialect:
+    def test_loader_recreates_the_graph_rather_than_skipping_it(self):
+        """The loader calls itself idempotent, so a re-run must not inherit
+        the previous ontology's edge definitions.
+
+        Regression: it skipped ``create_graph`` whenever a graph of that name
+        existed. GRAPH_NAME is a constant and ARANGO_DB defaults to _system, so
+        a second ontology imported its collections, kept the OLD edge
+        definitions, and exited 0 — the analyzer then read stale relationships.
+        """
+        loader = generate(sample_ontology(), dialect="arango", seed=1).load_sql
+        assert "delete_graph" in loader, "an existing graph is never torn down"
+        assert "drop_collections=False" in loader, "tear-down must keep the documents"
+        assert "not db.has_graph" not in loader, "the skip-if-exists branch is back"
+
     def test_manifest_shape(self):
         artifacts = generate(sample_ontology(), dialect="arango", seed=1)
         manifest = json.loads(artifacts.ddl)

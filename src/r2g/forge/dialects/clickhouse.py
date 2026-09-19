@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import ClassVar, Dict, List
 
-from ..core import Rows, SchemaPlan, TablePlan
+from ..core import SURROGATE_KEY, Rows, SchemaPlan, TablePlan
 from .base import SqlDialect
 
 CLICKHOUSE_TYPE_FOR_JSON_TYPE: Dict[str, str] = {
@@ -44,7 +44,8 @@ class ClickHouseDialect(SqlDialect):
             "-- column comments (constraint-stripped shape, ADR-0006 D-3 two-branch contract).",
         ]
         lines.extend(
-            f"-- FOREIGN KEY intent: {e.from_table}.{e.fk_column} -> {e.to_table}(id)  [{e.relationship}]"
+            f"-- FOREIGN KEY intent: {e.from_table}.{e.fk_column} -> "
+            f"{e.to_table}({e.to_key})  [{e.relationship}]"
             for e in plan.edges
         )
         return lines
@@ -56,7 +57,8 @@ class ClickHouseDialect(SqlDialect):
             physical_type = f"Nullable({physical_type})"
         line = f"{col.name} {physical_type}"
         if col.references is not None:
-            comment = fk_intent_comment(col.references, table.primary_key.name)
+            # The parent's key, carried on the plan — not this table's.
+            comment = fk_intent_comment(col.references, col.references_column or SURROGATE_KEY)
             line += f" COMMENT '{comment}'"
         return line
 
@@ -69,7 +71,7 @@ class ClickHouseDialect(SqlDialect):
     def render_loader(self, plan: SchemaPlan, rows: Rows, seed: int) -> str:
         header = [
             f"-- FOREIGN KEY intent (not enforceable in ClickHouse): "
-            f"{e.from_table}.{e.fk_column} -> {e.to_table}(id)"
+            f"{e.from_table}.{e.fk_column} -> {e.to_table}({e.to_key})"
             for e in plan.edges
         ]
         body = super().render_loader(plan, rows, seed)

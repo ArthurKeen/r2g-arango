@@ -286,7 +286,10 @@ class ColumnPlan:
     """One planned column in canonical snake_case spelling.
 
     ``role`` is one of :data:`ROLE_PRIMARY_KEY`, :data:`ROLE_FOREIGN_KEY`,
-    :data:`ROLE_PROPERTY`; ``references`` names the parent *table* for an FK;
+    :data:`ROLE_PROPERTY`; ``references`` names the parent *table* for an FK and
+    ``references_column`` the column it points at **in that parent** — not in this
+    table. The two coincide only while every table shares :data:`SURROGATE_KEY`,
+    which is why rendering ``table.primary_key`` here looked right and was not;
     ``prop`` is the conceptual lowerCamel property for a property column.
     Key columns are NOT NULL, property columns nullable — the same across
     every dialect so the introspected nullability agrees.
@@ -296,6 +299,7 @@ class ColumnPlan:
     json_type: str
     role: str
     references: Optional[str] = None
+    references_column: Optional[str] = None
     prop: Optional[str] = None
 
     @property
@@ -338,6 +342,9 @@ class EdgePlan:
     to_table: str
     fk_column: str
     edge_collection: str
+    #: The column ``fk_column`` points at in ``to_table``. Carried rather than
+    #: assumed so a non-uniform primary key cannot silently mis-render an FK.
+    to_key: str = SURROGATE_KEY
 
 
 @dataclass(frozen=True)
@@ -401,6 +408,7 @@ def plan_schema(ontology: ForgeOntology) -> SchemaPlan:
                 json_type="integer",
                 role=ROLE_FOREIGN_KEY,
                 references=table_name(r.to_entity),
+                references_column=SURROGATE_KEY,
             )
         )
         edges.append(

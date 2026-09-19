@@ -161,7 +161,15 @@ def main() -> int:
         if not db.has_collection(edge["name"]):
             db.create_collection(edge["name"], edge=True)
     graph = manifest.get("graph")
-    if graph and graph["edgeDefinitions"] and not db.has_graph(graph["name"]):
+    if graph and graph["edgeDefinitions"]:
+        # Recreate rather than skip. The graph name is a fixed constant and
+        # ARANGO_DB defaults to _system, so loading a second ontology into the
+        # same database previously imported the new collections and left the
+        # PREVIOUS ontology's edge definitions attached — exiting 0, with the
+        # analyzer then reading relationships that no longer exist.
+        # drop_collections=False: the documents were just imported above.
+        if db.has_graph(graph["name"]):
+            db.delete_graph(graph["name"], drop_collections=False)
         db.create_graph(
             graph["name"],
             edge_definitions=[
