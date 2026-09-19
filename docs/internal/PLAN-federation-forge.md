@@ -114,11 +114,20 @@ default policy and asserts `provenance.labelCollisions == []`. Deliberate
 collisions are a *denormalizer feature* (the injected-collision report is the
 expected artifact) — S3.
 
-### F-7 · Reserved words are refused, not quoted
+### F-7 · Generated identifiers must be safe unquoted, and are refused when they are not
 
-A generated column may not be named a SQL reserved word. Found by CDF's live
-mode on 2026-09-19: a property called `primary` emitted `primary boolean`, which
+A generated identifier — **table or column** — may not be a SQL reserved word,
+and must start with a letter or underscore. Found by CDF's live mode on
+2026-09-19: a property called `primary` emitted `primary boolean`, which
 Postgres and Snowflake both reject.
+
+The rule initially covered property columns only, which left two holes that a
+review found the same day. An entity named `Value` generated
+`CREATE TABLE values (` — reserved in Snowflake — because table names were
+never checked. And `3dModel` generated the column `3d_model`, which *passes*
+F-2 (it normalizes back to `3dModel`) and every other check, yet no target
+accepts an unquoted identifier beginning with a digit. Both now go through one
+`_refuse_unsafe_identifier` rule, so widening it again means editing one place.
 
 Quoting is the obvious fix and it is the wrong one here. The forge emits
 identifiers **unquoted on purpose** — Snowflake folds unquoted names to
