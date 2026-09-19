@@ -43,6 +43,39 @@ JSON_TYPES: Tuple[str, ...] = ("integer", "float", "boolean", "string")
 #: Name of the surrogate primary key every generated table carries (F-4).
 SURROGATE_KEY = "id"
 
+#: Words a generated column may not be named. The forge emits identifiers
+#: **unquoted** on purpose — Snowflake folds unquoted names to uppercase and the
+#: CC-12 roundtrip depends on that folding (P12.7/P12.11), so quoting to dodge a
+#: reserved word would change the spelling that comes back and break the very
+#: equivalence the Forge exists to check. Refusing is therefore the only option
+#: that keeps `introspect(generate(O)) == O` honest, and it matches how F-6
+#: already refuses a colliding property label.
+#:
+#: One plan is projected onto every dialect (D-2), so a name must be safe in all
+#: of them: this is the SQL:2016 reserved-word list, which is the portable
+#: definition of "cannot appear unquoted where an identifier is expected".
+#: Type names are deliberately absent — `text`, `integer` and friends are legal
+#: column names in every engine here.
+RESERVED_COLUMN_NAMES = frozenset(
+    w.lower()
+    for w in """
+    ALL ALTER AND ANY ARE AS ASC AT AUTHORIZATION BEGIN BETWEEN BOTH BY
+    CALL CASCADE CASE CAST CHECK COLLATE COLUMN COMMIT CONSTRAINT CREATE
+    CROSS CUBE CURRENT CURSOR DEFAULT DELETE DESC DISTINCT DROP
+    EACH ELSE END ESCAPE EXCEPT EXEC EXECUTE EXISTS EXTERNAL
+    FALSE FETCH FILTER FOR FOREIGN FROM FULL FUNCTION
+    GRANT GROUP GROUPING HAVING
+    IN INDEX INNER INOUT INSERT INTERSECT INTERVAL INTO IS
+    JOIN KEY LATERAL LEADING LEFT LIKE LIMIT LOCAL
+    NATURAL NEW NO NOT NULL OF OFFSET OLD ON ONLY OPEN OR ORDER OUT OUTER OVER
+    PARTITION PRIMARY PROCEDURE PUBLIC
+    RANGE REFERENCES RENAME RESULT RETURN RETURNS REVOKE RIGHT ROLLBACK ROLLUP ROW ROWS
+    SCHEMA SELECT SESSION SET SIMILAR SOME START SYSTEM
+    TABLE THEN TO TRAILING TRIGGER TRUE TRUNCATE
+    UNION UNIQUE UNKNOWN UPDATE USER USING VALUES VIEW WHEN WHENEVER WHERE WINDOW WITH
+    """.split()
+)
+
 #: Roles a planned column can play; the plumbing roles are the only extras the
 #: roundtrip tolerates over the conceptual properties.
 ROLE_PRIMARY_KEY = "pk"
@@ -163,6 +196,14 @@ class ForgeOntology(BaseModel):
                     raise ForgeError(
                         f"{e.name}.id collides with the generated surrogate "
                         "primary key; declare a domain identifier instead"
+                    )
+                if column in RESERVED_COLUMN_NAMES:
+                    raise ForgeError(
+                        f"{e.name}.{p.name!r} generates the column {column!r}, "
+                        f"a SQL reserved word. The forge emits identifiers "
+                        f"unquoted so Snowflake's folding keeps the CC-12 "
+                        f"roundtrip honest, so this cannot be quoted around \u2014 "
+                        f"rename the property (PLAN F-2)."
                     )
                 # Collision-free by construction (F-6): deliberate collisions
                 # are an S3 denormalizer feature, not a skeleton input.

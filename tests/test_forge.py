@@ -121,6 +121,31 @@ class TestOntologyValidation:
         with pytest.raises(ForgeError, match="surrogate"):
             ForgeOntology.from_conceptual(doc)
 
+    @pytest.mark.parametrize("prop", ["primary", "order", "select", "group", "check"])
+    def test_rejects_reserved_column_name(self, prop):
+        """A reserved word cannot be a generated column.
+
+        Found by CDF running the Forge in live mode: a property named
+        ``primary`` emitted ``primary boolean``, which Postgres and Snowflake
+        both reject. Quoting is not the fix — the forge emits identifiers
+        unquoted so Snowflake's uppercase folding keeps the CC-12 roundtrip
+        honest, and quoting would change the spelling that comes back.
+        """
+        doc = sample_conceptual()
+        doc["entities"][0]["properties"].append({"name": prop, "type": "string"})
+        with pytest.raises(ForgeError, match="reserved word"):
+            ForgeOntology.from_conceptual(doc)
+
+    @pytest.mark.parametrize("prop", ["statusCode", "label", "textBody", "integerish", "keyword"])
+    def test_accepts_ordinary_names_that_merely_look_sqlish(self, prop):
+        """The list is SQL:2016 reserved words, not keywords: type names and
+        common nouns stay usable. Verified against live Postgres and ClickHouse
+        — of the words this refuses, zero are accepted by both engines AND
+        needed; of the words it allows, none break either engine."""
+        doc = sample_conceptual()
+        doc["entities"][0]["properties"].append({"name": prop, "type": "string"})
+        ForgeOntology.from_conceptual(doc)   # must not raise
+
     def test_rejects_name_that_does_not_survive_naming_roundtrip(self):
         # "Goose" -> table "gooses" -> owl_entity_name gives "Goos": the naive
         # pluralize/singularize pair is not an inverse here, so the forge must
