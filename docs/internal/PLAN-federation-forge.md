@@ -114,6 +114,36 @@ default policy and asserts `provenance.labelCollisions == []`. Deliberate
 collisions are a *denormalizer feature* (the injected-collision report is the
 expected artifact) — S3.
 
+### F-7 · Reserved words are refused, not quoted
+
+A generated column may not be named a SQL reserved word. Found by CDF's live
+mode on 2026-09-19: a property called `primary` emitted `primary boolean`, which
+Postgres and Snowflake both reject.
+
+Quoting is the obvious fix and it is the wrong one here. The forge emits
+identifiers **unquoted on purpose** — Snowflake folds unquoted names to
+uppercase, and F-2's roundtrip asserts *through the normalizer* against exactly
+that folded spelling. A quoted `"primary"` comes back lowercase from
+introspection, so quoting to dodge a reserved word would break the equivalence
+the Forge exists to check. Refusal keeps `introspect(generate(O)) ≡ O` honest,
+and it is what F-6 already does with a colliding label.
+
+The list is **SQL:2016 reserved words**, not any single engine's keyword table:
+one plan is projected onto every dialect (D-2), so a name must be safe in all of
+them. Type names are deliberately absent — `text`, `integer` and friends are
+legal column names in every target here.
+
+Validated against the live engines rather than asserted (140 words probed with a
+real `CREATE TABLE`): **zero false negatives** — every word Postgres rejects is
+refused; 61 that Postgres tolerates are refused anyway, of which ClickHouse
+rejects one more (`index`). The ~60 refused-but-portable words (`between`,
+`cascade`, `call`) cost nothing in a generator producing *synthetic* ontologies,
+where renaming a property is free, and buy headroom against Snowflake, which is
+stricter than either and cannot be bulk-probed without spending on the account.
+
+Implementation: `RESERVED_COLUMN_NAMES` in `src/r2g/forge/core.py`, enforced in
+`ForgeOntology.validate_for_forge`.
+
 ## S2 dialects — the other three launch-set targets behind one seam
 
 ADR-0006 D-4 names Postgres, Snowflake-SQL, ClickHouse-SQL, and Arango

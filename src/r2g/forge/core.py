@@ -203,7 +203,7 @@ class ForgeOntology(BaseModel):
                         f"a SQL reserved word. The forge emits identifiers "
                         f"unquoted so Snowflake's folding keeps the CC-12 "
                         f"roundtrip honest, so this cannot be quoted around \u2014 "
-                        f"rename the property (PLAN F-2)."
+                        f"rename the property (PLAN F-7)."
                     )
                 # Collision-free by construction (F-6): deliberate collisions
                 # are an S3 denormalizer feature, not a skeleton input.
