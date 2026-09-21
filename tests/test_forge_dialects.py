@@ -403,6 +403,13 @@ class TestArangoDialect:
         existed. GRAPH_NAME is a constant and ARANGO_DB defaults to _system, so
         a second ontology imported its collections, kept the OLD edge
         definitions, and exited 0 — the analyzer then read stale relationships.
+
+        This is a cheap canary on the script's shape and runs without a
+        database. The assertion that actually pins the behaviour is
+        ``tests/integration/test_forge_roundtrip_arango.py::
+        test_a_second_ontology_does_not_inherit_the_first_graph``, which loads
+        two different ontologies into one database and checks the graph
+        describes the second. Prefer that one when they disagree.
         """
         loader = generate(sample_ontology(), dialect="arango", seed=1).load_sql
         assert "delete_graph" in loader, "an existing graph is never torn down"

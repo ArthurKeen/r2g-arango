@@ -35,7 +35,13 @@ from r2g.forge import ForgeArtifacts, ForgeOntology, generate, table_name
 from r2g.forge.dialects.arango import GRAPH_NAME, project_documents
 
 from .conftest import ARANGO_ENDPOINT, ARANGO_PASSWORD, ARANGO_USER, requires_arango
-from .forge_support import ROWS_PER_ENTITY, SEED, assert_conceptual_model_matches, forge_ontology
+from .forge_support import (
+    CONCEPTUAL,
+    ROWS_PER_ENTITY,
+    SEED,
+    assert_conceptual_model_matches,
+    forge_ontology,
+)
 
 pytestmark = requires_arango
 
@@ -133,3 +139,96 @@ def test_asa_baseline_reproduces_the_ontology(loaded_federation, entity_strategy
     assert "PG_ENTITY_COLLECTION" in patterns and "PG_DEDICATED_EDGE" in patterns, patterns
     assert not any(p.startswith("LPG_") for p in patterns), f"forge emits PG style; got {patterns}"
     record_property(f"forge_arango_patterns_{entity_strategy}", sorted(patterns))
+
+#: A second ontology sharing no entity or relationship with the first. The
+#: graph name is a fixed constant and ARANGO_DB defaults to _system, so two
+#: ontologies loaded on one machine land on the same graph — which is the whole
+#: hazard the idempotence fix addresses.
+_SECOND_CONCEPTUAL = {
+    "entities": [
+        {"name": "Vendor", "properties": [{"name": "vendorName", "type": "string"}]},
+        {"name": "Invoice", "properties": [{"name": "amountDue", "type": "float"}]},
+    ],
+    "relationships": [
+        {"type": "invoicesToVendors", "fromEntity": "Invoice", "toEntity": "Vendor"},
+    ],
+}
+
+
+def _run_loader(artifacts: ForgeArtifacts, target_dir, db_name: str) -> None:
+    """Write the artifacts and run the generated loader exactly as a user would."""
+    target_dir.mkdir(parents=True, exist_ok=True)
+    paths = artifacts.write_to(str(target_dir))
+    loader = next(p for p in paths if p.endswith("forge.load.py"))
+    env = {
+        **os.environ,
+        "ARANGO_ENDPOINT": ARANGO_ENDPOINT,
+        "ARANGO_DB": db_name,
+        "ARANGO_USER": ARANGO_USER,
+        "ARANGO_PASSWORD": ARANGO_PASSWORD,
+    }
+    result = subprocess.run(
+        [sys.executable, loader], env=env, capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, f"loader failed:\n{result.stdout}\n{result.stderr}"
+
+
+def _edge_collections_on_the_graph(db, name: str = GRAPH_NAME) -> set:
+    return {d["edge_collection"] for d in db.graph(name).edge_definitions()}
+
+
+@requires_arango
+def test_a_second_ontology_does_not_inherit_the_first_graph(arango_test_db, tmp_path):
+    """Loading a different ontology into the same database must leave the graph
+    describing the *second* one.
+
+    Regression, and the reason this is a live test rather than a string
+    assertion: the loader skipped ``create_graph`` whenever a graph of that name
+    already existed. The second ontology's collections imported fine, the graph
+    kept the FIRST ontology's edge definitions, and the script exited 0 — so the
+    analyzer read relationships that no longer existed anywhere in the data. A
+    test that greps the generated script for ``delete_graph`` pins the shape of
+    the fix; only running two ontologies pins the behaviour it was for.
+    """
+    db_name, db = arango_test_db
+
+    first = ForgeOntology.from_conceptual(dict(CONCEPTUAL))
+    _run_loader(
+        generate(first, dialect="arango", seed=SEED, rows_per_entity=ROWS_PER_ENTITY),
+        tmp_path / "first",
+        db_name,
+    )
+    first_edges = _edge_collections_on_the_graph(db)
+    assert first_edges == {"contacts_to_accounts", "support_tickets_to_contacts"}
+
+    second = ForgeOntology.from_conceptual(dict(_SECOND_CONCEPTUAL))
+    _run_loader(
+        generate(second, dialect="arango", seed=SEED, rows_per_entity=ROWS_PER_ENTITY),
+        tmp_path / "second",
+        db_name,
+    )
+    second_edges = _edge_collections_on_the_graph(db)
+
+    assert second_edges == {"invoices_to_vendors"}, (
+        f"graph still describes the previous ontology: {sorted(second_edges)}"
+    )
+    assert not (second_edges & first_edges), "a stale edge definition survived the reload"
+
+
+@requires_arango
+def test_reloading_the_same_ontology_is_idempotent(arango_test_db, tmp_path):
+    """The other half of the claim: a re-run of the *same* ontology must leave
+    the graph and the document counts exactly as they were."""
+    db_name, db = arango_test_db
+    ontology = forge_ontology()
+    artifacts = generate(ontology, dialect="arango", seed=SEED, rows_per_entity=ROWS_PER_ENTITY)
+
+    _run_loader(artifacts, tmp_path / "once", db_name)
+    edges_once = _edge_collections_on_the_graph(db)
+    counts_once = {t: db.collection(t).count() for t in edges_once | {"accounts", "contacts"}}
+
+    _run_loader(artifacts, tmp_path / "twice", db_name)
+    assert _edge_collections_on_the_graph(db) == edges_once
+    assert {t: db.collection(t).count() for t in counts_once} == counts_once, (
+        "a second load of the same ontology changed the data"
+    )
