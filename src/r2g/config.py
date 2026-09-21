@@ -6,6 +6,7 @@ from typing import Any, Dict, Set
 import yaml
 
 from r2g.expressions import ExpressionError, compile_expression
+from r2g.naming import edge_collection_name as _edge_name
 from r2g.types import (
     RESERVED_ATTRIBUTES,
     CollectionMapping,
@@ -385,7 +386,7 @@ class ConfigManager:
             if _is_partition_child(table):
                 continue
             for fk in table.foreign_keys:
-                base = f"{table_name}_to_{fk.foreign_table}"
+                base = _edge_name(table_name, fk.foreign_table)
                 edge_name = base
                 if edge_name in edge_collection_names:
                     suffix = "_".join(fk.columns)

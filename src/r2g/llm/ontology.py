@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from r2g.config import ConfigManager, validate_config
 from r2g.llm.base import OntologyProposal
+from r2g.naming import edge_collection_name as _edge_name
 from r2g.types import (
     RESERVED_ATTRIBUTES,
     EdgeDefinition,
@@ -175,7 +176,7 @@ def _apply_edges(
             )
             continue
 
-        name = pe.edge_collection or f"{pe.from_collection}_to_{pe.to_collection}"
+        name = pe.edge_collection or _edge_name(pe.from_collection, pe.to_collection)
         candidate = EdgeDefinition(
             edge_collection=name,
             from_collection=pe.from_collection,

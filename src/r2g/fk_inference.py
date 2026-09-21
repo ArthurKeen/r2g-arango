@@ -53,6 +53,7 @@ from relational_schema_analyzer.fk_inference import SQLServerValueSampler as _Rs
 from relational_schema_analyzer.fk_inference import infer_foreign_keys as _rsa_infer_foreign_keys
 
 from r2g.log import get_logger
+from r2g.naming import edge_collection_name as _edge_name
 from r2g.types import EdgeDefinition, Schema
 
 logger = get_logger(__name__)
@@ -78,7 +79,7 @@ class InferredForeignKey(_RsaInferredForeignKey):
         convention (``<table>_to_<foreign_table>``) so inferred edges
         live alongside declared ones with a consistent namespace.
         """
-        name = edge_collection or f"{self.table}_to_{self.foreign_table}"
+        name = edge_collection or _edge_name(self.table, self.foreign_table)
         return EdgeDefinition(
             edge_collection=name,
             from_collection=self.table,

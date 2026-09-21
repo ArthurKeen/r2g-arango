@@ -6,6 +6,8 @@ normalizers — ``csi.owl_entity_name`` / ``csi.owl_property_name`` and
 introspection roundtrip lives in ``tests/integration/test_forge_roundtrip.py``.
 """
 
+from pathlib import Path
+
 import pytest
 
 from r2g.config import pg_type_to_json_type
@@ -87,6 +89,40 @@ class TestTypeInverse:
             assert pg_type_to_json_type(pg_type) == json_type
 
 
+class TestPlanCitations:
+    """Every `PLAN F-n` a refusal cites must resolve to a heading in the plan.
+
+    The reserved-word refusal shipped citing `PLAN F-2` — the CC-12 normalizer
+    inverse — for a rule F-2 says nothing about, and F-7 did not yet exist. A
+    developer following the reference landed on an unrelated rule, which is
+    worse than citing nothing. The plan's F-sections were corrected four times
+    in one day; this is the check that makes the next drift fail loudly.
+    """
+
+    @staticmethod
+    def _plan_headings() -> set:
+        import re
+
+        plan = Path(__file__).resolve().parents[1] / "docs/internal/PLAN-federation-forge.md"
+        return set(re.findall(r"^### (F-\d+)", plan.read_text(encoding="utf-8"), re.M))
+
+    def test_every_cited_rule_exists(self):
+        import re
+
+        src = Path(__file__).resolve().parents[1] / "src/r2g"
+        cited = {
+            (path.relative_to(src.parent), rule)
+            for path in src.rglob("*.py")
+            for rule in re.findall(r"PLAN (F-\d+)", path.read_text(encoding="utf-8"))
+        }
+        headings = self._plan_headings()
+        dangling = sorted({f"{p}: {r}" for p, r in cited if r not in headings})
+        assert not dangling, (
+            f"these cite a PLAN rule with no heading in "
+            f"docs/internal/PLAN-federation-forge.md: {dangling}"
+        )
+
+
 class TestOntologyValidation:
     def test_accepts_full_csi_document(self):
         document = {"csiVersion": "1", "conceptualModel": sample_conceptual()}
@@ -119,6 +155,98 @@ class TestOntologyValidation:
         doc = sample_conceptual()
         doc["entities"][0]["properties"].append({"name": "id", "type": "integer"})
         with pytest.raises(ForgeError, match="surrogate"):
+            ForgeOntology.from_conceptual(doc)
+
+    @pytest.mark.parametrize(
+        "prop",
+        [
+            "primary", "order", "select", "group", "check",
+            # every one of these was ACCEPTED by the first version of the list
+            # and rejected by live Postgres — the failure F-7 exists to prevent
+            "currentDate", "currentUser", "array", "do", "returning", "ilike",
+        ],
+    )
+    def test_rejects_reserved_column_name(self, prop):
+        """A reserved word cannot be a generated column.
+
+        Found by CDF running the Forge in live mode: a property named
+        ``primary`` emitted ``primary boolean``, which Postgres and Snowflake
+        both reject. Quoting is not the fix — the forge emits identifiers
+        unquoted so Snowflake's uppercase folding keeps the CC-12 roundtrip
+        honest, and quoting would change the spelling that comes back.
+        """
+        doc = sample_conceptual()
+        doc["entities"][0]["properties"].append({"name": prop, "type": "string"})
+        with pytest.raises(ForgeError, match="reserved word"):
+            ForgeOntology.from_conceptual(doc)
+
+    @pytest.mark.parametrize(
+        "prop",
+        [
+            "statusCode", "label", "textBody", "integerish", "keyword",
+            # every one of these was REFUSED by the first version and is
+            # accepted by live Postgres and ClickHouse both; `key` especially
+            # is an ordinary property name
+            "key", "range", "session", "result", "filter", "partition",
+        ],
+    )
+    def test_accepts_ordinary_names_that_merely_look_sqlish(self, prop):
+        """Ordinary names stay usable.
+
+        The claim that used to sit here — "of the words it allows, none break
+        either engine" — was false, and false for a reason worth remembering:
+        it was checked by probing the words already in the list, so the probe
+        could only confirm it. `current_date`, `array`, `do`, `returning` and
+        `ilike` were all allowed and all rejected by live Postgres.
+
+        The list is now derived from the engines rather than asserted
+        (scripts/derive_reserved_words.py), and
+        tests/integration/test_reserved_words.py re-probes them so drift fails
+        loudly instead of shipping."""
+        doc = sample_conceptual()
+        doc["entities"][0]["properties"].append({"name": prop, "type": "string"})
+        ForgeOntology.from_conceptual(doc)   # must not raise
+
+    # `Order` is deliberately absent: it pluralizes to `orders`, which no
+    # target reserves. Only the singular `order` is.
+    @pytest.mark.parametrize("entity", ["Value", "Row"])
+    def test_rejects_reserved_table_name(self, entity):
+        """The rule covers tables too. It used to check property columns only,
+        so `Value` generated `CREATE TABLE values (` — reserved in Snowflake."""
+        doc = sample_conceptual()
+        doc["entities"].append({"name": entity, "properties": [{"name": "someLabel", "type": "string"}]})
+        with pytest.raises(ForgeError, match="reserved word"):
+            ForgeOntology.from_conceptual(doc)
+
+    @pytest.mark.parametrize(
+        "entity,prop",
+        [("Account", "3dModel"), ("Account", "2ndLine"), ("3dModel", "someProp")],
+    )
+    def test_rejects_identifier_starting_with_a_digit(self, entity, prop):
+        """`3dModel` survives the CC-12 roundtrip (`3d_model` normalizes back to
+        `3dModel`) so every other check passed it, and no target accepts an
+        unquoted identifier that starts with a digit."""
+        doc = sample_conceptual()
+        doc["entities"].append({"name": entity, "properties": [{"name": prop, "type": "string"}]}
+                               if entity != "Account" else
+                               {"name": "Extra", "properties": [{"name": prop, "type": "string"}]})
+        with pytest.raises(ForgeError, match="letter or underscore"):
+            ForgeOntology.from_conceptual(doc)
+
+    @pytest.mark.parametrize(
+        "doc",
+        [
+            {"entities": [{"properties": []}]},
+            {"entities": "nope"},
+            {"conceptualModel": None},
+            {"entities": [{"name": "A", "properties": []}], "relationships": [{"type": "x"}]},
+        ],
+    )
+    def test_malformed_document_is_refused_not_crashed(self, doc):
+        """Indexing raw dicts leaked KeyError / TypeError / AttributeError /
+        pydantic ValidationError past `except ForgeError`, so the CLI logged a
+        traceback and exited 1 where the contract is exit 2, 'Forge refused'."""
+        with pytest.raises(ForgeError, match="malformed conceptual document"):
             ForgeOntology.from_conceptual(doc)
 
     def test_rejects_name_that_does_not_survive_naming_roundtrip(self):
@@ -172,7 +300,7 @@ class TestGenerate:
 
     def test_rejects_unsupported_dialect(self):
         with pytest.raises(ForgeError, match="dialect"):
-            generate(sample_ontology(), dialect="clickhouse", seed=1)
+            generate(sample_ontology(), dialect="duckdb", seed=1)
 
     def test_rejects_bad_rows_per_entity(self):
         with pytest.raises(ForgeError, match="rows_per_entity"):

@@ -6,22 +6,47 @@ They are skipped automatically if the services are unreachable.
 Configure via environment variables or .env file:
   PG_CONN            - PostgreSQL connection string
   MYSQL_CONN         - MySQL / MariaDB connection string
+  CLICKHOUSE_DSN     - ClickHouse HTTP DSN (clickhouse://user:pass@host:port/db)
   ARANGO_ENDPOINT    - ArangoDB HTTP endpoint
   ARANGO_PASSWORD    - ArangoDB root password
+  SNOWFLAKE_*        - account/user/auth/warehouse/database for the Forge
+                       Snowflake roundtrip (see test_forge_roundtrip_snowflake)
+
+The Forge's Snowflake roundtrip needs CREATE SCHEMA, which a fabric read-only
+role does not have; ``SNOWFLAKE_FORGE_ROLE`` overrides ``SNOWFLAKE_ROLE`` for
+that test alone so the two can differ. See ``.env.example``.
 """
 
 from __future__ import annotations
 
 import os
 import uuid
+from pathlib import Path
 
 import pytest
+from dotenv import load_dotenv
 
-PG_CONN = os.getenv("PG_CONN", "postgresql://postgres@localhost:5432/r2g_test")
+# This docstring has always advertised a .env file and nothing ever loaded one:
+# `load_dotenv` was called only in src/r2g/main.py, on the CLI path. So a value
+# configured in .env was invisible here and the suite skipped as though the
+# service were down — indistinguishable, at a glance, from "not running".
+# Must precede the constants below, which read os.getenv at import time, and the
+# module-level skipif gates that consume them.
+# override=False: an explicit environment variable, and CI's `env:` block, win.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
+
+#: Defaults match docker-compose.yml so `docker compose up` alone is enough.
+#: This one did not: it named user `postgres` and database `r2g_test`, neither
+#: of which the compose stack creates, so every PG test skipped out of the box
+#: while MySQL/MSSQL/ClickHouse/Arango — whose defaults do match — ran.
+PG_CONN = os.getenv("PG_CONN", "postgresql://r2g:r2g_test_2026@localhost:5432/northwind")
 MYSQL_CONN = os.getenv("MYSQL_CONN", "mysql://r2g:r2g_test_2026@localhost:3306/shop")
 MSSQL_CONN = os.getenv("MSSQL_CONN", "mssql://sa:r2g_Test_2026!@localhost:1433/shop")
 OPENMETADATA_ENDPOINT = os.getenv("OPENMETADATA_ENDPOINT", "http://localhost:8585")
 OPENMETADATA_TOKEN = os.getenv("OPENMETADATA_TOKEN", "")
+#: The compose stack's ClickHouse (docker-compose.yml ``clickhouse`` service);
+#: HTTP on 8124 by default so it does not collide with other local stacks on 8123.
+CLICKHOUSE_DSN = os.getenv("CLICKHOUSE_DSN", "clickhouse://r2g:r2g_test_2026@localhost:8124/forge")
 ARANGO_ENDPOINT = os.getenv("ARANGO_ENDPOINT", "http://localhost:8540")
 ARANGO_USER = os.getenv("ARANGO_USER", "root")
 ARANGO_PASSWORD = os.getenv("ARANGO_PASSWORD", "r2g_test_2026")
@@ -92,6 +117,30 @@ def _openmetadata_available() -> bool:
         return False
 
 
+def _clickhouse_available() -> bool:
+    try:
+        import clickhouse_connect
+
+        client = clickhouse_connect.get_client(dsn=CLICKHOUSE_DSN)
+        try:
+            client.command("SELECT 1")
+        finally:
+            client.close()
+        return True
+    except Exception:
+        return False
+
+
+def _snowflake_configured() -> bool:
+    """Configured (not probed): a network round trip at collection time is too
+    slow. The Forge Snowflake fixture skips itself if the account refuses the
+    schema it needs."""
+    has_auth = bool(os.getenv("SNOWFLAKE_PASSWORD") or os.getenv("SNOWFLAKE_PRIVATE_KEY_FILE"))
+    return has_auth and all(
+        os.getenv(v) for v in ("SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_DATABASE", "SNOWFLAKE_WAREHOUSE")
+    )
+
+
 def _arango_available() -> bool:
     try:
         from arango import ArangoClient
@@ -107,6 +156,13 @@ def _arango_available() -> bool:
 
 requires_pg = pytest.mark.skipif(not _pg_available(), reason="PostgreSQL not available")
 requires_arango = pytest.mark.skipif(not _arango_available(), reason="ArangoDB not available")
+requires_clickhouse = pytest.mark.skipif(
+    not _clickhouse_available(), reason="ClickHouse not available (set CLICKHOUSE_DSN)"
+)
+requires_snowflake = pytest.mark.skipif(
+    not _snowflake_configured(),
+    reason="Snowflake not configured (SNOWFLAKE_ACCOUNT/USER/DATABASE/WAREHOUSE + PASSWORD or PRIVATE_KEY_FILE)",
+)
 requires_both = pytest.mark.skipif(
     not (_pg_available() and _arango_available()),
     reason="PostgreSQL and/or ArangoDB not available",
