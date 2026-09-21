@@ -244,7 +244,7 @@ D-3's "never silently wrong", applied to types. Closing it is an RSA + r2g
 follow-up (report scale; scale-0 `NUMBER` → `integer`).
 
 Roundtrip: `tests/integration/test_forge_roundtrip_snowflake.py` — throwaway
-schema `FORGE_RT_<seed>_<pid>_<hex>` in the real account, dropped in `finally`;
+schema `R2G_RT_<seed>_<pid>_<hex>` in the real account — the `R2G_` prefix keeps it disjoint from CDF's `FORGE_<SHAPE>_<SYSTEM>` in the same database — dropped in `finally`;
 skips with a reason when creds are unset **or when the role may not
 `CREATE SCHEMA`** (the fabric's `CDF_RO` cannot; set `SNOWFLAKE_FORGE_ROLE`).
 RSA's connector is URL-driven and cannot carry a private-key path, so the

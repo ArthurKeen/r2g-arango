@@ -16,7 +16,17 @@ Configuration (skipped cleanly when absent): ``SNOWFLAKE_ACCOUNT``,
 ``SNOWFLAKE_ROLE``) is the role used for the whole test and must be allowed to
 ``CREATE SCHEMA`` on the database — the fabric's read-only role is not, so a
 privilege refusal is a *skip* with the reason, not a failure. One unique
-schema per run (``FORGE_RT_<seed>_<pid>_<hex>``), always dropped in ``finally``.
+schema per run (``R2G_RT_<seed>_<pid>_<hex>``), always dropped in ``finally``.
+
+The ``R2G_`` prefix is deliberate. contextual-data-fabric's Forge live mode
+deploys into the same database on the same account, naming its schemas
+``FORGE_<SHAPE>_<SYSTEM>``. Neither side can currently touch the other — this
+one drops only the exact name it created, CDF never drops at all, and neither
+deletes by pattern — but sharing a prefix made disjointness a matter of
+probability (a pid and four hex characters) rather than construction. It also
+put the safer failure on the wrong side: CDF issues ``CREATE OR REPLACE
+SCHEMA``, which would silently replace a colliding schema, while this one issues
+``CREATE SCHEMA`` and would error. A distinct prefix removes the question.
 
 Key-pair auth note: RSA's connector builds ``snowflake.connector.connect``
 kwargs from a URL, which cannot carry a private-key path, so the fixture wraps
@@ -90,7 +100,7 @@ def forge_schema() -> Iterator[Tuple[Any, str, str]]:
     snowflake = pytest.importorskip("snowflake.connector")
     kwargs = _connect_kwargs()
     database = kwargs["database"]
-    schema = f"FORGE_RT_{SEED}_{os.getpid()}_{uuid.uuid4().hex[:4].upper()}"
+    schema = f"R2G_RT_{SEED}_{os.getpid()}_{uuid.uuid4().hex[:4].upper()}"
     try:
         conn = snowflake.connect(**kwargs)
     except Exception as exc:  # noqa: BLE001 - unreachable account is a skip, not a failure
