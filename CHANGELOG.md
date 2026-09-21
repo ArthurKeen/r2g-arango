@@ -7,6 +7,8 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-09-21
+
 ### Added
 - **Federation Forge S2 dialects: `snowflake`, `clickhouse`, `arango`** behind the
   unchanged `generate(ontology, dialect, seed)` seam (contextual-data-fabric
