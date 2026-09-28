@@ -7,7 +7,23 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.2] — 2026-09-21
+## [0.4.3] — 2026-09-28
+
+### Added
+- **CSI: declared `uniqueConstraints` are now semantically validated.** A CSI entity
+  is `additionalProperties: true`, so a malformed `uniqueConstraints` (a flat list, a
+  source column name instead of a conceptual property, or a name belonging to no
+  property on the entity) previously passed validation and only surfaced far
+  downstream as a federated join grouping incorrectly. `validate_csi` now checks the
+  field's shape and that every referenced name resolves to a property on its entity,
+  raising `jsonschema.ValidationError` with the specific faults. The JSON Schema
+  itself is `arango-schema-analyzer`'s to own — r2g only vendors a copy — so this is
+  enforced in code rather than by widening the vendored schema (contextual-data-fabric
+  ADR-0005 D1 v2).
+
+### Changed
+- **Forge Snowflake round-trip test uses the `R2G_RT_` throwaway-schema prefix**
+  (was `FORGE_RT_`), aligning the integration test with the shared naming convention.
 
 ### Added
 - **Federation Forge S2 dialects: `snowflake`, `clickhouse`, `arango`** behind the
