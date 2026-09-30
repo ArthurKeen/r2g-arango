@@ -1,6 +1,6 @@
 # Research brief: one transformation language, many execution targets
 
-**Status:** brief — research not yet run
+**Status:** research run 2026-09-29 — see `transformation-language-evaluation.md`
 **Output goes to:** `docs/research/transformation-language-evaluation.md`
 **Related:** PRD P5c.1.4 (expression evaluator), P5c.1.5 (AQL delegation),
 P5c.1.7 (KSQL translation layer — not started); `src/r2g/expressions.py`
