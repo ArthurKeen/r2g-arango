@@ -1,10 +1,14 @@
-"""Safe evaluator for a subset of AQL suitable for per-row field expressions.
+"""Safe evaluator for an AQL-flavoured language of per-row field expressions.
 
-Supports the subset promised in PRD P5c.1.4:
+Supports the language promised in PRD P5c.1.4. The syntax follows AQL but the
+semantics do not: null handling, ``||``/``&&``, ``+`` on strings and
+cross-type comparison all differ from ArangoDB, and ``??``/``COALESCE`` are
+not AQL at all. See P5c.1.4 before changing behaviour toward AQL parity.
 
 - Literals: numbers, strings ("..." or '...'), ``true``, ``false``, ``null``
 - Bind parameters: ``@col_name`` refers to the source row value
-- Arithmetic: ``+ - * / %`` (``null`` propagates for arithmetic, AQL-style)
+- Arithmetic: ``+ - * / %`` (a ``null`` operand makes the result ``null``; AQL
+  would treat it as ``0``)
 - Comparison: ``== != < <= > >=``
 - Logical: ``&& || NOT`` (case-insensitive ``AND`` / ``OR`` / ``NOT`` accepted too)
 - Null coalescing: ``??``
