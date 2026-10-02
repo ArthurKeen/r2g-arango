@@ -13,9 +13,11 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   foreign keys but not `unique_constraints`, so a UNIQUE key present at capture -- including one
   declared in a reviewed key overlay -- vanished on catalog reload, and any FK inferred through
   that natural key vanished with it. UNIQUE keys are now persisted; tables without one serialize
-  byte-identically to before. New snapshots record `schema_format_version: 2`; older snapshots
-  read as format 1 ("uniqueness not recorded") and re-save unchanged. Re-snapshot a source to
-  recover uniqueness that an older snapshot dropped.
+  byte-identically to before. New snapshots record `schema_format_version: 2` ("can hold UNIQUE
+  keys"); older snapshots read as format 1 and re-save unchanged. The marker versions storage,
+  not introspection: r2g's connectors do not read declared UNIQUE constraints yet, so today
+  UNIQUE keys reach a snapshot only through a key overlay. Re-snapshot a source to recover
+  overlay UNIQUE keys an older snapshot dropped.
 
 ### Added
 

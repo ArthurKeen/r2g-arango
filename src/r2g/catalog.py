@@ -18,8 +18,12 @@ logger = get_logger(__name__)
 _PROJECT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*")
 
 #: Persisted shape of ``SchemaSnapshot.schema_data``. Format 1 (no marker on
-#: disk) predates UNIQUE-key persistence: its empty ``unique_constraints`` means
-#: "not recorded", not "none". Format 2 records them, so empty means none.
+#: disk) cannot hold UNIQUE keys -- they were dropped on save -- so its empty
+#: ``unique_constraints`` says nothing. Format 2 keeps whatever UNIQUE keys the
+#: capture produced. It versions the *storage*, not the introspection: r2g's own
+#: connectors do not read declared UNIQUE constraints yet (Plan B), so an empty
+#: list at format 2 can still mean "not looked for" -- only an overlay or an
+#: RSA-backed capture puts UNIQUE keys there today.
 CURRENT_SCHEMA_FORMAT = 2
 
 
@@ -125,7 +129,7 @@ class SchemaSnapshot(BaseModel):
     key_overlay_source: str | None = None
     key_overlay_fingerprint: str | None = None
     # Defaults to the legacy format so anything not deliberately stamped by
-    # create_snapshot is treated as "uniqueness not recorded" -- the safe reading.
+    # create_snapshot is treated as unable to hold UNIQUE keys -- the safe reading.
     schema_format_version: int = 1
 
     @model_serializer(mode="wrap")

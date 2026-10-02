@@ -240,14 +240,14 @@ def test_overlay_unique_key_survives_reload_and_still_drives_inference(monkeypat
     assert ("ORDERS", ("ACCOUNT_CODE",), "ACCOUNTS", ("ACCOUNT_CODE",)) in inferred
 
 
-def test_new_snapshots_declare_that_uniqueness_was_recorded(monkeypatch, tmp_path, natural_key_schema):
+def test_new_snapshots_are_stamped_with_the_current_storage_format(monkeypatch, tmp_path, natural_key_schema):
     from r2g.catalog import CURRENT_SCHEMA_FORMAT
 
     overlay = {"version": 1, "tables": {"ACCOUNTS": {"primaryKey": ["ACCOUNT_ID"]}}}
     reloaded = _capture_with_overlay(monkeypatch, tmp_path, natural_key_schema, overlay)
 
-    # Format 2 means an empty unique_constraints list is a statement ("none"),
-    # not an absence of information.
+    # Format 2 means the snapshot *can* hold UNIQUE keys. It does not promise the
+    # capture looked for them: r2g's connectors read none yet (Plan B).
     assert CURRENT_SCHEMA_FORMAT == 2
     assert reloaded.schema_format_version == CURRENT_SCHEMA_FORMAT
 
