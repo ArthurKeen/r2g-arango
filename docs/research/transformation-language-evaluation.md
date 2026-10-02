@@ -40,10 +40,19 @@ fix it. So the recommendation is:
    Microsoft documents that this gives incorrect results.
 
 **The most important finding is about r2g itself.** r2g evaluates an expression one of two ways:
-in Python if it can, or by sending it to ArangoDB if it cannot. Given the same row, **the two
-disagree** on three of three cases we tried. One of those cases builds a record's identity key,
-so one route would create `7_42` and the other `7_42.0` — the same record, stored twice. Section
-5 has the details; it is worth fixing regardless of anything else in this report.
+in Python if every part of it is in the evaluator's subset, or by sending it to ArangoDB if any
+part is not. Given the same row, **the two disagree on 9 of the 11 subset expressions we tried**
+— on missing values, on text-to-number failures, on number formatting, and on what `+` means.
+Two consequences:
+
+- **Adding one unsupported function changes the answer for the rest of the expression.**
+  `CONCAT(@t, "_", @id)` gives `7_42.0` locally. Wrap it in `SUBSTITUTE(…)`, which the subset
+  lacks, and the whole expression goes to the server, where the same `CONCAT` gives `7_42`.
+- **Bulk loads never send anything to the server**, so a field whose expression needs ArangoDB
+  is silently missing from every bulk-loaded document. It is filled only when the same row
+  arrives by stream.
+
+Section 5 has the details; both are worth fixing regardless of anything else in this report.
 
 **What changed the picture during the research:**
 
@@ -68,14 +77,23 @@ evaluator, Python and CEL.
 The brief asked for all ten reference transformations to be written in every shortlisted
 candidate and compiled for three targets. **We did not do that literally.** Instead:
 
-- For the seven scalar items we ran eight probes on seven engines, choosing the edge cases where
-  engines are known to differ. This produced more evidence than a clean-path matrix would have.
+- For the seven scalar items we ran nine probes on seven engines (P1–P7, with item 3 split into
+  P3a and P3b), choosing the edge cases where engines are known to differ. We added P8, integer
+  division, which is not one of the reference items but is a common source of divergence. This
+  produced more evidence than a clean-path matrix would have.
 - For items 8–10 we tested *whether they can be expressed at all*, because that is what separates
   the candidates.
 
 **Not covered:**
 
-- Neo4j, Amazon Neptune, Informatica, Talend, SSIS, Matillion, LookML, Cube and AtScale.
+- Systems the brief named that this pass did not research, so no finding about them should be
+  read into their absence:
+  - Graph loaders: Neo4j, Amazon Neptune, Ontotext GraphDB.
+  - Unified batch and streaming: Spark Structured Streaming, Materialize, RisingWave.
+  - ETL and semantic layers: Informatica, Talend, SSIS, Matillion, LookML, Cube, AtScale, and
+    the dbt Semantic Layer / MetricFlow. dbt's cross-database macros are covered; its semantic
+    layer is not.
+  - CEL adopters: Firebase. Kubernetes, Envoy and GCP IAM are covered.
 - PuppyGraph's support for computed properties. Its schema documentation returned 404, so this is
   unverified.
 - Usability studies on whether spreadsheet syntax reduces authoring errors. **We found none**, so
@@ -149,19 +167,22 @@ raised an error; for CEL it means an error value came back (see 4.4).
 | **P3b** `'12a'` → number | err | err (`TRY_CAST`: NULL) | err (`OrNull`: NULL) | **0** | **NULL** | err | err |
 | **P4** band for a missing score (`<30` low, `<70` medium, else high) | high | high | high | **low** | high | err | err |
 | **P5** key from 7 and 42.0 | `'7_42'` | **`'7_42.0'`** | `'7_42'` | `'7_42'` | **`'7_42.0'`** | `'7_42.0'` | `'7_42'` |
-| **P6** `'2026-03-29 01:30+02:00'` as text | `'2026-03-28 23:30:00+00'` | **`'2026-03-28 18:30:00-05'`** (host time zone) | `'2026-03-28 23:30:00'` | `'2026-03-28T23:30:00.000Z'` | — | `'…23:30:00+00:00'` | `'…23:30:00Z'` |
+| **P6** `'2026-03-29 01:30+02:00'` as text | `'2026-03-28 23:30:00+00'` (server time zone, UTC here) | **`'2026-03-28 18:30:00-05'`** (host time zone) | `'2026-03-28 23:30:00'` | `'2026-03-28T23:30:00.000Z'` | — | `'…23:30:00+00:00'` | `'…23:30:00Z'` |
 | **P7** first 3 characters of `'Zürich'` | `'Zür'` | `'Zür'` | **`'Zü'`** (bytes); `substringUTF8`: `'Zür'` | `'Zür'` (0-based); with SQL-style `(…, 1, 3)`: **`'üri'`** | `'Zür'` | `'Zür'` | `'Zür'` |
 | **P8** `7 / 2` | **3** | 3.5 | 3.5 | 3.5 | 3.5 | 3.5 | **3** |
 
 Plain-English reading:
 
-- **Only one of the eight probes (P3a) got the same answer everywhere**, and that was the easy
+- **Only one of the nine probes (P3a) got the same answer everywhere**, and that was the easy
   case.
 - **P1:** in Postgres and DuckDB, `||` and `CONCAT` disagree *within the same engine*.
 - **P4:** Postgres, DuckDB and ClickHouse say a missing score is `high`, AQL says `low`, and
   Python and CEL refuse. That's three different outcomes for one line of logic.
-- **P5:** the same record gets two different identity keys depending on the engine. In a graph
-  that means duplicate vertices.
+- **P5:** the same record gets two different identity keys depending on the engine. A loader
+  that computed keys on more than one engine would create duplicate vertices. r2g does not do
+  this today: it builds `_key` from the primary key, and expressions cannot write `_key`.
+- **P6:** Postgres and DuckDB both render the timestamp in the *session* time zone — Postgres
+  uses the server's setting, DuckDB the host's. The probe records both settings.
 - **P7:** ClickHouse's `substring` counts bytes, so it splits accented characters.
 
 ### 4.2 Experiment 2: write once, let a mature transpiler translate
@@ -248,29 +269,63 @@ These came out of the probes and stand on their own.
 
 `src/r2g/expressions.py` describes itself as a "safe subset of AQL." When an expression falls
 outside the subset, the streaming path sends it to ArangoDB instead (P5c.1.5). We gave the
-**same expression and the same row, via bind variables exactly as delegation does**, to both:
+**same expression and the same row** to both. The server side used r2g's own
+`NodeTransformer.build_delegation_query` and passed the row as the `@rows` bind variable, as
+`StreamingPipeline._apply_delegation` does (`probe_delegation.py`):
 
 | Expression | Row | r2g local | ArangoDB 3.12.9 |
 |---|---|---|---|
-| `TO_NUMBER(@x)` | `x = "12a"` | `None` | `0` |
-| `@s < 30 ? "low" : (@s < 70 ? "medium" : "high")` | `s = null` | `"high"` | `"low"` |
-| `CONCAT(@t, "_", @id)` | `t = 7, id = 42.0` | `"7_42.0"` | `"7_42"` |
+| `TO_NUMBER(@x)` | `x = "00123"` | `123` | `123` |
+| `TO_NUMBER(@x)` | `x = "12a"` | `null` | **`0`** |
+| `@s < 30 ? "low" : (@s < 70 ? "medium" : "high")` | `s = null` | `"high"` | **`"low"`** |
+| `CONCAT(@t, "_", @id)` | `t = 7, id = 42.0` | `"7_42.0"` | **`"7_42"`** |
+| `UPPER(@first) + " " + @last` | `"Ada"`, `"Lovelace"` | `"ADA Lovelace"` | **`0`** |
+| `@n + "1"` | `n = 1` | `"11"` | **`2`** |
+| `@x + 1` | `x = null` | `null` | **`1`** |
+| `@x * 2` | `x = null` | `null` | **`0`** |
+| `@x / 0` | `x = 1` | `null` | `null` |
+| `COALESCE(@a, @b)` | `a = null, b = "z"` | `"z"` | **error: unknown function** (`ERR 1540`) |
+| `@a ?? @b` | `a = null, b = "z"` | `"z"` | **syntax error** (`ERR 1501`) |
 
-The third matters most. If a key is built this way, a row loaded in bulk (evaluated locally) and
-the same row arriving by stream (possibly delegated) get **different `_key` values**. The graph
-then holds two copies of one record.
+**Nine of the eleven disagree.** Every expression in the table is inside the subset, so r2g
+evaluates all of them locally today, on every load path. The divergence reaches a document in
+two ways:
 
-### 5.2 `??` is not AQL
+1. **An unsupported function moves the whole expression.** Routing is decided per expression:
+   if any part is outside the subset, all of it is delegated. `CONCAT(@t, "_", @id)` gives
+   `"7_42.0"`; `SUBSTITUTE(CONCAT(@t, "_", @id), " ", "")` is delegated and gives `"7_42"`. A
+   curator who adds one function to an expression silently changes how the rest of it behaves.
+2. **Bulk loads drop delegated fields.** `NodeTransformer.transform_row` leaves a delegated
+   target unset for the server to fill. Only the streaming pipeline calls the server; the bulk
+   path (`src/r2g/main.py`) does not. A bulk-loaded document therefore lacks the field
+   altogether — the probe shows `{'id': 1, 'name': 'Ada Lovelace', '_key': '1'}` for a mapping
+   that defines `slug` — while the same row loaded by stream has it. P5c.1.6 records the bulk
+   delegation path as open, but not that the field goes missing without an error.
 
-The evaluator accepts `??`, but ArangoDB 3.12.9 rejects it with a syntax error (`ERR 1501`).
-Today this matters only if an expression mixes `??` with something outside the subset, because
-only then is it sent to the server. But it means the "subset" is not a subset. P5c.1.7's plan to
-translate "the canonical AQL-flavoured expressions" would inherit the mismatch.
+Record identity is **not** affected: `_key` comes from the primary key, and `validate_config`
+rejects expressions that target `_key` or any other reserved attribute.
+
+### 5.2 The subset is not a subset of AQL
+
+The evaluator accepts constructs that AQL does not have, or that mean something else in AQL:
+
+- **`??` and `COALESCE`** are not AQL. ArangoDB 3.12.9 rejects `??` as a syntax error and
+  `COALESCE` as an unknown function. AQL's equivalent is `NOT_NULL`.
+- **`+` on text.** The evaluator joins strings with `+`. AQL converts both sides to numbers, so
+  `UPPER(@first) + " " + @last` — reference item 1, written the way the brief writes it — gives
+  `0` on the server.
+- **Missing values in arithmetic.** The evaluator's docstring, PRD P5c.1.4 and the brief all
+  describe "AQL-style null propagation." AQL does not propagate null in arithmetic. It treats
+  null as `0`, so `null + 1` is `1`.
+
+Today these matter only when an expression also contains something outside the subset, because
+only then is it sent to the server. But P5c.1.7's plan to translate "the canonical AQL-flavoured
+expressions" would inherit every one of them.
 
 ### 5.3 Which side is right is a decision, not a bug report
 
 AQL's own answers are debatable: treating a missing value as smaller than every number (so it is
-`low`), and turning `"12a"` into `0`. Copying them exactly may not be what r2g wants. The finding
+`low`) and as `0` in arithmetic, turning `"12a"` into `0`, and turning text into numbers under `+`. Copying them exactly may not be what r2g wants. The finding
 is that **r2g has not decided**, so the two routes give different answers. The fix is to decide,
 write the decision down, and make both routes follow it.
 
@@ -291,8 +346,14 @@ choice. But:
   (`src/r2g/transformers/node_transformer.py:64`).
 
 A curator who writes a KSQL expression therefore gets the raw source value loaded, with no error.
-That is the Power Fx pattern from section 3.2 inside r2g. The smallest fix, independent of any
-translator, is for `validate_config` to reject non-AQL engines until a backend exists.
+That is the Power Fx pattern from section 3.2 inside r2g.
+
+**This is specified behaviour, not a code defect.** PRD P5c.1.4 (Done) requires that
+"un-compilable / non-AQL expressions fall back to identity pass-through with a structured-log
+warning," and the code does exactly that. The recommendation is therefore a **requirement
+change**: amend P5c.1.4 so that `validate_config` rejects non-AQL engines until a backend exists.
+That amendment goes through PRD review (`/prd-sync`, as a proposed patch). The code should not
+change ahead of it.
 
 ---
 
@@ -358,7 +419,7 @@ that decides meaning.
 |---|---|---|---|
 | **1. Decide the semantics** | A one-page definition: missing values, text-to-number failure, number-to-text formatting, character (not byte) positions, integer division, time zones | The implicit "AQL-style" claim | Every row in the 4.1 table has one agreed answer |
 | **2. Conformance suite** | The probes in `transformation-language-probes/` grown into a CI test: every function × every target, results compared | Nothing — this is new | CI fails when any target disagrees with the definition |
-| **3. Fix the two routes** | Local evaluator and AQL delegation brought into line with stage 1; `??` either translated or removed | Today's divergent behaviour (section 5) | The three 5.1 cases agree; a bulk-loaded row and a streamed row get the same `_key` |
+| **3. Fix the two routes** | Local evaluator and AQL delegation brought into line with stage 1; `??` and `COALESCE` either translated or removed; bulk loads either evaluate delegated expressions or refuse them | Today's divergent behaviour (section 5) | Every `probe_delegation.py` case agrees; a bulk-loaded and a streamed copy of the same row produce identical documents |
 | **4. Source-SQL generator** | Per-dialect generation (Postgres, Snowflake, ClickHouse, MySQL, SQL Server) with a capability table; unsupported expressions refused at compile time with a clear message | Hand-written native SQL | Pushdown results match the definition in the suite; federated and virtual-graph mappings reuse the same output |
 | **5. Streaming generator on Flink SQL** | P5c.1.7 retargeted from ksqlDB to Flink | The unbuilt ksqlDB translator | Stream-loaded and bulk-loaded graphs are identical for the reference data set |
 | **6. Optional — surface change** | CEL, or a visual builder, parsing into the same tree | The text syntax, if curators struggle with it | Authoring-error rate, measured before and after |
@@ -398,4 +459,5 @@ after them is.
 [^crack]: *CrackSQL: A Hybrid SQL Dialect Translation System Powered by Large Language Models* — https://arxiv.org/pdf/2504.00882
 
 Measured results (sections 4.1–4.4 and 5) come from the probes in
-[`transformation-language-probes/`](transformation-language-probes/), run on 2026-09-29.
+[`transformation-language-probes/`](transformation-language-probes/), run on 2026-09-29 and
+re-run on 2026-10-02 after review. `probe_delegation.py` (section 5.1) was added then.

@@ -17,7 +17,8 @@ therefore written more than once, in a different dialect per delivery path.
 
 The canonical surface today is a hand-written safe subset of AQL
 (`src/r2g/expressions.py`, ~715 lines): literals, `@column` bind references,
-arithmetic with AQL-style null propagation, comparisons, boolean logic,
+arithmetic with null propagation (documented as "AQL-style", though AQL itself
+treats null as 0 in arithmetic — see the evaluation, section 5.2), comparisons, boolean logic,
 null-coalescing `??`, ternary, and 14 string/number functions. Anything outside
 the subset is rejected at compile time so the caller can fall back to
 server-side evaluation. A translation layer to streaming SQL is specified but

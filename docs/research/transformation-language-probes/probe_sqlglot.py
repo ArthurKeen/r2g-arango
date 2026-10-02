@@ -1,8 +1,9 @@
 """Experiment 2 — write once (Postgres dialect), transpile with SQLGlot, run everywhere."""
 import json, sys, sqlglot, psycopg2, duckdb, clickhouse_connect
-pg = psycopg2.connect("postgresql://r2g:r2g_test_2026@localhost:5432/northwind"); pg.autocommit = True
+from connections import PG_CONN, CLICKHOUSE_DSN
+pg = psycopg2.connect(PG_CONN); pg.autocommit = True
 dk = duckdb.connect()
-ch = clickhouse_connect.get_client(host="localhost", port=8124, username="r2g", password="r2g_test_2026")
+ch = clickhouse_connect.get_client(dsn=CLICKHOUSE_DSN)
 print("sqlglot", sqlglot.__version__)
 names = sorted(sqlglot.dialects.DIALECTS) if hasattr(sqlglot.dialects, "DIALECTS") else sorted(sqlglot.Dialect.classes)
 print("dialects:", len(names), "| has flink:", any("flink" in d.lower() for d in names),
@@ -33,7 +34,10 @@ for name, sql in CANON.items():
     for tgt in ("duckdb", "clickhouse"):
         t = sqlglot.transpile(sql, read="postgres", write=tgt)[0]
         r = ex(tgt, t)
-        verdict = "same" if r == ref else "DIFFERENT"
+        # Compare outcomes, not text: two engines that both refuse agree, even
+        # though their exception classes differ.
+        both_err = r.startswith("ERROR ") and ref.startswith("ERROR ")
+        verdict = "same" if both_err or r == ref else "DIFFERENT"
         print(f"  {tgt:<11} {verdict:<9}  {t[7:]}\n    -> {r}")
         row["targets"][tgt] = {"sql": t, "result": r, "verdict": verdict}
     for tgt in ("tsql", "snowflake", "mysql", "spark"):

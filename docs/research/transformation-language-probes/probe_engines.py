@@ -6,11 +6,16 @@ from arango import ArangoClient
 from r2g.expressions import evaluate as r2g_eval
 from cel_expr_python import cel
 from cel_expr_python.ext import ext_strings
+from connections import PG_CONN, CLICKHOUSE_DSN, ARANGO_ENDPOINT, ARANGO_USER, ARANGO_PASSWORD, ARANGO_DB
 
-pg = psycopg2.connect("postgresql://r2g:r2g_test_2026@localhost:5432/northwind"); pg.autocommit = True
+pg = psycopg2.connect(PG_CONN); pg.autocommit = True
 dk = duckdb.connect()
-ch = clickhouse_connect.get_client(host="localhost", port=8124, username="r2g", password="r2g_test_2026")
-adb = ArangoClient(hosts="http://localhost:8540").db("lpg_perf", username="root", password="r2g_test_2026")
+ch = clickhouse_connect.get_client(dsn=CLICKHOUSE_DSN)
+adb = ArangoClient(hosts=ARANGO_ENDPOINT).db(ARANGO_DB, username=ARANGO_USER, password=ARANGO_PASSWORD)
+adb.properties()  # fail here, loudly, rather than as an "engine error" in every ArangoDB row
+
+class CelError(Exception):
+    """CEL returns errors as values; surface them as errors like every other engine."""
 
 def run(engine, expr, env=None):
     try:
@@ -29,9 +34,11 @@ def run(engine, expr, env=None):
         elif engine == "cel":
             e = cel.NewEnv(variables={k: cel.Type.DYN for k in (env or {})},
                            extensions=[ext_strings.ExtStrings()])
-            v = e.compile(expr).eval(data=env or {}).value()
+            r = e.compile(expr).eval(data=env or {})
+            if r.type() == cel.Type.ERROR:
+                raise CelError(r.value())
+            v = r.value()
         if isinstance(v, (datetime.datetime, datetime.date)): v = v.isoformat()
-        if isinstance(v, float) and v.is_integer() and engine in ("postgres",): pass
         return {"ok": True, "value": v, "type": type(v).__name__}
     except Exception as ex:
         msg = str(ex).strip().splitlines()[0][:110]
@@ -99,6 +106,10 @@ P["P5 composite key  tenant=7, id=42.0 (a float)"] = [
   ("cel",        "string(t) + '_' + string(i)", {"t": 7, "i": 42.0}, "string()"),
 ]
 P["P6 timestamp '2026-03-29 01:30:00+02:00' as text"] = [
+  # Postgres and DuckDB both render TIMESTAMPTZ in the *session* time zone, so
+  # record it: Postgres takes the server's TimeZone setting, DuckDB the host's.
+  ("postgres",   "current_setting('TimeZone')", None, "session tz"),
+  ("duckdb",     "current_setting('TimeZone')", None, "session tz"),
   ("postgres",   "CAST(CAST('2026-03-29 01:30:00+02:00' AS TIMESTAMPTZ) AS TEXT)", None, "cast to text"),
   ("duckdb",     "CAST(CAST('2026-03-29 01:30:00+02:00' AS TIMESTAMPTZ) AS VARCHAR)", None, "cast to text"),
   ("clickhouse", "toString(parseDateTimeBestEffort('2026-03-29 01:30:00+02:00'))", None, "toString"),
