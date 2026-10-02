@@ -112,6 +112,23 @@ class TestProjectCRUD:
         with pytest.raises(ValueError, match="not found"):
             mgr.create_project("proj", "no_source", "mapping.yaml")
 
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "../escape",
+            "nested/project",
+            "project; echo injected",
+            "project\ninjected",
+            ".hidden",
+        ],
+    )
+    def test_create_project_rejects_unsafe_names(self, tmp_path, name):
+        mgr = CatalogManager(catalog_dir=tmp_path)
+        mgr.add_source("pg1", "postgresql", "conn")
+
+        with pytest.raises(ValueError, match="Invalid project name"):
+            mgr.create_project(name, "pg1", "mapping.yaml")
+
     def test_create_project_no_snapshot(self, tmp_path):
         mgr = CatalogManager(catalog_dir=tmp_path)
         mgr.add_source("pg1", "postgresql", "conn")

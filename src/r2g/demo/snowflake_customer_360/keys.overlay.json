@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "description": "Reviewed keys for the synthetic r2g Customer 360 Snowflake demo. Snowflake does not enforce these relationships.",
+  "tables": {
+    "ACCOUNTS": {
+      "primaryKey": ["ACCOUNT_ID"]
+    },
+    "CONTACTS": {
+      "primaryKey": ["CONTACT_ID"],
+      "foreignKeys": [
+        {
+          "columns": ["ACCOUNT_ID"],
+          "references": {
+            "table": "ACCOUNTS",
+            "columns": ["ACCOUNT_ID"]
+          },
+          "constraintName": "contacts_account",
+          "comment": "Reviewed Customer 360 ownership relationship"
+        }
+      ]
+    },
+    "EMAIL_EVENTS": {
+      "primaryKey": ["EMAIL_EVENT_ID"],
+      "foreignKeys": [
+        {
+          "columns": ["CONTACT_ID"],
+          "references": {
+            "table": "CONTACTS",
+            "columns": ["CONTACT_ID"]
+          },
+          "constraintName": "email_events_contact"
+        },
+        {
+          "columns": ["ACCOUNT_ID"],
+          "references": {
+            "table": "ACCOUNTS",
+            "columns": ["ACCOUNT_ID"]
+          },
+          "constraintName": "email_events_account"
+        }
+      ]
+    },
+    "ZOOM_TELEMETRY": {
+      "primaryKey": ["MEETING_ID"],
+      "foreignKeys": [
+        {
+          "columns": ["CONTACT_ID"],
+          "references": {
+            "table": "CONTACTS",
+            "columns": ["CONTACT_ID"]
+          },
+          "constraintName": "zoom_telemetry_contact"
+        },
+        {
+          "columns": ["ACCOUNT_ID"],
+          "references": {
+            "table": "ACCOUNTS",
+            "columns": ["ACCOUNT_ID"]
+          },
+          "constraintName": "zoom_telemetry_account"
+        }
+      ]
+    },
+    "HEALTH_SIGNALS": {
+      "primaryKey": ["SIGNAL_ID"],
+      "foreignKeys": [
+        {
+          "columns": ["ACCOUNT_ID"],
+          "references": {
+            "table": "ACCOUNTS",
+            "columns": ["ACCOUNT_ID"]
+          },
+          "constraintName": "health_signals_account"
+        }
+      ]
+    }
+  }
+}

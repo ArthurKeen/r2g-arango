@@ -24,14 +24,25 @@ published by Snowflake themselves)::
     snowflake://<user>:<password>@<account>/<database>[/<schema>]
         ?warehouse=<wh>&role=<role>[&authenticator=<auth>]
 
+For key-pair authentication, leave the password empty and provide the same
+connector arguments used by Contextual Data Fabric::
+
+    snowflake://<user>:@<account>/<database>[/<schema>]
+        ?warehouse=<wh>&role=<role>&private_key_file=<path>
+        [&private_key_file_pwd=<passphrase>]
+
 - ``account`` is the Snowflake account identifier (e.g.
   ``xy12345.us-east-1``); the host portion of the URL.
 - ``database`` is required — it identifies the ``INFORMATION_SCHEMA`` we
   introspect.
 - ``schema`` is optional inside the URL. If absent the value passed as
   ``schema_name`` to the constructor wins (default ``PUBLIC``).
-- Query parameters propagate straight through to
-  ``snowflake.connector.connect``.
+- ``warehouse``, ``role``, ``authenticator``, ``application``,
+  ``private_key_file`` and ``private_key_file_pwd`` are forwarded to
+  ``snowflake.connector.connect`` after auth validation.
+- Password and key-pair authentication are mutually exclusive. Key-pair auth
+  sets ``authenticator="SNOWFLAKE_JWT"`` and lets the Snowflake driver read the
+  key file; r2g never reads or persists key bytes.
 
 Example::
 
@@ -56,9 +67,12 @@ from typing import Any, Iterator, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 from r2g.log import get_logger
+from r2g.security import scrub_dsn_credentials
 from r2g.types import Column, ForeignKey, Schema, Table
 
 logger = get_logger(__name__)
+
+_SENSITIVE_CONNECT_FIELDS = ("password", "private_key_file", "private_key_file_pwd")
 
 
 def _load_snowflake_connector() -> Any:
@@ -124,7 +138,9 @@ class SnowflakeConnector:
         try:
             conn = snowflake.connect(**connect_kwargs)
         except Exception as err:
-            raise RuntimeError(f"Failed to connect to Snowflake: {err}") from err
+            raise RuntimeError(
+                f"Failed to connect to Snowflake: {_safe_connection_error(err, connect_kwargs)}"
+            ) from err
 
         try:
             return self._introspect(conn)
@@ -304,6 +320,16 @@ def _safe_int(v: Any) -> int:
         return 0
 
 
+def _safe_connection_error(err: Exception, connect_params: dict[str, Any]) -> str:
+    """Return a useful driver error without credential or key-path disclosure."""
+    message = scrub_dsn_credentials(str(err))
+    for field in _SENSITIVE_CONNECT_FIELDS:
+        value = connect_params.get(field)
+        if value:
+            message = message.replace(str(value), "***")
+    return message
+
+
 def _parse_snowflake_url(url: str) -> dict[str, Any]:
     """Parse a Snowflake SQLAlchemy-style URL into connector kwargs.
 
@@ -343,15 +369,40 @@ def _parse_snowflake_url(url: str) -> dict[str, Any]:
 
     query = {k: v[0] for k, v in parse_qs(parsed.query, keep_blank_values=True).items() if v}
 
+    private_key_file = query.get("private_key_file", "")
+    private_key_file_pwd = query.get("private_key_file_pwd", "")
+    if password and private_key_file:
+        raise ValueError(
+            "Configure exactly one Snowflake authentication method: "
+            "password or private_key_file"
+        )
+    if private_key_file_pwd and not private_key_file:
+        raise ValueError("private_key_file_pwd requires private_key_file")
+    if not password and not private_key_file:
+        raise ValueError(
+            "Snowflake authentication requires a password or private_key_file"
+        )
+    if private_key_file and not Path(private_key_file).is_file():
+        raise ValueError("private_key_file must name an existing file")
+
     kwargs: dict[str, Any] = {
         "user": user,
-        "password": password,
         "account": account,
         "database": database,
     }
+    if private_key_file:
+        kwargs["authenticator"] = "SNOWFLAKE_JWT"
+        kwargs["private_key_file"] = private_key_file
+        if private_key_file_pwd:
+            kwargs["private_key_file_pwd"] = private_key_file_pwd
+    else:
+        kwargs["password"] = password
     for key in ("warehouse", "role", "authenticator", "application"):
         if key in query:
             kwargs[key] = query[key]
+    if private_key_file:
+        # A caller-supplied authenticator cannot weaken key-pair semantics.
+        kwargs["authenticator"] = "SNOWFLAKE_JWT"
     if parsed.port:
         kwargs["port"] = parsed.port
     if url_schema:
@@ -398,7 +449,10 @@ class SnowflakeSession:
             try:
                 self._conn = snowflake.connect(**self._connect_params)
             except Exception as err:
-                raise RuntimeError(f"Failed to connect to Snowflake: {err}") from err
+                raise RuntimeError(
+                    "Failed to connect to Snowflake: "
+                    f"{_safe_connection_error(err, self._connect_params)}"
+                ) from err
             try:
                 cur = self._conn.cursor()
                 try:

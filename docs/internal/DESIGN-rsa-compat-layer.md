@@ -10,9 +10,6 @@
 > `connectors` modules or flipping the hard dependency (ADR steps 4–6); those are
 > gated on this layer landing green.
 >
-> **Status: PROPOSED.** Requires sign-off on the two open decisions in §9 before
-> implementation.
-
 ## 1. Goal & non-goals
 
 **Goal.** Make r2g's physical type model (`Schema`/`Table`/`Column`/`ForeignKey`)
@@ -317,6 +314,13 @@ Land nothing until all are green (`pytest -m "not integration"`, `ruff`, `mypy`)
    (with `kafka`) and `create_source_connector`. RSA is already a core dependency (step
    2), so no dependency flip or re-export shim is required. A live-DB parity audit lives
    at `tests/integration/test_rsa_introspection_parity.py` for any future revisit.
+7. ✅ **DONE (overlay boundary).** Sources whose databases omit or do not enforce key
+   constraints (notably Snowflake) may supply an RSA key overlay at snapshot time. The
+   shared snapshot pipeline applies the overlay before r2g revalidation and default
+   mapping generation, then persists only the reviewed overlay plus a non-secret summary
+   and source provenance on the catalog snapshot. The bundled Customer 360 overlay marks
+   every asserted FK `enforced=false`; r2g does not reinterpret these assertions as
+   warehouse-enforced constraints.
 
 ## 11. Risks & rollback
 

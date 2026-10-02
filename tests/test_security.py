@@ -150,6 +150,27 @@ class TestRedaction:
         out = redact_connection_string("postgresql://bob:hunter2@pg:5432/app")
         assert "bob:***@" in out
 
+    def test_redact_connection_string_masks_snowflake_key_material(self):
+        out = redact_connection_string(
+            "snowflake://svc:@account/DB/SCHEMA"
+            "?warehouse=WH"
+            "&private_key_file=%2FUsers%2Fdemo%2Fsnowflake-key.p8"
+            "&private_key_file_pwd=sentinel-passphrase"
+        )
+        assert "/Users/demo/snowflake-key.p8" not in out
+        assert "snowflake-key.p8" not in out
+        assert "sentinel-passphrase" not in out
+        assert "private_key_file=%2A%2A%2A" in out
+        assert "warehouse=WH" in out
+
+    def test_redact_connection_string_masks_env_key_references(self):
+        out = redact_connection_string(
+            "snowflake://$SNOWFLAKE_USER:@$SNOWFLAKE_ACCOUNT/DB"
+            "?private_key_file=$SNOWFLAKE_PRIVATE_KEY_FILE"
+        )
+        assert "SNOWFLAKE_PRIVATE_KEY_FILE" not in out
+        assert "private_key_file=%2A%2A%2A" in out
+
     def test_redact_connection_string_handles_no_password(self):
         out = redact_connection_string("postgresql://bob@pg:5432/app")
         assert out == "postgresql://bob@pg:5432/app"

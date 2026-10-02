@@ -7,6 +7,38 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Snowflake Customer 360 Studio demo.** Snowflake URLs now support
+  Contextual Data Fabric-style key-pair authentication with env-referenced key
+  files and optional passphrases. The bundled idempotent demo seeds five
+  constraint-free tables, applies a reviewed RSA key overlay (5 PKs / 6 FKs),
+  persists overlay provenance through snapshots, and installs an editable
+  five-vertex/six-edge project from the New Source surface. Credentials and key
+  paths are scrubbed from errors and persisted API output.
+- **Reviewed key overlays.** `r2g source add --key-overlay <json-or-yaml>`
+  parses and stores reviewed PK/FK metadata with a source. RSA applies the
+  overlay when a snapshot is captured and sets the resulting foreign-key
+  models to `enforced=false`; that flag is not stored in the overlay JSON.
+- **Generated arangoimport script viewer.** The Studio can render the current
+  validated draft as a secret-safe JSONL or CSV-direct batch bundle, grouped
+  document/edge commands, graph creation, or a focused collection/edge command.
+  Project, Actions, canvas, collection, and edge context surfaces open a
+  floating monospace viewer with warnings, copy, and client-side download.
+  Previewing performs no command execution or server-side file writes; Studio
+  Load remains the direct HTTP streaming path.
+
+### Fixed
+
+- CSV-direct generation now honors `overwrite_on_initial`; both import modes
+  resolve renamed endpoint collections consistently, warn when CSV cannot
+  represent mapping transforms, and reject misleading LPG previews.
+- Generated named-graph commands quote graph and project names for both shell
+  and JavaScript contexts. Import previews accept an operator-selected,
+  shell-quoted artifact directory, return runnable secret-safe graph scripts in
+  both modes, and rebuild Snowflake demo snapshots when reviewed overlay
+  content changes without changing its key counts.
+
 ## [0.4.3] — 2026-09-28
 
 ### Added
@@ -624,7 +656,9 @@ Initial phased implementation (not yet published to PyPI):
   pipeline, `r2g source dump` CLI, pure-Python FK inference with
   optional value-overlap sampler.
 
-[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.1...v0.4.3
+[0.4.1]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ArthurKeen/r2g-arango/releases/tag/v0.2.0

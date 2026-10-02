@@ -417,24 +417,27 @@ def introspect_source_schema(
         return {"error": f"Source '{source_name}' not found"}
 
     try:
-        from r2g.connectors.base import create_source_connector
+        from r2g.snapshot import build_source_schema, capture_source_snapshot
 
-        conn_str = _resolve_conn_string(source.connection_string)
-        connector = create_source_connector(
-            source.source_type or "postgresql",
-            conn_str,
-            schema_name=pg_schema,
-            source_params=source.source_params,
-        )
-        schema = connector.get_schema()
+        if save_snapshot:
+            snap, build = capture_source_snapshot(
+                mgr,
+                source_name,
+                schema_name=pg_schema,
+            )
+        else:
+            snap = None
+            build = build_source_schema(source, schema_name=pg_schema)
+        schema = build.schema
 
         result: dict[str, Any] = {
             "tables": len(schema.tables),
             "schema": _schema_summary(schema),
+            "key_overlay_summary": build.key_overlay_summary,
+            "key_overlay_source": build.key_overlay_source,
         }
 
-        if save_snapshot:
-            snap = mgr.create_snapshot(source_name, schema, pg_schema=pg_schema)
+        if snap is not None:
             result["snapshot_id"] = snap.id
             result["captured_at"] = snap.captured_at.isoformat()
 

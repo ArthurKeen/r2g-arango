@@ -4,21 +4,25 @@ import asyncio
 import json
 import os
 import queue
-import re
 import secrets
 import threading
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from r2g.catalog import CatalogManager
+from r2g.catalog import CatalogManager, validate_project_name
 from r2g.config import ConfigManager, validate_config
 from r2g.connectors.arango_writer import ArangoWriter
+from r2g.generators.arangoimport import (
+    ArangoImportGenerator,
+    CsvImportGenerator,
+    ImportCommandSpec,
+)
 from r2g.log import get_logger
 from r2g.security import redact_source_dump as _redact_source
 from r2g.security import redact_target_dump as _redact_target
@@ -69,9 +73,6 @@ _running_loads: dict[str, dict[str, Any]] = {}  # load_id -> {"thread", "queue",
 
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", ""}
-# Valid project names: keep them filesystem-safe so they cannot escape the
-# per-project mapping directory (no separators, no traversal).
-_PROJECT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*")
 
 
 def create_app(
@@ -183,6 +184,229 @@ def create_app(
             "bind_syntax": "@column_name",
         }
 
+    @app.post("/api/demo-presets/snowflake-customer-360/install")
+    async def install_snowflake_customer_360(
+        body: DemoPresetInstallRequest,
+    ):
+        """Idempotently install the bundled Customer 360 source and project.
+
+        Snowflake schema creation remains an explicit operator bootstrap. This
+        endpoint receives only the read-only runtime role and a fixed bundled
+        overlay; it cannot select a local overlay path or setup role.
+        """
+        from r2g.demo.snowflake_customer_360 import (
+            OVERLAY_SOURCE,
+            PROJECT_NAME,
+            SOURCE_NAME,
+            configured_location,
+            connection_string,
+            load_overlay,
+        )
+        from r2g.snapshot import capture_source_snapshot, overlay_fingerprint
+
+        required = (
+            "SNOWFLAKE_ACCOUNT",
+            "SNOWFLAKE_USER",
+            "SNOWFLAKE_PRIVATE_KEY_FILE",
+            "SNOWFLAKE_WAREHOUSE",
+            "SNOWFLAKE_ROLE",
+        )
+        missing = [name for name in required if not os.environ.get(name)]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "snowflake_environment_incomplete",
+                    "missing": missing,
+                    "message": "Configure the listed Snowflake environment variables and restart Studio.",
+                },
+            )
+
+        project = catalog.get_project(PROJECT_NAME)
+        target = None
+        if body.target_name:
+            target = catalog.get_target(body.target_name)
+            if target is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Target '{body.target_name}' not found",
+                )
+        elif project is not None and project.target_name:
+            target = catalog.get_target(project.target_name)
+        if target is None:
+            targets = catalog.list_targets()
+            if len(targets) == 1:
+                target = targets[0]
+        if target is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "arango_target_required",
+                    "message": "Choose or create a non-system ArangoDB target first.",
+                    "targets": [t.name for t in catalog.list_targets()],
+                },
+            )
+        if target.database.strip().lower() == "_system":
+            raise HTTPException(
+                status_code=400,
+                detail="The Customer 360 demo requires a dedicated ArangoDB database, not _system.",
+            )
+
+        database, schema_name = configured_location()
+        overlay = load_overlay()
+        source = catalog.get_source(SOURCE_NAME)
+        if source is None:
+            source = catalog.add_source(
+                SOURCE_NAME,
+                "snowflake",
+                connection_string(),
+                description=(
+                    "Synthetic Customer 360 demo "
+                    f"({database}.{schema_name}; read-only runtime role)"
+                ),
+                key_overlay=overlay,
+                key_overlay_source=OVERLAY_SOURCE,
+            )
+            source_status = "created"
+        else:
+            if source.source_type != "snowflake":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Source '{SOURCE_NAME}' already exists with type "
+                        f"'{source.source_type}', expected 'snowflake'."
+                    ),
+                )
+            source = catalog.update_source(
+                SOURCE_NAME,
+                connection_string=connection_string(),
+                key_overlay=overlay,
+                key_overlay_source=OVERLAY_SOURCE,
+            )
+            source_status = "reused"
+
+        latest = catalog.get_latest_snapshot(SOURCE_NAME)
+        overlay_tables = overlay.get("tables", {})
+        expected_tables = set(overlay_tables)
+        expected_overlay_summary = {
+            "tables": len(overlay_tables),
+            "primaryKeys": sum(
+                bool(spec.get("primaryKey"))
+                for spec in overlay_tables.values()
+            ),
+            "foreignKeys": sum(
+                len(spec.get("foreignKeys", []))
+                for spec in overlay_tables.values()
+            ),
+            "uniqueConstraints": sum(
+                len(spec.get("uniqueConstraints", []))
+                for spec in overlay_tables.values()
+            ),
+        }
+        expected_overlay_fingerprint = overlay_fingerprint(overlay)
+        snapshot_reusable = (
+            latest is not None
+            and latest.pg_schema.upper() == schema_name
+            and set(latest.schema_data.tables) == expected_tables
+            and latest.key_overlay_source == OVERLAY_SOURCE
+            and latest.key_overlay_summary == expected_overlay_summary
+            and latest.key_overlay_fingerprint
+            == expected_overlay_fingerprint
+        )
+        try:
+            if snapshot_reusable:
+                snap = latest
+                assert snap is not None
+                overlay_summary = snap.key_overlay_summary
+                snapshot_status = "reused"
+            else:
+                snap, result = capture_source_snapshot(
+                    catalog,
+                    SOURCE_NAME,
+                    schema_name=schema_name,
+                )
+                overlay_summary = result.key_overlay_summary
+                snapshot_status = "created"
+        except ImportError as exc:
+            raise HTTPException(status_code=501, detail=_safe_detail(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=_safe_detail(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=_safe_detail(exc))
+
+        mapping_path = _projects_root / PROJECT_NAME / "mapping.yaml"
+        project = catalog.get_project(PROJECT_NAME)
+        if project is None:
+            project = catalog.create_project(
+                name=PROJECT_NAME,
+                source_name=SOURCE_NAME,
+                mapping_config_path=str(mapping_path),
+                arango_endpoint=target.endpoint,
+                arango_database=target.database,
+                mapping_name="Snowflake Customer 360",
+                mapping_description=(
+                    "Synthetic account health graph with reviewed, non-enforced Snowflake keys."
+                ),
+            )
+            project_status = "created"
+        elif project.source_name != SOURCE_NAME:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Project '{PROJECT_NAME}' already uses source "
+                    f"'{project.source_name}', expected '{SOURCE_NAME}'."
+                ),
+            )
+        else:
+            project_status = "reused"
+
+        project = catalog.update_project(
+            PROJECT_NAME,
+            schema_snapshot_id=snap.id,
+            target_name=target.name,
+            arango_endpoint=target.endpoint,
+            arango_database=target.database,
+        )
+        try:
+            existing = (
+                ConfigManager.load_config(project.mapping_config_path)
+                if Path(project.mapping_config_path).is_file()
+                else MappingConfig()
+            )
+            if not existing.collections:
+                existing = ConfigManager.generate_default_config(snap.schema_data)
+                ConfigManager.save_config(existing, project.mapping_config_path)
+                mapping_status = "created"
+            else:
+                mapping_status = "reused"
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=_safe_detail(exc))
+
+        return {
+            "preset": "snowflake-customer-360",
+            "source": {"name": source.name, "status": source_status},
+            "snapshot": {
+                "id": snap.id,
+                "status": snapshot_status,
+                "tables": len(snap.schema_data.tables),
+            },
+            "overlay": {
+                "source": OVERLAY_SOURCE,
+                "summary": overlay_summary,
+                "note": "Curated key overlay; Snowflake does not enforce these relationships.",
+            },
+            "mapping": {
+                "status": mapping_status,
+                "collections": len(existing.collections),
+                "edges": len(existing.edges),
+            },
+            "project": {
+                "name": project.name,
+                "status": project_status,
+                "target": target.name,
+            },
+        }
+
     @app.post("/api/expressions/compile")
     async def compile_expression_endpoint(body: dict[str, Any]):
         """Parse-check an expression without evaluating it.
@@ -283,17 +507,21 @@ def create_app(
         if source is None:
             raise HTTPException(status_code=404, detail=f"Source '{name}' not found")
         try:
-            from r2g.connectors.base import create_source_connector
+            from r2g.snapshot import capture_source_snapshot
 
-            connector = create_source_connector(
-                source.source_type or "postgresql",
-                source.connection_string,
+            snap, result = capture_source_snapshot(
+                catalog,
+                name,
                 schema_name=pg_schema,
-                source_params=source.source_params,
             )
-            schema = connector.get_schema()
-            snap = catalog.create_snapshot(name, schema, pg_schema=pg_schema)
-            return {"id": snap.id, "tables": len(schema.tables), "captured_at": snap.captured_at.isoformat()}
+            return {
+                "id": snap.id,
+                "tables": len(result.schema.tables),
+                "captured_at": snap.captured_at.isoformat(),
+                "key_overlay_summary": result.key_overlay_summary,
+                "key_overlay_source": result.key_overlay_source,
+                "classifications_applied": result.classifications_applied,
+            }
         except ImportError as e:
             raise HTTPException(status_code=501, detail=_safe_detail(e))
         except ValueError as e:
@@ -591,8 +819,10 @@ def create_app(
 
     @app.post("/api/projects", status_code=201)
     async def create_project(body: ProjectCreateRequest):
-        if not _PROJECT_NAME_RE.fullmatch(body.name or "") or ".." in (body.name or ""):
-            raise HTTPException(status_code=400, detail="Invalid project name")
+        try:
+            validate_project_name(body.name)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         # The mapping file is always confined to <catalog>/projects/<name>/.
         # If the client passed a path to an existing, parseable mapping, import
         # its contents into the safe location (read-only); otherwise start empty.
@@ -668,6 +898,132 @@ def create_app(
             return {"saved": True, "collections": len(config.collections), "edges": len(config.edges)}
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/api/projects/{name}/arangoimport-preview")
+    async def preview_arangoimport(
+        name: str,
+        body: ArangoImportPreviewRequest,
+    ):
+        """Render a secret-safe batch artifact without execution or file I/O."""
+        project = catalog.get_project(name)
+        if project is None:
+            raise HTTPException(
+                status_code=404, detail=f"Project '{name}' not found"
+            )
+        snap = catalog.get_latest_snapshot(project.source_name)
+        if snap is None:
+            raise HTTPException(
+                status_code=400, detail="No schema snapshot available"
+            )
+        try:
+            if body.mapping is None:
+                config = ConfigManager.load_config(
+                    project.mapping_config_path
+                )
+                mapping_source = "saved"
+            else:
+                config = body.mapping
+                mapping_source = "draft"
+
+            issues = validate_config(snap.schema_data, config)
+            if issues:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "message": "Mapping is not valid for this snapshot",
+                        "issues": issues,
+                    },
+                )
+
+            endpoint, database, username, _password = _resolve_target(project)
+            generator: ArangoImportGenerator | CsvImportGenerator
+            if body.mode == "jsonl":
+                generator = ArangoImportGenerator(
+                    config,
+                    endpoint=endpoint,
+                    database=database,
+                    username=username,
+                    password="",
+                    data_dir=body.artifact_dir or "./output",
+                )
+            else:
+                generator = CsvImportGenerator(
+                    config,
+                    snap.schema_data,
+                    endpoint=endpoint,
+                    database=database,
+                    username=username,
+                    password="",
+                    data_dir=body.artifact_dir or "./dumps",
+                )
+            plan = generator.build_plan(
+                graph_name=name,
+                overwrite_on_initial=body.overwrite_on_initial,
+                secret_safe=True,
+            )
+
+            focused: ImportCommandSpec | None = None
+            if body.scope != "all":
+                if not body.mapping_id:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="mapping_id is required for focused previews",
+                    )
+                candidates = (
+                    plan.documents
+                    if body.scope == "collection"
+                    else plan.edges
+                )
+                focused = next(
+                    (
+                        item
+                        for item in candidates
+                        if item.mapping_id == body.mapping_id
+                    ),
+                    None,
+                )
+                if focused is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=(
+                            f"Unknown {body.scope} mapping identity "
+                            f"'{body.mapping_id}'"
+                        ),
+                    )
+
+            response = plan.model_dump()
+            response.update(
+                {
+                    "scope": body.scope,
+                    "focused_command": (
+                        focused.model_dump() if focused is not None else None
+                    ),
+                    "mapping_source": mapping_source,
+                    "load_note": (
+                        "Studio Load streams data directly over HTTP; this "
+                        "generated batch script is an alternative artifact."
+                    ),
+                }
+            )
+            return response
+        except HTTPException:
+            raise
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=_safe_detail(e))
+        except Exception as e:
+            diagnostic = _safe_detail(e)
+            logger.warning(
+                "arangoimport_preview_failed",
+                project=name,
+                error=diagnostic,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Could not render import preview",
+                    "diagnostic": diagnostic,
+                },
+            )
 
     @app.post("/api/projects/{name}/validate")
     async def validate_mapping(name: str):
@@ -1607,6 +1963,10 @@ class SourceCreateRequest(BaseModel):
     source_params: dict[str, Any] = {}
 
 
+class DemoPresetInstallRequest(BaseModel):
+    target_name: str | None = None
+
+
 class ProjectCreateRequest(BaseModel):
     name: str
     source_name: str
@@ -1625,6 +1985,30 @@ class ProjectUpdateRequest(BaseModel):
     mapping_name: str | None = None
     mapping_description: str | None = None
     target_name: str | None = None
+
+
+class ArangoImportPreviewRequest(BaseModel):
+    """Validated request for an in-memory import artifact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["jsonl", "csv"] = "jsonl"
+    scope: Literal["all", "collection", "edge"] = "all"
+    mapping_id: str | None = None
+    mapping: MappingConfig | None = None
+    overwrite_on_initial: bool = True
+    artifact_dir: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("artifact_dir")
+    @classmethod
+    def _validate_artifact_dir(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("artifact_dir must not be empty")
+        if any(ord(character) < 32 for character in value):
+            raise ValueError("artifact_dir must not contain control characters")
+        return value
 
 
 class LoadRequest(BaseModel):
