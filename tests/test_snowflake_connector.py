@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+from urllib.parse import urlencode
 
 import pytest
 
@@ -36,6 +37,58 @@ class TestParseSnowflakeUrl:
             "snowflake://svc:a%40b%2Fc@xy12345/DB"
         )
         assert kw["password"] == "a@b/c"
+
+    def test_key_pair_url_matches_connector_arguments(self, tmp_path):
+        key_path = tmp_path / "snowflake key.p8"
+        key_path.touch()
+        query = urlencode(
+            {
+                "warehouse": "ETL_WH",
+                "role": "R2G_READER",
+                "private_key_file": str(key_path),
+                "private_key_file_pwd": "test-only-passphrase",
+                "authenticator": "externalbrowser",
+            }
+        )
+
+        kw = _parse_snowflake_url(
+            f"snowflake://svc:@xy12345/ANALYTICS/CORE?{query}"
+        )
+
+        assert kw["private_key_file"] == str(key_path)
+        assert kw["private_key_file_pwd"] == "test-only-passphrase"
+        assert kw["authenticator"] == "SNOWFLAKE_JWT"
+        assert "password" not in kw
+
+    def test_password_and_private_key_are_mutually_exclusive(self, tmp_path):
+        key_path = tmp_path / "snowflake-key.p8"
+        key_path.touch()
+        query = urlencode({"private_key_file": str(key_path)})
+
+        with pytest.raises(ValueError, match="exactly one"):
+            _parse_snowflake_url(
+                f"snowflake://svc:password@xy12345/ANALYTICS?{query}"
+            )
+
+    def test_private_key_passphrase_requires_key_file(self):
+        with pytest.raises(ValueError, match="requires private_key_file"):
+            _parse_snowflake_url(
+                "snowflake://svc:@xy12345/ANALYTICS"
+                "?private_key_file_pwd=test-only"
+            )
+
+    def test_missing_authentication_method_is_rejected(self):
+        with pytest.raises(ValueError, match="requires a password or private_key_file"):
+            _parse_snowflake_url("snowflake://svc:@xy12345/ANALYTICS")
+
+    def test_private_key_file_must_exist(self, tmp_path):
+        missing = tmp_path / "missing-key.p8"
+        query = urlencode({"private_key_file": str(missing)})
+
+        with pytest.raises(ValueError, match="existing file"):
+            _parse_snowflake_url(
+                f"snowflake://svc:@xy12345/ANALYTICS?{query}"
+            )
 
     def test_non_snowflake_scheme_is_rejected(self):
         with pytest.raises(ValueError, match="snowflake://"):
@@ -249,13 +302,48 @@ class TestIntrospection:
             conn.get_schema()
 
     def test_driver_exception_is_wrapped_as_runtime_error(self, monkeypatch):
+        password = "sentinel-snowflake-password"
+
         def fake_connect(**kwargs):
-            raise RuntimeError("boom from snowflake")
+            raise RuntimeError(f"boom from snowflake with {password}")
 
         _install_fake_snowflake(monkeypatch, fake_connect)
-        conn = SnowflakeConnector("snowflake://svc:x@xy12345/ANALYTICS")
-        with pytest.raises(RuntimeError, match="Failed to connect to Snowflake"):
+        conn = SnowflakeConnector(
+            f"snowflake://svc:{password}@xy12345/ANALYTICS"
+        )
+        with pytest.raises(RuntimeError, match="Failed to connect to Snowflake") as exc:
             conn.get_schema()
+        assert password not in str(exc.value)
+
+    def test_key_pair_arguments_are_forwarded_without_secret_leak(
+        self, monkeypatch, tmp_path
+    ):
+        scripted = self._scripted_schema()
+        captured_kwargs: dict = {}
+        key_path = tmp_path / "snowflake-key.p8"
+        key_path.touch()
+        passphrase = "sentinel-key-passphrase"
+        query = urlencode(
+            {
+                "private_key_file": str(key_path),
+                "private_key_file_pwd": passphrase,
+            }
+        )
+
+        def fake_connect(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _FakeConnection(scripted)
+
+        _install_fake_snowflake(monkeypatch, fake_connect)
+        conn = SnowflakeConnector(
+            f"snowflake://svc:@xy12345/ANALYTICS/CORE?{query}"
+        )
+        conn.get_schema()
+
+        assert captured_kwargs["private_key_file"] == str(key_path)
+        assert captured_kwargs["private_key_file_pwd"] == passphrase
+        assert captured_kwargs["authenticator"] == "SNOWFLAKE_JWT"
+        assert "password" not in captured_kwargs
 
     def test_variant_and_array_columns_round_trip_as_json_types(self, monkeypatch):
         from r2g.config import pg_type_to_json_type

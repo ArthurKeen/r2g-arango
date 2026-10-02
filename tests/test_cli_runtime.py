@@ -389,7 +389,7 @@ class TestBearerGuard:
         async def send(message):
             sent.append(message)
 
-        asyncio.get_event_loop().run_until_complete(guard(scope, receive, send))
+        asyncio.run(guard(scope, receive, send))
         return sent
 
     def test_rejects_missing_token(self):

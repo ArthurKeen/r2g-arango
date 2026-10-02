@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shlex
 import stat
 
 import pytest
@@ -173,6 +175,44 @@ class TestBuildDocCommand:
         assert "--translate" in cmd
         assert "id=_key" in cmd
 
+    def test_translates_mapped_fields(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        ecommerce_config.collections["customers"].field_mappings = {
+            "name": "displayName"
+        }
+        gen = CsvImportGenerator(ecommerce_config, ecommerce_schema)
+        cmd = self._normalize(
+            gen._build_doc_command(
+                "customers",
+                "customers",
+                field_mappings=ecommerce_config.collections[
+                    "customers"
+                ].field_mappings,
+            )
+        )
+        assert "--translate name=displayName" in cmd
+
+    def test_renamed_pk_is_kept_as_property_and_merged_into_key(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        ecommerce_config.collections["customers"].field_mappings = {
+            "id": "customerId"
+        }
+        gen = CsvImportGenerator(ecommerce_config, ecommerce_schema)
+        cmd = self._normalize(
+            gen._build_doc_command(
+                "customers",
+                "customers",
+                field_mappings=ecommerce_config.collections[
+                    "customers"
+                ].field_mappings,
+            )
+        )
+        assert "--merge-attributes '_key=[id]'" in cmd
+        assert "--translate id=customerId" in cmd
+        assert "id=_key" not in cmd
+
     def test_forces_pk_to_string(self, generator):
         cmd = self._normalize(generator._build_doc_command("customers", "customers"))
         assert "id=string" in cmd
@@ -282,6 +322,24 @@ class TestBuildGraphCreationArangosh:
         joined = "\n".join(lines)
         assert "graph._drop(" in joined
 
+    def test_graph_name_is_quoted_for_shell_and_javascript(self, generator):
+        graph_name = 'demo"); throw new Error("injected'
+
+        echo_line, arangosh_line = generator._build_graph_creation_arangosh(
+            graph_name
+        )
+        js_code = shlex.split(arangosh_line)[-1]
+
+        assert shlex.split(echo_line) == [
+            "echo",
+            f"Creating named graph {graph_name}...",
+        ]
+        assert f"graph._create({json.dumps(graph_name)}, edgeDefs)" in js_code
+        assert (
+            f"print({json.dumps(f'Named graph {graph_name} created.')})"
+            in js_code
+        )
+
 
 class TestGenerateCsvScript:
     def test_shebang_present(self, generator, tmp_path):
@@ -348,6 +406,127 @@ class TestGenerateCsvScript:
         assert "--type csv" in content
         cleaned = content.lower().replace("# no intermediate jsonl", "").replace("no jsonl transformation", "")
         assert "jsonl" not in cleaned
+
+
+class TestStructuredCsvPreview:
+    def test_plan_groups_commands_and_matches_cli_renderer(
+        self, generator, tmp_path
+    ):
+        plan = generator.build_plan(graph_name="ecom_graph")
+        written = generator.generate_csv_script(
+            str(tmp_path / "import.sh"),
+            graph_name="ecom_graph",
+        )
+
+        assert len(plan.documents) == 4
+        assert len(plan.edges) == 2
+        for item in (*plan.documents, *plan.edges):
+            assert item.command in written
+
+    def test_overwrite_argument_is_honored(self, generator, tmp_path):
+        content = generator.generate_csv_script(
+            str(tmp_path / "import.sh"),
+            overwrite_on_initial=False,
+        )
+        assert "--overwrite \\\n    false" in content
+        assert "--overwrite \\\n    true" not in content
+
+    def test_secret_safe_plan_and_fixed_csv_root(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        generator = CsvImportGenerator(
+            ecommerce_config,
+            ecommerce_schema,
+            endpoint="http://admin:sentinel-target-secret@localhost:8529",
+            password="sentinel-password",
+        )
+        plan = generator.build_plan()
+        assert plan.data_dir == "./dumps"
+        assert "./dumps/customers.csv" in plan.documents[0].command
+        assert "sentinel-password" not in plan.script
+        assert "sentinel-target-secret" not in plan.script
+        assert '"$ARANGO_PASSWORD"' in plan.script
+
+    def test_custom_artifact_root_is_shell_quoted(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        artifact_dir = "./csv artifacts;touch should-not-run"
+        plan = CsvImportGenerator(
+            ecommerce_config,
+            ecommerce_schema,
+            data_dir=artifact_dir,
+        ).build_plan()
+        command = shlex.split(
+            plan.documents[0].command.replace(" \\\n    ", " ")
+        )
+
+        assert command[command.index("--file") + 1] == (
+            f"{artifact_dir}/customers.csv"
+        )
+
+    def test_graph_artifact_matches_jsonl_shell_contract(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        plan = CsvImportGenerator(
+            ecommerce_config,
+            ecommerce_schema,
+            endpoint="http://admin:target-secret@localhost:8529",
+            password="password-secret",
+        ).build_plan(graph_name="demo")
+
+        assert plan.graph_script.startswith("#!/usr/bin/env bash")
+        assert "arangosh" in plan.graph_script
+        assert '"$ARANGO_PASSWORD"' in plan.graph_script
+        assert "password-secret" not in plan.graph_script
+        assert "target-secret" not in plan.graph_script
+
+    def test_field_renames_emit_translate_without_warning(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        ecommerce_config.collections["customers"].field_mappings = {
+            "name": "display_name"
+        }
+        plan = CsvImportGenerator(
+            ecommerce_config, ecommerce_schema
+        ).build_plan()
+        assert plan.warnings == ()
+        command = plan.documents[0].command.replace(" \\\n    ", " ")
+        assert "--translate name=display_name" in command
+
+    def test_warns_when_csv_cannot_apply_include_filter(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        ecommerce_config.collections["customers"].include_fields = ["id", "name"]
+        plan = CsvImportGenerator(
+            ecommerce_config, ecommerce_schema
+        ).build_plan()
+        assert plan.warnings
+        assert "include-field filters" in plan.warnings[0]
+
+    def test_renamed_collections_drive_edge_prefixes(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        ecommerce_config.collections[
+            "orders"
+        ].target_collection = "Purchase"
+        ecommerce_config.collections[
+            "customers"
+        ].target_collection = "Customer"
+        plan = CsvImportGenerator(
+            ecommerce_config, ecommerce_schema
+        ).build_plan()
+        edge = plan.edges[0]
+        assert "Purchase/" in edge.command
+        assert "Customer/" in edge.command
+        assert '"Purchase"' in plan.graph_script
+        assert '"Customer"' in plan.graph_script
+
+    def test_lpg_preview_is_rejected(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        config = ecommerce_config.model_copy(update={"graph_layout": "lpg"})
+        with pytest.raises(ValueError, match="does not support LPG"):
+            CsvImportGenerator(config, ecommerce_schema).build_plan()
 
 
 class TestFromSampleSchema:

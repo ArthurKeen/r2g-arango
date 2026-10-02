@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import shlex
+from types import SimpleNamespace
+
 import pytest
 
 from r2g.catalog import CatalogManager
@@ -91,6 +94,30 @@ class TestSourceEndpoints:
         # connection string should be redacted
         assert "svc:x@" not in body["connection_string"]
 
+    def test_snowflake_key_path_and_passphrase_are_redacted(self, client):
+        response = client.post(
+            "/api/sources",
+            json={
+                "name": "keypair_sf",
+                "source_type": "snowflake",
+                "connection_string": (
+                    "snowflake://svc:@xy12345/ANALYTICS/CORE"
+                    "?warehouse=WH"
+                    "&private_key_file=/Users/demo/private-key.p8"
+                    "&private_key_file_pwd=sentinel-passphrase"
+                ),
+            },
+        )
+        assert response.status_code == 201
+        rendered = response.text
+        assert "private-key.p8" not in rendered
+        assert "sentinel-passphrase" not in rendered
+
+        listed = client.get("/api/sources")
+        assert listed.status_code == 200
+        assert "private-key.p8" not in listed.text
+        assert "sentinel-passphrase" not in listed.text
+
     def test_add_csv_source_and_snapshot(self, client, tmp_path):
         csv_dir = tmp_path / "dumps"
         csv_dir.mkdir()
@@ -148,6 +175,232 @@ class TestSourceEndpoints:
         body = resp.json()
         detail = body.get("detail", "").lower()
         assert "r2g-arango[snowflake]" in detail or "snowflake-connector" in detail
+
+
+class TestSnowflakeCustomer360Preset:
+    @staticmethod
+    def _set_environment(monkeypatch, tmp_path):
+        key_path = tmp_path / "snowflake-key.p8"
+        key_path.touch()
+        values = {
+            "SNOWFLAKE_ACCOUNT": "example-account",
+            "SNOWFLAKE_USER": "r2g-demo",
+            "SNOWFLAKE_PRIVATE_KEY_FILE": str(key_path),
+            "SNOWFLAKE_WAREHOUSE": "DEMO_WH",
+            "SNOWFLAKE_ROLE": "CDF_RO",
+        }
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
+
+    @staticmethod
+    def _fake_capture(catalog, source_name, *, schema_name):
+        from relational_schema_analyzer import apply_key_overlay, overlay_summary
+
+        from r2g.demo.snowflake_customer_360 import OVERLAY_SOURCE, load_overlay
+        from r2g.snapshot import overlay_fingerprint
+
+        overlay = load_overlay()
+        column_names: dict[str, set[str]] = {
+            table: set(spec.get("primaryKey", []))
+            for table, spec in overlay["tables"].items()
+        }
+        for table, spec in overlay["tables"].items():
+            for fk in spec.get("foreignKeys", []):
+                column_names[table].update(fk["columns"])
+                ref = fk["references"]
+                column_names[ref["table"]].update(ref["columns"])
+        keyless = Schema(
+            tables={
+                table: Table(
+                    name=table,
+                    columns=[
+                        Column(name=column, data_type="varchar", is_nullable=False)
+                        for column in sorted(columns)
+                    ],
+                )
+                for table, columns in column_names.items()
+            }
+        )
+        physical = apply_key_overlay(keyless, overlay)
+        summary = overlay_summary(physical)
+        schema = Schema.model_validate(physical.model_dump())
+        snap = catalog.create_snapshot(
+            source_name,
+            schema,
+            pg_schema=schema_name,
+            key_overlay_summary=summary,
+            key_overlay_source=OVERLAY_SOURCE,
+            key_overlay_fingerprint=overlay_fingerprint(overlay),
+        )
+        return snap, SimpleNamespace(
+            schema=schema,
+            key_overlay_summary=summary,
+            key_overlay_source=OVERLAY_SOURCE,
+            key_overlay_fingerprint=overlay_fingerprint(overlay),
+            classifications_applied=0,
+        )
+
+    def test_requires_environment_without_exposing_values(
+        self, client, monkeypatch
+    ):
+        for name in (
+            "SNOWFLAKE_ACCOUNT",
+            "SNOWFLAKE_USER",
+            "SNOWFLAKE_PRIVATE_KEY_FILE",
+            "SNOWFLAKE_WAREHOUSE",
+            "SNOWFLAKE_ROLE",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        response = client.post(
+            "/api/demo-presets/snowflake-customer-360/install",
+            json={},
+        )
+
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["code"] == "snowflake_environment_incomplete"
+        assert set(detail["missing"]) == {
+            "SNOWFLAKE_ACCOUNT",
+            "SNOWFLAKE_USER",
+            "SNOWFLAKE_PRIVATE_KEY_FILE",
+            "SNOWFLAKE_WAREHOUSE",
+            "SNOWFLAKE_ROLE",
+        }
+
+    def test_requires_non_system_target(
+        self, client, monkeypatch, tmp_path
+    ):
+        self._set_environment(monkeypatch, tmp_path)
+
+        response = client.post(
+            "/api/demo-presets/snowflake-customer-360/install",
+            json={},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "arango_target_required"
+
+    def test_install_is_idempotent_and_preserves_env_references(
+        self, client, catalog_dir, monkeypatch, tmp_path
+    ):
+        self._set_environment(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "r2g.snapshot.capture_source_snapshot",
+            self._fake_capture,
+        )
+        target = client.post(
+            "/api/targets",
+            json={
+                "name": "demo_arango",
+                "endpoint": "http://localhost:8529",
+                "database": "customer360_demo",
+                "username": "root",
+                "password": "target-secret",
+            },
+        )
+        assert target.status_code == 201
+
+        first = client.post(
+            "/api/demo-presets/snowflake-customer-360/install",
+            json={"target_name": "demo_arango"},
+        )
+        second = client.post(
+            "/api/demo-presets/snowflake-customer-360/install",
+            json={"target_name": "demo_arango"},
+        )
+
+        assert first.status_code == 200, first.text
+        assert first.json()["snapshot"]["tables"] == 5
+        assert first.json()["overlay"]["summary"]["foreignKeys"] == 6
+        assert first.json()["mapping"] == {
+            "status": "created",
+            "collections": 5,
+            "edges": 6,
+        }
+        assert second.status_code == 200, second.text
+        assert second.json()["source"]["status"] == "reused"
+        assert second.json()["snapshot"]["status"] == "reused"
+        assert second.json()["project"]["status"] == "reused"
+        assert second.json()["mapping"]["status"] == "reused"
+
+        mgr = CatalogManager(catalog_dir)
+        source = mgr.get_source("snowflake_customer_360")
+        assert source is not None
+        assert "$SNOWFLAKE_PRIVATE_KEY_FILE" in source.connection_string
+        assert str(tmp_path) not in source.connection_string
+
+        graph = client.get(
+            "/api/projects/snowflake_customer_360/graph-data"
+        ).json()
+        assert len(graph["config"]["edges"]) == 6
+        assert {
+            edge["keyProvenance"] for edge in graph["config"]["edges"]
+        } == {"curated-overlay"}
+
+    def test_install_rebuilds_snapshot_when_overlay_content_changes(
+        self, client, catalog_dir, monkeypatch, tmp_path
+    ):
+        from r2g.demo.snowflake_customer_360 import (
+            OVERLAY_SOURCE,
+            load_overlay,
+        )
+        from r2g.snapshot import overlay_fingerprint
+
+        self._set_environment(monkeypatch, tmp_path)
+        captures = 0
+
+        def capture(*args, **kwargs):
+            nonlocal captures
+            captures += 1
+            return self._fake_capture(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "r2g.snapshot.capture_source_snapshot",
+            capture,
+        )
+        target = client.post(
+            "/api/targets",
+            json={
+                "name": "demo_arango",
+                "endpoint": "http://localhost:8529",
+                "database": "customer360_demo",
+                "username": "root",
+                "password": "target-secret",
+            },
+        )
+        assert target.status_code == 201
+        first = client.post(
+            "/api/demo-presets/snowflake-customer-360/install",
+            json={"target_name": "demo_arango"},
+        )
+        assert first.status_code == 200, first.text
+
+        mgr = CatalogManager(catalog_dir)
+        latest = mgr.get_latest_snapshot("snowflake_customer_360")
+        assert latest is not None
+        changed_overlay = {
+            **load_overlay(),
+            "description": "Same key counts, different reviewed content",
+        }
+        stale = mgr.create_snapshot(
+            "snowflake_customer_360",
+            latest.schema_data,
+            pg_schema=latest.pg_schema,
+            key_overlay_summary=latest.key_overlay_summary,
+            key_overlay_source=OVERLAY_SOURCE,
+            key_overlay_fingerprint=overlay_fingerprint(changed_overlay),
+        )
+        assert mgr.get_latest_snapshot("snowflake_customer_360").id == stale.id
+
+        second = client.post(
+            "/api/demo-presets/snowflake-customer-360/install",
+            json={"target_name": "demo_arango"},
+        )
+
+        assert second.status_code == 200, second.text
+        assert second.json()["snapshot"]["status"] == "created"
+        assert captures == 2
 
 
 class TestInferFksEndpoint:
@@ -492,6 +745,134 @@ class TestMappingEndpoints:
         resp = client.post("/api/projects/proj/validate")
         assert resp.status_code == 200
         assert "valid" in resp.json()
+
+    def test_arangoimport_preview_uses_saved_mapping(
+        self, client, tmp_path, catalog_dir
+    ):
+        self._setup_project(client, tmp_path, catalog_dir)
+        resp = client.post(
+            "/api/projects/proj/arangoimport-preview",
+            json={"mode": "jsonl"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["mapping_source"] == "saved"
+        assert body["data_dir"] == "./output"
+        assert body["documents"][0]["mapping_id"] == "users"
+        assert "Studio Load streams data directly over HTTP" in body["load_note"]
+        assert "$ARANGO_PASSWORD" in body["script"]
+
+    def test_arangoimport_preview_accepts_shell_quoted_artifact_directory(
+        self, client, tmp_path, catalog_dir
+    ):
+        self._setup_project(client, tmp_path, catalog_dir)
+        artifact_dir = "./demo artifacts;touch should-not-run"
+
+        resp = client.post(
+            "/api/projects/proj/arangoimport-preview",
+            json={"mode": "jsonl", "artifact_dir": artifact_dir},
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["data_dir"] == artifact_dir
+        command = shlex.split(body["documents"][0]["command"])
+        assert command[command.index("--file") + 1] == (
+            f"{artifact_dir}/users.jsonl"
+        )
+
+    @pytest.mark.parametrize("artifact_dir", ["", "bad\npath", "bad\u0000path"])
+    def test_arangoimport_preview_rejects_invalid_artifact_directory(
+        self, client, tmp_path, catalog_dir, artifact_dir
+    ):
+        self._setup_project(client, tmp_path, catalog_dir)
+
+        resp = client.post(
+            "/api/projects/proj/arangoimport-preview",
+            json={"artifact_dir": artifact_dir},
+        )
+
+        assert resp.status_code == 422
+
+    def test_arangoimport_preview_reports_scrubbed_internal_error_as_500(
+        self, client, tmp_path, catalog_dir, monkeypatch
+    ):
+        self._setup_project(client, tmp_path, catalog_dir)
+
+        def fail(*args, **kwargs):
+            raise RuntimeError(
+                "Failed postgresql://demo:sentinel-secret@localhost/db"
+            )
+
+        monkeypatch.setattr(
+            "r2g.ui.server.ArangoImportGenerator.build_plan",
+            fail,
+        )
+
+        resp = client.post(
+            "/api/projects/proj/arangoimport-preview",
+            json={"mode": "jsonl"},
+        )
+
+        assert resp.status_code == 500
+        detail = resp.json()["detail"]
+        assert detail["message"] == "Could not render import preview"
+        assert "sentinel-secret" not in detail["diagnostic"]
+
+    def test_arangoimport_preview_uses_draft_and_focuses_collection(
+        self, client, tmp_path, catalog_dir
+    ):
+        self._setup_project(client, tmp_path, catalog_dir)
+        draft = client.get("/api/projects/proj/mapping").json()
+        draft["collections"]["users"]["target_collection"] = "Customer"
+        resp = client.post(
+            "/api/projects/proj/arangoimport-preview",
+            json={
+                "mode": "csv",
+                "scope": "collection",
+                "mapping_id": "users",
+                "mapping": draft,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["mapping_source"] == "draft"
+        assert body["focused_command"]["target_collection"] == "Customer"
+        assert "./dumps/users.csv" in body["focused_command"]["command"]
+
+    def test_arangoimport_preview_rejects_unknown_identity_and_paths(
+        self, client, tmp_path, catalog_dir
+    ):
+        self._setup_project(client, tmp_path, catalog_dir)
+        unknown = client.post(
+            "/api/projects/proj/arangoimport-preview",
+            json={
+                "scope": "collection",
+                "mapping_id": "../../secret",
+            },
+        )
+        assert unknown.status_code == 404
+
+        path = client.post(
+            "/api/projects/proj/arangoimport-preview",
+            json={"output_path": "/tmp/import.sh"},
+        )
+        assert path.status_code == 422
+
+    def test_arangoimport_preview_blocks_lpg_and_does_not_leak_source(
+        self, client, tmp_path, catalog_dir
+    ):
+        self._setup_project(client, tmp_path, catalog_dir)
+        draft = client.get("/api/projects/proj/mapping").json()
+        draft["graph_layout"] = "lpg"
+        draft["lpg"] = {}
+        resp = client.post(
+            "/api/projects/proj/arangoimport-preview",
+            json={"mapping": draft},
+        )
+        assert resp.status_code == 422
+        assert "does not support LPG" in resp.text
+        assert "postgresql://localhost/test" not in resp.text
 
     def test_apply_naming_collections_pascal(self, client, tmp_path, catalog_dir):
         self._setup_project(client, tmp_path, catalog_dir)

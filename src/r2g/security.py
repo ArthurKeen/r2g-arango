@@ -25,7 +25,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -144,6 +144,17 @@ def redact_for_display(value: str, keep: int = 3) -> str:
 # Matches credentials embedded in a DSN anywhere within a larger string, e.g.
 # "could not connect to postgresql://user:secret@host:5432/db" in an error message.
 _DSN_CRED_RE = re.compile(r"([A-Za-z][\w+.\-]*://)[^\s:/@]+:[^\s:/@]+@")
+_SENSITIVE_DSN_QUERY_KEYS = frozenset(
+    {
+        "access_token",
+        "oauth_token",
+        "password",
+        "private_key",
+        "private_key_file",
+        "private_key_file_pwd",
+        "token",
+    }
+)
 
 
 def scrub_dsn_credentials(text: str) -> str:
@@ -174,11 +185,11 @@ def redact_target_dump(dump: dict) -> dict:
 
 
 def redact_connection_string(url: str) -> str:
-    """Redact the password component of a DSN-style connection string.
+    """Redact credentials and sensitive query parameters in a DSN.
 
     Leaves host, port, database, and username visible so operators can
-    still tell things apart. Non-URL inputs are passed through unchanged
-    (with the tail kept visible via :func:`redact_for_display`).
+    still tell sources apart. Snowflake key paths/passphrases and common token
+    fields are masked even when the netloc itself has no password.
     """
 
     if not url:
@@ -187,12 +198,30 @@ def redact_connection_string(url: str) -> str:
         parsed = urlparse(url)
     except ValueError:
         return redact_for_display(url, keep=6)
-    if not parsed.scheme or "@" not in parsed.netloc:
+    if not parsed.scheme:
         return redact_for_display(url, keep=6)
-    user_info, _, host = parsed.netloc.rpartition("@")
-    if ":" in user_info:
-        username, _ = user_info.split(":", 1)
-        new_netloc = f"{username}:***@{host}"
-    else:
-        new_netloc = f"{user_info}@{host}"
-    return urlunparse(parsed._replace(netloc=new_netloc))
+    query = urlencode(
+        [
+            (
+                key,
+                "***"
+                if key.lower() in _SENSITIVE_DSN_QUERY_KEYS
+                else value,
+            )
+            for key, value in parse_qsl(
+                parsed.query, keep_blank_values=True
+            )
+        ],
+        doseq=True,
+    )
+    new_netloc = parsed.netloc
+    if "@" in parsed.netloc:
+        user_info, _, host = parsed.netloc.rpartition("@")
+        if ":" in user_info:
+            username, _ = user_info.split(":", 1)
+            new_netloc = f"{username}:***@{host}"
+    elif not parsed.netloc:
+        return redact_for_display(url, keep=6)
+    return urlunparse(
+        parsed._replace(netloc=new_netloc, query=query)
+    )

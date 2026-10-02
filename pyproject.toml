@@ -130,7 +130,12 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-r2g = ["ui/static/*", "ui/static/**/*", "schemas/*.json"]
+r2g = [
+  "ui/static/*",
+  "ui/static/**/*",
+  "schemas/*.json",
+  "demo/**/*.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

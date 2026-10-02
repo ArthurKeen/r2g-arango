@@ -857,7 +857,10 @@ def stream(
     source_name: Optional[str] = typer.Option(
         None,
         "--source",
-        help="Catalog source name; resolves to any supported source_type (PostgreSQL, Snowflake, …)",
+        help=(
+            "Catalog source name; supports PostgreSQL, MySQL/MariaDB, "
+            "SQL Server, Snowflake, and ClickHouse"
+        ),
     ),
     schema_file: str = typer.Option(..., "--schema", "-s", help="Path to schema.json"),
     config_path: str = typer.Option(..., "--config", "-c", help="Mapping config YAML"),
@@ -870,7 +873,11 @@ def stream(
     batch_size: int = typer.Option(10000, "--batch-size", "-b", help="Rows per batch"),
     on_duplicate: str = typer.Option("replace", "--on-duplicate", help="ArangoDB on-duplicate strategy"),
     graph_name: Optional[str] = typer.Option(None, "--graph-name", help="Create a named graph after import"),
-    pg_schema: str = typer.Option("public", "--pg-schema", help="PostgreSQL schema name to stream from"),
+    pg_schema: str = typer.Option(
+        "public",
+        "--pg-schema",
+        help="Source namespace/schema to stream (meaning depends on source type)",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Validate connections and preview data without writing to ArangoDB"
     ),
@@ -878,7 +885,10 @@ def stream(
         False, "--drop-collections", help="Drop and recreate target collections before import"
     ),
     workers: int = typer.Option(
-        1, "--workers", "-w", help="Parallel workers (each gets its own PG + ArangoDB connection)"
+        1,
+        "--workers",
+        "-w",
+        help="Parallel workers (each gets its own source + ArangoDB connection)",
     ),
     include_tables: Optional[str] = typer.Option(
         None, "--include-tables", help="Comma-separated list of tables to include (default: all)"
@@ -906,8 +916,9 @@ def stream(
     into ArangoDB via the HTTP API.
 
     Use ``--source <name>`` to dispatch by catalog ``source_type``
-    (PostgreSQL, Snowflake, …). The legacy ``--pg-conn`` flag still
-    works and routes through the PostgreSQL connector.
+    (PostgreSQL, MySQL/MariaDB, SQL Server, Snowflake, or ClickHouse).
+    The legacy ``--pg-conn`` flag still works and routes through the
+    PostgreSQL connector.
 
     Use --dry-run to preview row counts and sample documents without writing.
     Use --since with --on-duplicate=replace for basic incremental updates.
@@ -2087,16 +2098,41 @@ def _get_catalog():
 def source_add(
     name: str = typer.Option(..., "--name", help="Source name"),
     source_type: str = typer.Option(
-        "postgresql", "--type", help="Source type: postgresql, mysql, sqlserver, snowflake, csv, or kafka"
+        "postgresql",
+        "--type",
+        help=(
+            "Source type: postgresql, mysql, sqlserver, snowflake, "
+            "clickhouse, csv, or kafka"
+        ),
     ),
     conn: str = typer.Option(..., "--conn", help="Connection string"),
     description: str = typer.Option("", "--description", help="Description"),
     owner: str = typer.Option("", "--owner", help="Owner"),
+    key_overlay: Optional[str] = typer.Option(
+        None,
+        "--key-overlay",
+        help="Reviewed PK/FK overlay JSON or YAML (parsed and stored with the source)",
+    ),
 ) -> None:
     """Register a new data source."""
     try:
         mgr = _get_catalog()
-        source = mgr.add_source(name, source_type, conn, description=description, owner=owner)
+        overlay_data = None
+        overlay_source = None
+        if key_overlay:
+            from relational_schema_analyzer import load_key_overlay
+
+            overlay_data = load_key_overlay(key_overlay)
+            overlay_source = str(Path(key_overlay).expanduser().resolve())
+        source = mgr.add_source(
+            name,
+            source_type,
+            conn,
+            description=description,
+            owner=owner,
+            key_overlay=overlay_data,
+            key_overlay_source=overlay_source,
+        )
         console.print(f"[green]Source '{source.name}' added.[/green]")
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
@@ -2145,16 +2181,20 @@ def source_snapshot(
     pg_schema: str = typer.Option(
         "public",
         "--pg-schema",
-        help="Schema to introspect (PostgreSQL schema or Snowflake schema)",
+        help=(
+            "Source namespace/schema to introspect (for example public, dbo, "
+            "or a Snowflake schema)"
+        ),
     ),
     compare_last: bool = typer.Option(False, "--compare-last", help="Diff against previous snapshot"),
 ) -> None:
     """Introspect the schema from the source and save a snapshot.
 
     Uses the source's ``source_type`` (``postgresql``, ``mysql``,
-    ``sqlserver``, ``snowflake``, or ``csv``) to pick the right connector.
+    ``sqlserver``, ``snowflake``, ``clickhouse``, or ``csv``) to pick the
+    right connector.
     """
-    from r2g.connectors.base import create_source_connector
+    from r2g.snapshot import capture_source_snapshot
 
     mgr = _get_catalog()
     source = mgr.get_source(name)
@@ -2163,28 +2203,28 @@ def source_snapshot(
         raise typer.Exit(code=1)
 
     try:
-        connector = create_source_connector(
-            source.source_type or "postgresql",
-            source.connection_string,
-            schema_name=pg_schema,
-            source_params=source.source_params,
-        )
-        schema = connector.get_schema()
-        if source.classifications:
-            from r2g.classification import annotate_schema
-
-            annotated = annotate_schema(schema, source.classifications)
-            if annotated:
-                console.print(
-                    f"  [cyan]Annotated {annotated} column(s) with catalog "
-                    f"classifications.[/cyan]"
-                )
         previous = mgr.get_latest_snapshot(name) if compare_last else None
-        snap = mgr.create_snapshot(name, schema, pg_schema=pg_schema)
+        snap, result = capture_source_snapshot(
+            mgr,
+            name,
+            schema_name=pg_schema,
+        )
+        schema = result.schema
         console.print(
             f"[green]Snapshot created:[/green] {snap.id}\n"
             f"  {len(schema.tables)} tables captured at {snap.captured_at.isoformat()}"
         )
+        if result.classifications_applied:
+            console.print(
+                f"  [cyan]Annotated {result.classifications_applied} column(s) "
+                "with catalog classifications.[/cyan]"
+            )
+        if result.key_overlay_summary:
+            console.print(
+                "  [cyan]Applied reviewed key overlay:[/cyan] "
+                f"{result.key_overlay_summary['primaryKeys']} PK(s), "
+                f"{result.key_overlay_summary['foreignKeys']} FK(s)."
+            )
 
         if compare_last and previous is not None:
             from r2g.schema_diff import diff_schemas
@@ -2217,7 +2257,7 @@ def source_dump(
     pg_schema: str = typer.Option(
         "public",
         "--pg-schema",
-        help="Source schema to dump (PG/Snowflake schema name)",
+        help="Source namespace/schema to dump (meaning depends on source type)",
     ),
     tables: Optional[str] = typer.Option(
         None,
@@ -2306,7 +2346,10 @@ def source_infer_fks(
     sample: bool = typer.Option(
         False,
         "--sample",
-        help="Run bounded value-overlap checks to score candidates (PostgreSQL and CSV)",
+        help=(
+            "Run bounded value-overlap checks (PostgreSQL, MySQL/MariaDB, "
+            "SQL Server, and CSV; other sources use name-only evidence)"
+        ),
     ),
     sample_limit: int = typer.Option(
         10_000,
@@ -2337,11 +2380,10 @@ def source_infer_fks(
 ) -> None:
     """Propose foreign keys for a source's latest schema snapshot.
 
-    Uses the stored ``source_type`` (PostgreSQL, Snowflake, or CSV) for
-    the name-based heuristic. ``--sample`` additionally scores
-    value-overlap between candidate columns: PostgreSQL runs bounded
-    ``LEFT JOIN`` queries, CSV reads the two files with Polars. Snowflake
-    sampling is not yet supported and falls back to name-only.
+    The name-based heuristic works for every stored ``source_type``.
+    ``--sample`` additionally scores value overlap for PostgreSQL,
+    MySQL/MariaDB, SQL Server, and CSV. Snowflake and ClickHouse sampling
+    are not yet supported and fall back to name-only evidence.
     """
     from rich.table import Table as RichTable
 

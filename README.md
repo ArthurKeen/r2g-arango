@@ -125,6 +125,7 @@ r2g export-r2rml --config mapping.yaml --schema schema.json --output analytics.r
 - **YAML-driven configuration** -- auto-generate a default mapping or hand-tune collection names, field renames, include/exclude lists
 - **Polars-powered file processing** -- CSV/TSV/GZ dump files processed via Polars for high throughput
 - **`arangoimport` script generation** -- produces executable bash scripts that load documents first, then edges, with configurable connection parameters
+- **Studio batch-script viewer** -- previews the current draft mapping as a secret-safe JSONL or CSV-direct `arangoimport` bundle, or as one focused vertex/edge command, with copy and client-side download; this is an alternative artifact, while Studio **Load** continues to stream directly over HTTP
 - **Named graph creation** -- generates arangosh JavaScript to create ArangoDB named graph definitions from edge mappings
 - **Structured logging** -- human-readable dev output or JSON for production via structlog
 - **CSV-direct import** -- generate `arangoimport --type csv` scripts that import PG CSV dumps directly with `--translate` for key remapping, `--datatype` for type coercion, and collection prefixes for edge `_from`/`_to` construction; no intermediate JSONL needed
@@ -171,9 +172,16 @@ src/r2g/
 │   └── kafka_consumer.py        # Kafka consumer with confluent-kafka
 ├── types.py                    # Pydantic models (Schema, Table, MappingConfig, EdgeDefinition, ...)
 ├── config.py                   # ConfigManager, YAML load/save, PG→JSON type map, join detection
+├── snapshot.py                 # Shared introspection + reviewed-overlay snapshot pipeline
 ├── log.py                      # structlog setup
 ├── connectors/
-│   ├── postgres.py             # PostgreSQL schema reader via psycopg
+│   ├── base.py                 # SourceConnector registry/factory
+│   ├── session.py              # SourceSession bulk-read protocol
+│   ├── postgres.py             # PostgreSQL connector/session via psycopg
+│   ├── mysql.py                # MySQL/MariaDB connector/session
+│   ├── mssql.py                # SQL Server connector/session
+│   ├── snowflake.py            # Snowflake connector/session + key-pair auth
+│   ├── clickhouse.py           # ClickHouse connector/session
 │   └── arango_writer.py        # ArangoDB HTTP API writer via python-arango
 ├── input/
 │   └── dump_reader.py          # Polars-based CSV/TSV/GZ reader
@@ -185,7 +193,7 @@ src/r2g/
 │   ├── arangoimport.py         # Bash script generator (JSONL and CSV-direct)
 │   └── visualizer.py           # Interactive HTML mapping visualizer + editor
 └── streaming/
-    └── pipeline.py             # PG → ArangoDB direct streaming pipeline
+    └── pipeline.py             # SourceSession → ArangoDB direct streaming pipeline
 ```
 
 ## Installation
@@ -262,6 +270,56 @@ cp .env.example .env
 ```
 
 The CLI auto-loads `.env` from the working directory. All connection flags (`--conn`, `--pg-conn`, `--endpoint`, `--database`, `--username`, `--password`) can be set via environment variables (`PG_CONN`, `ARANGO_ENDPOINT`, `ARANGO_DB`, `ARANGO_USER`, `ARANGO_PASSWORD`). CLI flags override env vars.
+
+Snowflake accepts password URLs and Contextual Data Fabric-style key-pair URLs:
+
+```text
+snowflake://user:password@account/DATABASE/SCHEMA?warehouse=WH&role=R
+snowflake://$SNOWFLAKE_USER:@$SNOWFLAKE_ACCOUNT/DATABASE/SCHEMA?warehouse=$SNOWFLAKE_WAREHOUSE&role=$SNOWFLAKE_ROLE&private_key_file=$SNOWFLAKE_PRIVATE_KEY_FILE&private_key_file_pwd=$SNOWFLAKE_PRIVATE_KEY_FILE_PWD
+```
+
+Password and key-pair credentials are mutually exclusive. Key-pair connections
+use `SNOWFLAKE_JWT`; missing/unreadable key files fail before the driver is
+called, and credentials are scrubbed from API errors. The private key must exist
+on the machine or container running r2g at the path resolved from
+`SNOWFLAKE_PRIVATE_KEY_FILE`; an environment reference does not upload or copy
+the key.
+
+### Snowflake quick start
+
+Install the connector, register the source, and capture its schema:
+
+```bash
+pip install 'r2g-arango[snowflake,ui]'
+r2g source add \
+  --name customer360 \
+  --type snowflake \
+  --conn 'snowflake://$SNOWFLAKE_USER:@$SNOWFLAKE_ACCOUNT/DATABASE/SCHEMA?warehouse=$SNOWFLAKE_WAREHOUSE&role=$SNOWFLAKE_ROLE&private_key_file=$SNOWFLAKE_PRIVATE_KEY_FILE' \
+  --key-overlay ./keys.overlay.json
+r2g source snapshot customer360 --pg-schema SCHEMA
+```
+
+`--key-overlay` is optional, but recommended for Snowflake schemas whose PK/FK
+constraints are absent or informational. It accepts a reviewed RSA JSON/YAML
+overlay; r2g stores the parsed overlay and records its source and fingerprint on
+each snapshot. r2g never invents those keys. Name-based FK suggestions work for
+Snowflake, but value-overlap sampling is not yet implemented for Snowflake and
+falls back to name-only evidence.
+
+Export CSV files or stream directly from the registered source:
+
+```bash
+r2g source dump customer360 --pg-schema SCHEMA --output-dir ./dumps
+r2g stream --source customer360 --pg-schema SCHEMA \
+  --schema schema.json --config mapping.yaml \
+  --database customer360_graph
+```
+
+In Studio, **Load** uses the direct streaming path from Snowflake to ArangoDB.
+**View arangoimport script bundle** only renders an alternative, secret-safe
+batch artifact; it does not execute the script or create its input files. The
+bundled live demo and role/setup instructions are in
+`examples/snowflake_customer_360/README.md`.
 
 ### 1. Extract schema from PostgreSQL
 
@@ -347,6 +405,12 @@ r2g generate-import \
 ```
 
 This produces an executable `import.sh` (documents first, then edges) and an arangosh graph creation script.
+
+The Studio exposes the same renderer under **Actions → View arangoimport script
+bundle** and on target collection/edge context menus. The preview defaults to
+`./output/*.jsonl` or `./dumps/*.csv`; the artifact directory is editable and
+shell-quoted in every generated command. It reads `ARANGO_PASSWORD` only at
+runtime and never executes or writes the displayed script on the server.
 
 ### 5. Load into ArangoDB
 
@@ -620,7 +684,7 @@ Use `--offset-reset earliest` or `latest` to control where a new consumer group 
 
 r2g is a reference application (see the Status note near the top): well-tested, but not held to a production operational bar. The following constraints apply:
 
-- **Supported sources: PostgreSQL, MySQL / MariaDB, SQL Server, Snowflake, ClickHouse, and CSV directories** (Kafka is supported for streaming sync via `kafka-start` and introspection in the catalog). Schema introspection, FK inference (with value-overlap sampling on PostgreSQL, MySQL, SQL Server, and CSV), dump export (`r2g source dump`), and streaming into ArangoDB (`r2g stream --source …`) work across these backends through a common `SourceConnector` / `SourceSession` abstraction. MySQL is gated on the optional `r2g-arango[mysql]` extra (pure-Python `pymysql`, also covers MariaDB); SQL Server on `r2g-arango[sqlserver]` (pure-Python `pymssql`); Snowflake on `r2g-arango[snowflake]`; ClickHouse on `r2g-arango[clickhouse]` (pure-Python `clickhouse-connect`). PostgreSQL, MySQL, and SQL Server are verified end-to-end against live servers in the integration suite; end-to-end Snowflake verification against a live warehouse remains a field-validation exercise. No SQLite or Oracle support yet.
+- **Supported sources: PostgreSQL, MySQL / MariaDB, SQL Server, Snowflake, ClickHouse, and CSV directories** (Kafka is supported for streaming sync via `kafka-start` and introspection in the catalog). Schema introspection, FK inference (with value-overlap sampling on PostgreSQL, MySQL, SQL Server, and CSV), dump export (`r2g source dump`), and streaming into ArangoDB (`r2g stream --source …`) work across these backends through a common `SourceConnector` / `SourceSession` abstraction. MySQL is gated on the optional `r2g-arango[mysql]` extra (pure-Python `pymysql`, also covers MariaDB); SQL Server on `r2g-arango[sqlserver]` (pure-Python `pymssql`); Snowflake on `r2g-arango[snowflake]`; ClickHouse on `r2g-arango[clickhouse]` (pure-Python `clickhouse-connect`). PostgreSQL, MySQL, and SQL Server are verified end-to-end against live servers in the integration suite; Snowflake password/key-pair snapshot, reviewed-key overlay, mapping, dump, and streaming paths are field-validated against the live Customer 360 demo. No SQLite or Oracle support yet.
 - **External data catalog discovery (Phase 8a):** connect to an [OpenMetadata](https://open-metadata.org) catalog (`r2g-arango[openmetadata]`) to browse its database/schema/Kafka assets and import a selection as an r2g source — see `r2g catalog`. Distinct from r2g's internal catalog; read-only; credentials stay with the user (the catalog supplies host/db, not secrets). AWS Glue and Atlan are planned next (see [docs/PRD.md](docs/PRD.md) Phase 8).
 - **Ontology derivation (Phase 10):** an *optional* way to **propose** a richer target graph from the introspected schema — the engine proposes, the deterministic pipeline disposes. Two engines: an **LLM engine** (`r2g-arango[llm]`; OpenAI, Anthropic/Claude, or any OpenAI-compatible/local endpoint like Ollama, vLLM, LM Studio), and a **deterministic engine** (`r2g-arango[ontology]`) that runs the shared [`relational-schema-analyzer`](https://github.com/ArthurKeen/relational-schema-analyzer) — the introspection core originally extracted from r2g — to derive a conceptual model (semantic collection names, join-table detection, foreign-key relationships, confidence/provenance) **offline, from structure alone** (no rows, no network); add `--refine` to LLM-improve it. The LLM path is metadata-only (no row data; Phase-9 Restricted/PII columns redacted to name-only and never sampled), prompt-injection-hardened; opt-in `--sample`/`--ground` add non-sensitive example values and Phase-11 denormalization findings. Both engines' proposals are validated/repaired against the real schema so a proposal can never load a hallucinated table or column, flowing through the **same** `validate_config` → mapper-review → loader path as Auto-Map (still the default); nothing is applied without explicit confirmation. Use it from the CLI (`r2g ontology suggest --engine {llm,rsa}`) or the **Mapping Studio**: a "Suggest model (AI)" action (Actions menu / canvas right-click / `m`) opens a floating review panel — pick the engine, accept or reject each suggestion per item, then apply the selection as an editable draft to review and Save.
 - **Data validation is opt-in** -- orphaned foreign key references (FK values pointing to non-existent PKs) will produce edges to vertices that don't exist in ArangoDB. Use `validate-data` before import to catch these, but it is not enforced automatically.
@@ -659,7 +723,7 @@ Phases 1 through 4 are implemented. See [`docs/PRD.md`](docs/PRD.md) for the ful
 - **Phase 4** -- Kafka integration: Debezium parser, flat JSON parser, confluent-kafka consumer, kafka-start CLI command -- **complete**
 - **Phase 5** -- Temporal graph mode: immutable-proxy time travel pattern (ProxyIn/Entity/ProxyOut), soft deletes with `created`/`expired` versioning, TTL aging, MDI-prefixed temporal indexes, point-in-time query templates, SmartGraph compatibility -- **implemented** (`r2g.temporal`, `--temporal`/`--ttl-seconds`/`--smart-field` on `cdc-start`/`kafka-start`; live-warehouse field validation pending)
 - **Phase 5f** -- Naming conventions (PascalCase collections / camelCase properties + edges / snake_case) and rename change-management for already-loaded targets: `r2g.naming`, identity-based diff in `mapping-diff`, in-place `selective-reload`, `migration-plan` / `migrate` API endpoints, reserved-attribute protection -- **implemented**
-- **Phase 6** -- Snowflake integration -- **done**. Slice 1: source-abstraction `SourceConnector` Protocol, `SnowflakeConnector` for schema introspection via `INFORMATION_SCHEMA` + `SHOW PRIMARY/IMPORTED KEYS`, Snowflake-aware type map, UI / MCP / CLI dispatching through the factory. Slice 2: pure-Python FK inference engine (`r2g.fk_inference`, `POST /api/sources/{name}/infer-fks`, **Suggest FKs** toolbar button with per-row accept, `r2g source infer-fks <name> [--sample] [--accept]` CLI) with an optional PostgreSQL value-overlap sampler. Slice 3: new `SourceSession` Protocol (`count_rows`, `stream_rows`, `dump_table_to_csv`, `close`), `PostgresSession` (`REPEATABLE READ` + server-side cursor + `COPY TO STDOUT`), `SnowflakeSession` (`BEGIN`/`COMMIT` + `fetchmany` + CSV dump). `StreamingPipeline` is now fully source-agnostic; `r2g stream --source <name>` and new `r2g source dump <name>` work identically on PostgreSQL and Snowflake; `POST /api/projects/{name}/load` dispatches through `create_source_connector`. Legacy `--pg-conn` / `r2g dump-tables --conn` flags still work via a backward-compat shim.
+- **Phase 6** -- Snowflake integration -- **done**. Includes password/key-pair authentication, schema introspection, reviewed RSA key overlays with provenance/fingerprints, type mapping, source-agnostic CSV dumps and direct streaming, and the bundled Customer 360 rehearsal. Deterministic FK inference is available, but Snowflake value-overlap sampling remains name-only. `r2g stream --source <name>` and `r2g source dump <name>` dispatch through the registered source connector; legacy PostgreSQL-only flags remain available for compatibility.
 - **Phase 12** -- Federation: forward **CSI v1** and **R2RML** emitters (`export-csi` / `export-r2rml`) so r2g mappings drive the Contextual Data Fabric federated-query engine; **ClickHouse** source connector (federation mapping + ETL); **P6.7** cross-source shared keys emitted as `conceptualModel.joinKeys` -- **shipped (producer side)**; the fabric-side E1 routing consumer is tracked separately
 - **Phase 7+** -- Additional sources, LLM-driven ontology derivation, ArangoRDF, bi-directional sync -- **exploratory**
 

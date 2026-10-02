@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -13,6 +14,18 @@ from r2g.security import CredentialCipher, load_secret_key
 from r2g.types import Classification, Schema
 
 logger = get_logger(__name__)
+
+_PROJECT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*")
+
+
+def validate_project_name(value: str) -> str:
+    """Return a filesystem/shell-safe project name or raise ``ValueError``."""
+    if not _PROJECT_NAME_RE.fullmatch(value or "") or ".." in value:
+        raise ValueError(
+            "Invalid project name; use letters, digits, dot, underscore, or "
+            "hyphen, start with a letter or digit, and do not use '..'"
+        )
+    return value
 
 
 class DependencyError(Exception):
@@ -42,6 +55,11 @@ class SourceConfig(BaseModel):
     description: str = ""
     owner: str = ""
     source_params: dict[str, Any] = Field(default_factory=dict)
+    # Optional reviewed constraints for sources whose catalogs do not declare
+    # keys (notably Snowflake). Store parsed, non-secret data rather than a
+    # client-controlled filesystem path so snapshots remain reproducible.
+    key_overlay: dict[str, Any] | None = None
+    key_overlay_source: str | None = None
     # Governance carrier (PRD Phase 9a). ``classifications`` is the resolved
     # ``table → column → Classification`` map captured at ``catalog import-source``
     # so it survives without re-querying the catalog; ``data_owners`` / ``data_tier``
@@ -96,6 +114,11 @@ class SchemaSnapshot(BaseModel):
     schema_data: Schema
     captured_at: datetime
     pg_schema: str = "public"
+    # r2g's compatibility serializer intentionally drops RSA Table.extra, so
+    # retain a snapshot-level audit summary of curator-declared keys.
+    key_overlay_summary: dict[str, int] = Field(default_factory=dict)
+    key_overlay_source: str | None = None
+    key_overlay_fingerprint: str | None = None
 
 
 class Project(BaseModel):
@@ -119,6 +142,11 @@ class Project(BaseModel):
     loaded_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return validate_project_name(value)
 
     @field_validator("mapping_config_path")
     @classmethod
@@ -224,6 +252,8 @@ class CatalogManager:
         description: str = "",
         owner: str = "",
         source_params: dict[str, Any] | None = None,
+        key_overlay: dict[str, Any] | None = None,
+        key_overlay_source: str | None = None,
         classifications: dict[str, dict[str, Classification]] | None = None,
         data_owners: list[str] | None = None,
         data_tier: str | None = None,
@@ -255,6 +285,8 @@ class CatalogManager:
             description=description,
             owner=owner,
             source_params=source_params or {},
+            key_overlay=key_overlay,
+            key_overlay_source=key_overlay_source,
             classifications=classifications or {},
             data_owners=data_owners or [],
             data_tier=data_tier,
@@ -384,7 +416,16 @@ class CatalogManager:
 
     # ── Snapshots ────────────────────────────────────────────────────
 
-    def create_snapshot(self, source_name: str, schema: Schema, pg_schema: str = "public") -> SchemaSnapshot:
+    def create_snapshot(
+        self,
+        source_name: str,
+        schema: Schema,
+        pg_schema: str = "public",
+        *,
+        key_overlay_summary: dict[str, int] | None = None,
+        key_overlay_source: str | None = None,
+        key_overlay_fingerprint: str | None = None,
+    ) -> SchemaSnapshot:
         catalog = self._load()
         snap = SchemaSnapshot(
             id=str(uuid4()),
@@ -392,6 +433,9 @@ class CatalogManager:
             schema_data=schema,
             captured_at=_now(),
             pg_schema=pg_schema,
+            key_overlay_summary=key_overlay_summary or {},
+            key_overlay_source=key_overlay_source,
+            key_overlay_fingerprint=key_overlay_fingerprint,
         )
         catalog.snapshots[snap.id] = snap
         self._save(catalog)
@@ -435,6 +479,7 @@ class CatalogManager:
         mapping_name: str = "",
         mapping_description: str = "",
     ) -> Project:
+        validate_project_name(name)
         catalog = self._load()
         if source_name not in catalog.sources:
             raise ValueError(f"Source '{source_name}' not found")

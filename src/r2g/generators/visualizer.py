@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from r2g.log import get_logger
-from r2g.types import MappingConfig, Schema
+from r2g.types import EdgeDefinition, MappingConfig, Schema
 
 logger = get_logger(__name__)
 
@@ -40,6 +40,39 @@ class MappingVisualizer:
     def __init__(self, schema: Schema, config: MappingConfig) -> None:
         self.schema = schema
         self.config = config
+
+    def _source_table_for_collection(self, name: str) -> str:
+        if name in self.schema.tables:
+            return name
+        for key, mapping in self.config.collections.items():
+            if name in (key, mapping.source_table, mapping.target_collection):
+                return mapping.source_table
+        return name
+
+    def _edge_provenance(self, edge: EdgeDefinition) -> dict[str, object]:
+        """Correlate a mapping edge with its source FK without persisting it."""
+        from_table = self._source_table_for_collection(edge.from_collection)
+        to_table = self._source_table_for_collection(edge.to_collection)
+        table = self.schema.tables.get(from_table)
+        if table is None:
+            return {}
+        for fk in table.foreign_keys:
+            if (
+                list(fk.columns) == list(edge.from_fields)
+                and fk.foreign_table == to_table
+                and list(fk.foreign_columns) == list(edge.to_fields)
+            ):
+                constraint_name = fk.constraint_name or ""
+                return {
+                    "constraintName": constraint_name,
+                    "enforced": fk.enforced,
+                    "keyProvenance": (
+                        "curated-overlay"
+                        if constraint_name.startswith("overlay:")
+                        else "source-declared"
+                    ),
+                }
+        return {}
 
     def _build_graph_data(self) -> dict:
         nodes = []
@@ -80,6 +113,7 @@ class MappingVisualizer:
                 "edgeCollection": edge.edge_collection,
                 "fromField": ", ".join(edge.from_fields),
                 "toField": ", ".join(edge.to_fields),
+                **self._edge_provenance(edge),
             })
 
         return {"nodes": nodes, "links": links}
@@ -111,6 +145,12 @@ class MappingVisualizer:
                     "foreign_table": fk.foreign_table,
                     "foreign_columns": list(fk.foreign_columns),
                     "constraint_name": fk.constraint_name or "",
+                    "enforced": fk.enforced,
+                    "key_provenance": (
+                        "curated-overlay"
+                        if (fk.constraint_name or "").startswith("overlay:")
+                        else "source-declared"
+                    ),
                 })
             tables.append({
                 "name": table_name,
@@ -130,6 +170,7 @@ class MappingVisualizer:
                 "toCollection": e.to_collection,
                 "fromField": ", ".join(e.from_fields),
                 "toField": ", ".join(e.to_fields),
+                **self._edge_provenance(e),
             }
             for e in self.config.edges
         ]
@@ -166,6 +207,7 @@ class MappingVisualizer:
                 "toCollection": e.to_collection,
                 "fromField": ", ".join(e.from_fields),
                 "toField": ", ".join(e.to_fields),
+                **self._edge_provenance(e),
             }
             for e in self.config.edges
         ]

@@ -140,6 +140,9 @@ class TestBuildGraphData:
         assert link["target"] == "users"
         assert link["fromField"] == "author_id"
         assert link["toField"] == "id"
+        assert link["keyProvenance"] == "source-declared"
+        assert link["constraintName"] == "fk_author"
+        assert link["enforced"] is True
 
     def test_adds_missing_nodes_from_edges(self, viz_schema):
         config = MappingConfig(
@@ -218,6 +221,24 @@ class TestBuildEdgesData:
         assert "toCollection" in edge
         assert "fromField" in edge
         assert "toField" in edge
+
+    def test_curated_overlay_provenance_is_transiently_correlated(
+        self, viz_schema, viz_config
+    ):
+        fk = viz_schema.tables["posts"].foreign_keys[0]
+        fk.constraint_name = "overlay:posts_author"
+        fk.enforced = False
+        visualizer = MappingVisualizer(viz_schema, viz_config)
+
+        edge = next(
+            item
+            for item in visualizer._build_config_data()["edges"]
+            if item["edgeCollection"] == "posts_to_users"
+        )
+
+        assert edge["keyProvenance"] == "curated-overlay"
+        assert edge["constraintName"] == "overlay:posts_author"
+        assert edge["enforced"] is False
 
 
 class TestGenerate:

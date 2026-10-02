@@ -1095,7 +1095,7 @@
       <div class="explorer-section-header" onclick="toggleExplorerSection('exp-sources')">
         <span class="tree-caret">&#9662;</span><span class="sec-title">Sources</span>
         <button class="panel-add-btn" id="btn-import-catalog" aria-label="Import a source from a data catalog" data-hint="Browse a connected data catalog (OpenMetadata) and import a database/schema as a source. Credentials stay with you." onclick="event.stopPropagation();openCatalogImport()">&#128194;</button>
-        <button class="panel-add-btn" id="btn-new-source" aria-label="Create a new data source" data-hint="Register a new data source (PostgreSQL, MySQL, SQL Server, Snowflake, CSV, Kafka). Its schema is introspected automatically on save." onclick="event.stopPropagation();openNewSourceForm()">+</button>
+        <button class="panel-add-btn" id="btn-new-source" aria-label="Create a new data source" data-hint="Register a new data source (PostgreSQL, MySQL, SQL Server, Snowflake, ClickHouse, CSV, Kafka). Its schema is introspected automatically on save." onclick="event.stopPropagation();openNewSourceForm()">+</button>
       </div>
       <div class="explorer-section-body" id="sources-panel">
         <div class="empty-state">Loading sources&hellip;</div>
@@ -1551,7 +1551,12 @@ const NS_CONN_META = {
   snowflake: {
     label: 'Connection string',
     placeholder: 'snowflake://user:pass@account/DATABASE[/SCHEMA]?warehouse=WH&role=R',
-    hint: 'Snowflake (introspect-only): <code>snowflake://user:pass@account/DATABASE[/SCHEMA]?warehouse=WH&amp;role=R</code>.',
+    hint: 'Snowflake supports snapshots, CSV dumps, and streaming loads. Use password auth or leave the password empty and add <code>private_key_file=$SNOWFLAKE_PRIVATE_KEY_FILE</code>.',
+  },
+  clickhouse: {
+    label: 'Connection string',
+    placeholder: 'clickhouse://user:pass@host:8123/database',
+    hint: 'ClickHouse: <code>clickhouse://user:pass@host:8123/database</code>. Use <code>$ENV_VAR</code> to reference an environment variable.',
   },
   csv: {
     label: 'Directory path',
@@ -1579,6 +1584,11 @@ function nsTypeChanged() {
 function openNewSourceForm() {
   const html = `
     <div class="fc-form">
+      <div style="border:1px solid var(--border);border-radius:6px;padding:10px;background:var(--surface2)">
+        <div style="font-weight:600;margin-bottom:4px">Snowflake Customer 360 demo</div>
+        <div class="hint" style="margin-bottom:8px">Install the bundled Snowflake Customer 360 source, reviewed key overlay, and graph-ready mapping. Run the operator bootstrap first.</div>
+        <button type="button" class="btn btn-primary" onclick="useCustomer360SnowflakeDemo()">Use Customer 360 Snowflake demo</button>
+      </div>
       <label>Name
         <input id="ns-name" placeholder="prod_pg" autocomplete="off" />
       </label>
@@ -1587,7 +1597,8 @@ function openNewSourceForm() {
           <option value="postgresql">PostgreSQL</option>
           <option value="mysql">MySQL / MariaDB</option>
           <option value="sqlserver">SQL Server</option>
-          <option value="snowflake">Snowflake (introspect-only)</option>
+          <option value="snowflake">Snowflake</option>
+          <option value="clickhouse">ClickHouse</option>
           <option value="csv">CSV directory</option>
           <option value="kafka">Kafka topic (introspect-only)</option>
         </select>
@@ -1687,6 +1698,92 @@ function openNewSourceForm() {
     ],
   });
   setTimeout(() => document.getElementById('ns-name')?.focus(), 50);
+}
+
+async function useCustomer360SnowflakeDemo() {
+  let targets = [];
+  try {
+    targets = await apiFetch('/api/targets');
+  } catch (e) {
+    toast('Could not load ArangoDB targets: ' + e.message, 'error');
+    return;
+  }
+  const eligible = targets.filter(t => String(t.database || '').toLowerCase() !== '_system');
+  if (!eligible.length) {
+    const err = document.getElementById('ns-err');
+    if (err) {
+      err.textContent = 'Create a target with a dedicated ArangoDB database first; the demo will not load into _system.';
+      err.style.display = '';
+    }
+    return;
+  }
+  if (eligible.length === 1) {
+    await installCustomer360SnowflakeDemo(eligible[0].name);
+    return;
+  }
+  const options = eligible.map(t =>
+    `<option value="${escHtml(t.name)}">${escHtml(t.name)} \u2014 ${escHtml(t.database)}</option>`
+  ).join('');
+  openModal(
+    'Choose Customer 360 target',
+    `<div class="fc-form"><label>ArangoDB target<select id="customer360-target">${options}</select></label><div class="hint">The demo project will use this existing target. Snowflake remains read-only in Studio.</div></div>`,
+    '<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="installCustomer360SnowflakeDemo(document.getElementById(\'customer360-target\').value)">Continue</button>'
+  );
+}
+
+async function installCustomer360SnowflakeDemo(targetName) {
+  closeModal();
+  closeFloatingCard('new-source');
+  openFloatingCard({
+    id: 'snowflake-customer360-install',
+    title: 'Snowflake Customer 360',
+    status: { label: 'Connecting', kind: 'running' },
+    position: { right: 40, top: 80 },
+    body: `
+      <div class="fc-form">
+        <div>\u25cf Connect with the read-only Snowflake role</div>
+        <div>\u25cb Snapshot five tables</div>
+        <div>\u25cb Apply reviewed keys and generate graph edges</div>
+        <div>\u25cb Open the project</div>
+      </div>`,
+    actions: [],
+  });
+  try {
+    const result = await apiFetch('/api/demo-presets/snowflake-customer-360/install', {
+      method: 'POST',
+      body: JSON.stringify({ target_name: targetName }),
+    });
+    const summary = result.overlay?.summary || {};
+    openFloatingCard({
+      id: 'snowflake-customer360-install',
+      title: 'Snowflake Customer 360',
+      status: { label: 'Ready', kind: 'success' },
+      body: `
+        <div class="fc-form">
+          <div>\u2713 ${escHtml(result.snapshot.tables)} Snowflake tables (${escHtml(result.snapshot.status)})</div>
+          <div>\u2713 Curated key overlay: ${escHtml(summary.primaryKeys || 0)} PKs, ${escHtml(summary.foreignKeys || 0)} FKs</div>
+          <div>\u2713 Graph mapping: ${escHtml(result.mapping.collections)} vertices, ${escHtml(result.mapping.edges)} edges</div>
+          <div class="hint">Curated relationships are asserted for graph mapping; Snowflake does not enforce them.</div>
+        </div>`,
+      actions: [
+        { label: 'Close', onClick: () => closeFloatingCard('snowflake-customer360-install') },
+      ],
+    });
+    await Promise.all([loadSources(), loadTargets(), loadProjects()]);
+    await selectProject(result.project.name);
+    toast('Customer 360 demo is ready', 'success');
+  } catch (e) {
+    openFloatingCard({
+      id: 'snowflake-customer360-install',
+      title: 'Snowflake Customer 360',
+      status: { label: 'Needs attention', kind: 'error' },
+      body: `<div class="err">${escHtml(e.message)}</div><div class="hint" style="margin-top:8px">Run <code>examples/snowflake_customer_360/bootstrap.py</code>, verify the key file and roles, then retry. Existing partial setup is safe to reuse.</div>`,
+      actions: [
+        { label: 'Retry', kind: 'primary', onClick: () => installCustomer360SnowflakeDemo(targetName) },
+        { label: 'Close', onClick: () => closeFloatingCard('snowflake-customer360-install') },
+      ],
+    });
+  }
 }
 
 // ── Import from external data catalog (Phase 8b) ──
@@ -2127,6 +2224,9 @@ function _menuProject(name) {
   return [
     { label: 'Open database\u2026', icon: '\u2197', onClick: () => openProjectDatabase(name),
       hint: 'Open this project\u2019s target database in the ArangoDB web UI in a new tab.' },
+    { label: 'View arangoimport script bundle', icon: '\u2328',
+      onClick: () => window.openArangoImportViewer({ scope: 'all' }),
+      hint: 'Inspect or download a secret-safe alternative batch import script. Studio Load continues to stream over HTTP.' },
     { label: 'Edit name & description\u2026', icon: '\u270E', onClick: () => openEditProjectForm(name),
       hint: 'Rename the project or change its description, target endpoint, and database. Does not touch already-loaded data.' },
     '-',
@@ -2205,6 +2305,9 @@ function openActionsMenu(ev) {
     { label: 'Export YAML', icon: '\u2913', disabled: dis,
       hint: 'Export the current mapping configuration as a YAML file you can copy or download.',
       onClick: exportYaml },
+    { label: 'View arangoimport script bundle', icon: '\u2328', disabled: dis,
+      hint: 'Inspect or download a generated alternative batch import script. Studio Load continues to stream over HTTP.',
+      onClick: () => window.openArangoImportViewer({ scope: 'all' }) },
     { label: 'Load history', icon: '\u21BB', disabled: dis,
       hint: 'View past load runs for this project with row counts, errors, and status.',
       onClick: showHistory },
@@ -3420,6 +3523,19 @@ function showEdgeProps(edgeColl) {
   const edgeIdx = editState.edges.findIndex(e => e.edgeCollection === edgeColl);
   const edge = editState.edges[edgeIdx];
   if (!edge) { body.innerHTML = '<div class="empty-state">Edge not found</div>'; return; }
+  const provenance = edge.keyProvenance || '';
+  const provenanceHtml = provenance === 'curated-overlay' ? `
+    <div class="prop-group">
+      <div class="prop-group-title">Constraint provenance</div>
+      <div class="prop-row"><span class="prop-label">Source</span><span class="prop-value" style="color:var(--green)">Curated key overlay</span></div>
+      <div style="font-size:11px;color:var(--text-muted);line-height:1.5;margin-top:6px">Snowflake does not enforce this relationship. The reviewed overlay asserts it for graph mapping.</div>
+      ${edge.constraintName ? `<div class="prop-row"><span class="prop-label">Constraint</span><span class="prop-value">${escHtml(edge.constraintName)}</span></div>` : ''}
+    </div>` : (provenance === 'source-declared' ? `
+    <div class="prop-group">
+      <div class="prop-group-title">Constraint provenance</div>
+      <div class="prop-row"><span class="prop-label">Source</span><span class="prop-value">Source-declared</span></div>
+      <div class="prop-row"><span class="prop-label">Enforced</span><span class="prop-value">${edge.enforced === false ? 'No' : 'Yes'}</span></div>
+    </div>` : '');
 
   header.textContent = 'Edge: ' + edgeColl;
   body.innerHTML = `
@@ -3437,7 +3553,8 @@ function showEdgeProps(edgeColl) {
       <div class="prop-row"><span class="prop-label">To</span><span class="prop-value" style="color:var(--green)">${escHtml(edge.toCollection)}</span></div>
       <div class="prop-row"><span class="prop-label">FK field</span><span class="prop-value" style="color:var(--yellow)">${escHtml(edge.fromField)}</span></div>
       <div class="prop-row"><span class="prop-label">PK field</span><span class="prop-value">${escHtml(edge.toField)}</span></div>
-    </div>`;
+    </div>
+    ${provenanceHtml}`;
 }
 
 function showConnectorProps(pathEl) {
@@ -6062,6 +6179,9 @@ function _menuTargetCollection(collKey) {
       hint: 'Start drawing a new edge originating from this collection to another target vertex.' },
     { label: 'Reveal source table', icon: '\u2139', onClick: () => revealSourceTable(coll.sourceTable || collKey),
       hint: 'Scroll to and highlight the source table that feeds this collection.' },
+    { label: 'View arangoimport command', icon: '\u2328',
+      onClick: () => window.openArangoImportViewer({ scope: 'collection', mappingId: collKey }),
+      hint: 'Show the exact generated batch command for this table-to-vertex mapping.' },
     '-',
     { label: 'Inspect', icon: '\u2139', onClick: () => onTargetCardClick(collKey),
       hint: 'Open the detail panel for this collection (properties, mappings, validation).' },
@@ -6136,6 +6256,9 @@ function _menuTargetEdge(edgeColl) {
       hint: 'Swap the _from and _to endpoints so the edge points the other way.' },
     { label: 'Rename collection\u2026', icon: '\u270E', onClick: () => renameEdgeCollection(edgeColl),
       hint: 'Rename the edge collection. If already loaded, saving offers an in-place rename migration.' },
+    { label: 'View arangoimport command', icon: '\u2328',
+      onClick: () => window.openArangoImportViewer({ scope: 'edge', mappingId: edgeColl }),
+      hint: 'Show the exact generated batch command for this FK-to-edge mapping.' },
     '-',
     { label: 'Inspect', icon: '\u2139', onClick: () => inspectEdge(edgeColl),
       hint: 'Open the detail panel for this edge.' },
@@ -6167,6 +6290,9 @@ function _menuCanvas() {
       hint: 'Persist the mapping config. If the target has already been loaded and names changed, you will be offered an in-place migration.' },
     { label: 'Load\u2026', icon: '\u25B6', shortcut: '\u2318\u23CE', onClick: showLoadModal,
       hint: 'Run the ingestion pipeline: stream data from the source into ArangoDB using the saved mapping and parallelism settings.' },
+    { label: 'View arangoimport script bundle', icon: '\u2328',
+      onClick: () => window.openArangoImportViewer({ scope: 'all' }),
+      hint: 'Inspect or download a generated alternative batch import script. Studio Load continues to stream over HTTP.' },
     '-',
     { label: 'View as', icon: '\u25CD', submenu: [
       { label: 'Topology' + (currentLens === 'topology' ? '  \u2713' : ''), shortcut: '1', onClick: () => setLens('topology') },
@@ -6215,7 +6341,7 @@ function _menuTargetsItem(name) {
 function _menuSourcesPanel() {
   return [
     { label: 'New source\u2026', icon: '\u002B', onClick: () => openNewSourceForm(),
-      hint: 'Register a new data source (PostgreSQL, Snowflake, CSV, Kafka). Its schema is introspected automatically on save.' },
+      hint: 'Register a new data source (PostgreSQL, MySQL, SQL Server, Snowflake, ClickHouse, CSV, Kafka). Its schema is introspected automatically on save.' },
   ];
 }
 
@@ -7055,7 +7181,7 @@ function renderLegend() {
         <div class="legend-section-title">Color key</div>
         <div class="legend-row">
           <span class="legend-swatch"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:var(--accent)"></span></span>
-          <span class="legend-text">Blue = relational source <small>(non-Arango: PostgreSQL, CSV, Kafka)</small></span>
+          <span class="legend-text">Blue = source data <small>(PostgreSQL, MySQL, SQL Server, Snowflake, ClickHouse, CSV, Kafka)</small></span>
         </div>
         <div class="legend-row">
           <span class="legend-swatch"><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:var(--green)"></span></span>
@@ -7728,5 +7854,6 @@ document.addEventListener('DOMContentLoaded', () => {
   if (hint) hint.style.display = '';
 });
 </script>
+<script src="/static/arangoimport-viewer.js"></script>
 </body>
 </html>

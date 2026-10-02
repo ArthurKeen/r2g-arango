@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import stat
 
 import pytest
@@ -102,6 +103,128 @@ class TestGenerateScript:
         assert path.exists()
         disk_content = path.read_text(encoding="utf-8")
         assert disk_content.startswith("#!/usr/bin/env bash")
+
+
+class TestStructuredPreview:
+    def test_plan_preserves_mapping_identity_and_cli_commands(
+        self, generator, tmp_path
+    ):
+        plan = generator.build_plan(graph_name="demo")
+        written = generator.generate_script(str(tmp_path / "import.sh"))
+
+        assert [item.mapping_id for item in plan.documents] == [
+            "users",
+            "orders",
+        ]
+        assert plan.edges[0].mapping_id == "orders_to_users"
+        for item in (*plan.documents, *plan.edges):
+            assert item.command in written
+        assert written.index("Importing document") < written.index(
+            "Importing edge"
+        )
+
+    def test_secret_safe_plan_never_emits_credentials(self, simple_config):
+        generator = ArangoImportGenerator(
+            simple_config,
+            endpoint="http://admin:sentinel-target-secret@localhost:8529",
+            password="sentinel-password",
+        )
+
+        plan = generator.build_plan()
+
+        assert "sentinel-password" not in plan.script
+        assert "sentinel-target-secret" not in plan.script
+        assert '"$ARANGO_PASSWORD"' in plan.script
+
+    def test_plan_uses_fixed_jsonl_artifact_root(self, generator):
+        plan = generator.build_plan()
+        assert plan.data_dir == "./output"
+        assert "./output/users.jsonl" in plan.documents[0].command
+
+    def test_custom_artifact_root_is_shell_quoted(self, simple_config):
+        artifact_dir = "./demo artifacts;touch should-not-run"
+        plan = ArangoImportGenerator(
+            simple_config,
+            data_dir=artifact_dir,
+        ).build_plan()
+        command = shlex.split(plan.documents[0].command)
+
+        assert command[command.index("--file") + 1] == (
+            f"{artifact_dir}/users.jsonl"
+        )
+
+    def test_graph_artifact_is_runnable_secret_safe_shell(
+        self, simple_config
+    ):
+        plan = ArangoImportGenerator(
+            simple_config,
+            endpoint="http://admin:target-secret@localhost:8529",
+            password="password-secret",
+        ).build_plan(graph_name="demo")
+
+        assert plan.graph_script.startswith("#!/usr/bin/env bash")
+        assert "arangosh" in plan.graph_script
+        assert '"$ARANGO_PASSWORD"' in plan.graph_script
+        assert "password-secret" not in plan.graph_script
+        assert "target-secret" not in plan.graph_script
+        assert "# === Named graph ===" in plan.script
+
+    def test_build_plan_builds_each_spec_group_once(
+        self, generator, monkeypatch
+    ):
+        document_calls = 0
+        edge_calls = 0
+        original_documents = generator.build_document_specs
+        original_edges = generator.build_edge_specs
+
+        def documents(*args, **kwargs):
+            nonlocal document_calls
+            document_calls += 1
+            return original_documents(*args, **kwargs)
+
+        def edges(*args, **kwargs):
+            nonlocal edge_calls
+            edge_calls += 1
+            return original_edges(*args, **kwargs)
+
+        monkeypatch.setattr(generator, "build_document_specs", documents)
+        monkeypatch.setattr(generator, "build_edge_specs", edges)
+
+        generator.build_plan()
+
+        assert document_calls == 1
+        assert edge_calls == 1
+
+    def test_lpg_preview_is_rejected(self, simple_config):
+        config = simple_config.model_copy(update={"graph_layout": "lpg"})
+        with pytest.raises(ValueError, match="does not support LPG"):
+            ArangoImportGenerator(config).build_plan()
+
+    def test_renamed_collections_are_used_in_graph_artifact(self):
+        config = MappingConfig(
+            collections={
+                "orders": CollectionMapping(
+                    source_table="orders",
+                    target_collection="Purchase",
+                ),
+                "users": CollectionMapping(
+                    source_table="users",
+                    target_collection="Customer",
+                ),
+            },
+            edges=[
+                EdgeDefinition(
+                    edge_collection="PLACED_BY",
+                    from_collection="orders",
+                    to_collection="users",
+                    from_field="user_id",
+                    to_field="id",
+                )
+            ],
+        )
+        graph = ArangoImportGenerator(config).build_plan().graph_script
+        assert '"Purchase"' in graph
+        assert '"Customer"' in graph
 
 
 class TestGenerateCreateGraphAql:
