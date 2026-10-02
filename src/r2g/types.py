@@ -115,6 +115,23 @@ class Table(_RsaTable):
             out["unique_constraints"] = full["unique_constraints"]
         return out
 
+    @model_validator(mode="after")
+    def _derive_column_uniqueness(self) -> "Table":
+        # Column.is_unique is not persisted (r2g's Column keeps its historical
+        # key set), but RSA sets it at capture for exactly two cases -- a
+        # single-column PK and a single-column UNIQUE key -- and its ontology
+        # baseline reads only that flag. Both sources are persisted at table
+        # level, so re-derive it here: a reloaded table then answers "is this a
+        # key column?" the same way it did when captured, with no change on disk.
+        # Only ever sets the flag; never clears one a capture set for another reason.
+        single = {u[0] for u in self.unique_constraints if len(u) == 1}
+        if len(self.primary_key) == 1:
+            single.add(self.primary_key[0])
+        for col in self.columns:
+            if col.name in single:
+                col.is_unique = True
+        return self
+
 
 class Schema(_RsaSchema):
     """Physical schema: the shared RSA :class:`PhysicalSchema` narrowed to r2g's

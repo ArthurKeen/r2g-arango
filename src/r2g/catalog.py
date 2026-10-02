@@ -135,10 +135,28 @@ class SchemaSnapshot(BaseModel):
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
         out = handler(self)
+        version = out.get("schema_format_version", 1)
+        # A snapshot written by a *newer* r2g may carry fields this version's
+        # serializers drop. Re-saving it here writes this version's format, so
+        # the marker must say so -- never claim a format whose data was just lost.
+        if version > CURRENT_SCHEMA_FORMAT:
+            version = CURRENT_SCHEMA_FORMAT
+        out["schema_format_version"] = version
         # Omitted at format 1 so legacy snapshots re-save byte-identically.
-        if out.get("schema_format_version") == 1:
+        if version == 1:
             out.pop("schema_format_version")
         return out
+
+    @property
+    def lost_overlay_unique_keys(self) -> bool:
+        """True when a reviewed overlay declared UNIQUE keys this snapshot dropped.
+
+        Format-1 snapshots could not store UNIQUE keys, so any the overlay
+        declared were erased on save -- and with them every FK inferred through
+        those natural keys. The overlay summary records how many were declared,
+        which is what makes the loss detectable. Re-capture to recover them.
+        """
+        return self.schema_format_version < 2 and self.key_overlay_summary.get("uniqueConstraints", 0) > 0
 
 
 class Project(BaseModel):
@@ -479,7 +497,16 @@ class CatalogManager:
         matching = [s for s in catalog.snapshots.values() if s.source_name == source_name]
         if not matching:
             return None
-        return max(matching, key=lambda s: s.captured_at)
+        latest = max(matching, key=lambda s: s.captured_at)
+        if latest.lost_overlay_unique_keys:
+            logger.warning(
+                "snapshot_lost_overlay_unique_keys",
+                source=source_name,
+                snapshot=latest.id,
+                declared=latest.key_overlay_summary.get("uniqueConstraints", 0),
+                hint="this snapshot predates UNIQUE-key persistence; re-snapshot the source",
+            )
+        return latest
 
     def list_snapshots(self, source_name: str) -> list[SchemaSnapshot]:
         catalog = self._load()

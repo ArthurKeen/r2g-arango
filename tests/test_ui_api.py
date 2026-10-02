@@ -402,6 +402,76 @@ class TestSnowflakeCustomer360Preset:
         assert second.json()["snapshot"]["status"] == "created"
         assert captures == 2
 
+    def test_install_rebuilds_a_snapshot_that_lost_overlay_unique_keys(
+        self, client, catalog_dir, monkeypatch, tmp_path
+    ):
+        """A format-1 snapshot erased the overlay's UNIQUE keys on save, so reusing
+        it -- even with matching source, tables and fingerprint -- would silently
+        drop every FK inferred through those natural keys."""
+        import r2g.demo.snowflake_customer_360 as demo
+        from r2g.catalog import SchemaSnapshot
+
+        bundled = demo.load_overlay()
+        with_unique = {
+            **bundled,
+            "tables": {
+                **bundled["tables"],
+                "ACCOUNTS": {
+                    **bundled["tables"]["ACCOUNTS"],
+                    "uniqueConstraints": [["ACCOUNT_ID"]],
+                },
+            },
+        }
+        monkeypatch.setattr(demo, "load_overlay", lambda: with_unique)
+        self._set_environment(monkeypatch, tmp_path)
+        captures = 0
+
+        def capture(*args, **kwargs):
+            nonlocal captures
+            captures += 1
+            return self._fake_capture(*args, **kwargs)
+
+        monkeypatch.setattr("r2g.snapshot.capture_source_snapshot", capture)
+        assert (
+            client.post(
+                "/api/targets",
+                json={
+                    "name": "demo_arango",
+                    "endpoint": "http://localhost:8529",
+                    "database": "customer360_demo",
+                    "username": "root",
+                    "password": "target-secret",
+                },
+            ).status_code
+            == 201
+        )
+        first = client.post(
+            "/api/demo-presets/snowflake-customer-360/install",
+            json={"target_name": "demo_arango"},
+        )
+        assert first.status_code == 200, first.text
+
+        # Plant what an older r2g left behind: identical in every compared field,
+        # but format 1, so the overlay's UNIQUE keys are gone from schema_data.
+        mgr = CatalogManager(catalog_dir)
+        latest = mgr.get_latest_snapshot("snowflake_customer_360")
+        assert latest is not None
+        legacy = latest.model_dump(mode="json")
+        legacy.update(id="legacy", captured_at="2099-01-01T00:00:00Z")
+        legacy.pop("schema_format_version", None)
+        catalog = mgr._load()
+        catalog.snapshots["legacy"] = SchemaSnapshot.model_validate(legacy)
+        mgr._save(catalog)
+        assert mgr.get_latest_snapshot("snowflake_customer_360").lost_overlay_unique_keys
+
+        second = client.post(
+            "/api/demo-presets/snowflake-customer-360/install",
+            json={"target_name": "demo_arango"},
+        )
+        assert second.status_code == 200, second.text
+        assert second.json()["snapshot"]["status"] == "created"
+        assert captures == 2
+
 
 class TestInferFksEndpoint:
     def _setup(self, client, catalog_dir):

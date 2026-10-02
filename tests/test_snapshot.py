@@ -248,20 +248,37 @@ def test_new_snapshots_are_stamped_with_the_current_storage_format(monkeypatch, 
 
     # Format 2 means the snapshot *can* hold UNIQUE keys. It does not promise the
     # capture looked for them: r2g's connectors read none yet (Plan B).
-    assert CURRENT_SCHEMA_FORMAT == 2
     assert reloaded.schema_format_version == CURRENT_SCHEMA_FORMAT
 
 
 def test_legacy_snapshot_reads_as_format_1_and_resaves_byte_identically():
-    from datetime import datetime, timezone
-
     from r2g.catalog import SchemaSnapshot
 
+    # Exactly what a pre-format-2 r2g wrote: no marker, pydantic's own "Z" timestamp.
     legacy = {
         "id": "s1",
         "source_name": "pg",
-        "schema_data": {"tables": {}},
-        "captured_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+        "schema_data": {
+            "tables": {
+                "t": {
+                    "name": "t",
+                    "columns": [
+                        {
+                            "name": "id",
+                            "data_type": "int",
+                            "is_nullable": False,
+                            "is_primary_key": True,
+                            "classification": None,
+                        }
+                    ],
+                    "primary_key": ["id"],
+                    "foreign_keys": [],
+                    "is_partitioned": False,
+                    "partition_of": None,
+                }
+            }
+        },
+        "captured_at": "2026-01-01T00:00:00Z",
         "pg_schema": "public",
         "key_overlay_summary": {},
         "key_overlay_source": None,
@@ -269,10 +286,9 @@ def test_legacy_snapshot_reads_as_format_1_and_resaves_byte_identically():
     }
     snap = SchemaSnapshot.model_validate(legacy)
 
-    # A snapshot written before format 2 never recorded uniqueness, so its empty
-    # unique_constraints must not be read as "this table has no unique keys".
+    # Format 1 could not hold UNIQUE keys, so its empty unique_constraints says nothing.
     assert snap.schema_format_version == 1
-    assert "schema_format_version" not in snap.model_dump(mode="json")
+    assert snap.model_dump(mode="json") == legacy
 
 
 def test_table_without_uniqueness_serializes_its_historical_keys_only():
@@ -285,3 +301,99 @@ def test_table_without_uniqueness_serializes_its_historical_keys_only():
         "is_partitioned",
         "partition_of",
     ]
+
+
+# ── Second review of #12 ─────────────────────────────────────────────────────
+
+
+def test_reload_rederives_column_uniqueness_so_ontology_keys_match_capture(monkeypatch, tmp_path, natural_key_schema):
+    """RSA's ontology baseline reads only Column.is_unique, which is not persisted."""
+    from relational_schema_analyzer.baseline import _is_key_column
+
+    overlay = {
+        "version": 1,
+        "tables": {
+            "ACCOUNTS": {"primaryKey": ["ACCOUNT_ID"], "uniqueConstraints": [["ACCOUNT_CODE"]]},
+            "ORDERS": {"primaryKey": ["ORDER_ID"]},
+        },
+    }
+    reloaded = _capture_with_overlay(monkeypatch, tmp_path, natural_key_schema, overlay)
+    accounts = reloaded.schema_data.tables["ACCOUNTS"]
+    code = next(c for c in accounts.columns if c.name == "ACCOUNT_CODE")
+    pk = next(c for c in accounts.columns if c.name == "ACCOUNT_ID")
+
+    assert code.is_unique and pk.is_unique
+    assert _is_key_column(code, accounts.primary_key)
+    # Derived, not stored: the column's persisted key set is unchanged.
+    assert "is_unique" not in code.model_dump()
+
+
+def test_rederiving_uniqueness_does_not_mark_composite_key_members():
+    table = Table(
+        name="T",
+        primary_key=["A", "B"],
+        unique_constraints=[["C", "D"]],
+        columns=[Column(name=n, data_type="int") for n in "ABCD"],
+    )
+    assert not any(c.is_unique for c in table.columns)
+
+
+def test_snapshot_from_a_newer_format_resaves_as_this_format():
+    from r2g.catalog import CURRENT_SCHEMA_FORMAT, SchemaSnapshot
+
+    newer = SchemaSnapshot.model_validate(
+        {
+            "id": "s9",
+            "source_name": "pg",
+            "schema_data": {"tables": {}},
+            "captured_at": "2026-01-01T00:00:00Z",
+            "schema_format_version": CURRENT_SCHEMA_FORMAT + 1,
+        }
+    )
+    # This version's serializers may drop what the newer format stores, so the
+    # re-saved marker must not keep claiming the newer format.
+    assert newer.model_dump(mode="json")["schema_format_version"] == CURRENT_SCHEMA_FORMAT
+
+
+@pytest.mark.parametrize(
+    ("version", "declared", "lost"),
+    [(1, 2, True), (1, 0, False), (2, 2, False)],
+)
+def test_lost_overlay_unique_keys_detects_only_a_real_loss(version, declared, lost):
+    from r2g.catalog import SchemaSnapshot
+
+    snap = SchemaSnapshot.model_validate(
+        {
+            "id": "s1",
+            "source_name": "wh",
+            "schema_data": {"tables": {}},
+            "captured_at": "2026-01-01T00:00:00Z",
+            "key_overlay_summary": {"uniqueConstraints": declared},
+            "schema_format_version": version,
+        }
+    )
+    assert snap.lost_overlay_unique_keys is lost
+
+
+def test_latest_snapshot_warns_when_it_lost_overlay_unique_keys(monkeypatch, tmp_path):
+    import r2g.catalog as catalog_mod
+    from r2g.catalog import SchemaSnapshot
+
+    mgr = CatalogManager(tmp_path)
+    mgr.add_source("wh", "snowflake", "snowflake://user:password@account/DB/SCHEMA")
+    catalog = mgr._load()
+    catalog.snapshots["old"] = SchemaSnapshot.model_validate(
+        {
+            "id": "old",
+            "source_name": "wh",
+            "schema_data": {"tables": {}},
+            "captured_at": "2026-01-01T00:00:00Z",
+            "key_overlay_summary": {"uniqueConstraints": 1},
+        }
+    )
+    mgr._save(catalog)
+    warnings: list[str] = []
+    monkeypatch.setattr(catalog_mod.logger, "warning", lambda event, **kw: warnings.append(event))
+
+    assert mgr.get_latest_snapshot("wh").id == "old"
+    assert warnings == ["snapshot_lost_overlay_unique_keys"]

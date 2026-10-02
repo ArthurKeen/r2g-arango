@@ -18,6 +18,11 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not introspection: r2g's connectors do not read declared UNIQUE constraints yet, so today
   UNIQUE keys reach a snapshot only through a key overlay. Re-snapshot a source to recover
   overlay UNIQUE keys an older snapshot dropped.
+  Related: a reloaded table now re-derives each column's `is_unique` flag from its persisted
+  single-column primary and UNIQUE keys, so ontology key detection agrees with the capture; a
+  format-1 snapshot whose overlay declared UNIQUE keys is detected, logged on load, and never
+  reused by the Customer 360 preset; and a snapshot from a newer r2g re-saves under this
+  version's format marker rather than claiming data it just dropped.
 
 ### Added
 

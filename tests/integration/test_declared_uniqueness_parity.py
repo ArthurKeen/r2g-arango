@@ -116,14 +116,20 @@ def test_neither_side_reads_a_unique_index_yet(uniqueness_schema):
     assert _unique(r2g, "stores") == []
 
 
-def test_natural_key_fk_survives_snapshot_persistence(uniqueness_schema):
-    """RSA's real introspection, through r2g's Schema, saved and reloaded."""
-    rsa = rsa_create_source_connector("postgresql", PG_CONN, uniqueness_schema).get_schema()
-    schema = Schema.model_validate(rsa.model_dump())
-    reloaded = Schema.model_validate_json(schema.model_dump_json())
+def test_natural_key_fk_survives_snapshot_persistence(uniqueness_schema, tmp_path):
+    """RSA's real introspection, stored through the catalog and reloaded from disk."""
+    from r2g.catalog import CatalogManager
 
-    assert _unique(reloaded, "accounts") == [["account_code"]]
+    rsa = rsa_create_source_connector("postgresql", PG_CONN, uniqueness_schema).get_schema()
+    mgr = CatalogManager(tmp_path)
+    mgr.add_source("pg", "postgresql", PG_CONN)
+    mgr.create_snapshot("pg", Schema.model_validate(rsa.model_dump()), pg_schema=uniqueness_schema)
+    reloaded = CatalogManager(tmp_path).get_latest_snapshot("pg")
+    assert reloaded is not None
+    schema = reloaded.schema_data
+
+    assert _unique(schema, "accounts") == [["account_code"]]
     inferred = {
-        (c.table, tuple(c.columns), c.foreign_table, tuple(c.foreign_columns)) for c in infer_foreign_keys(reloaded)
+        (c.table, tuple(c.columns), c.foreign_table, tuple(c.foreign_columns)) for c in infer_foreign_keys(schema)
     }
     assert ("orders", ("account_code",), "accounts", ("account_code",)) in inferred
