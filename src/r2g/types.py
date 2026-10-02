@@ -98,7 +98,7 @@ class Table(_RsaTable):
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
         full = handler(self)
-        return {
+        out = {
             "name": full["name"],
             "columns": full["columns"],
             "primary_key": full["primary_key"],
@@ -106,6 +106,14 @@ class Table(_RsaTable):
             "is_partitioned": full["is_partitioned"],
             "partition_of": full["partition_of"],
         }
+        # UNIQUE keys are FK-inference *targets* (RSA indexes candidate keys as
+        # PK or UNIQUE), so dropping them on save silently erased every FK
+        # inferred through a natural key once the catalog reloaded the snapshot.
+        # Written last and only when present, so every table without one --
+        # i.e. every snapshot persisted before this -- stays byte-identical.
+        if full.get("unique_constraints"):
+            out["unique_constraints"] = full["unique_constraints"]
+        return out
 
 
 class Schema(_RsaSchema):

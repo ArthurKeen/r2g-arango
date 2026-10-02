@@ -7,6 +7,16 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **UNIQUE keys were lost when a snapshot was saved.** r2g's table serializer kept primary and
+  foreign keys but not `unique_constraints`, so a UNIQUE key present at capture -- including one
+  declared in a reviewed key overlay -- vanished on catalog reload, and any FK inferred through
+  that natural key vanished with it. UNIQUE keys are now persisted; tables without one serialize
+  byte-identically to before. New snapshots record `schema_format_version: 2`; older snapshots
+  read as format 1 ("uniqueness not recorded") and re-save unchanged. Re-snapshot a source to
+  recover uniqueness that an older snapshot dropped.
+
 ### Added
 
 - **Snowflake Customer 360 Studio demo.** Snowflake URLs now support

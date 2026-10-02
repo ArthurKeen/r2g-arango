@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer
 
 from r2g.log import get_logger
 from r2g.security import CredentialCipher, load_secret_key
@@ -16,6 +16,11 @@ from r2g.types import Classification, Schema
 logger = get_logger(__name__)
 
 _PROJECT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*")
+
+#: Persisted shape of ``SchemaSnapshot.schema_data``. Format 1 (no marker on
+#: disk) predates UNIQUE-key persistence: its empty ``unique_constraints`` means
+#: "not recorded", not "none". Format 2 records them, so empty means none.
+CURRENT_SCHEMA_FORMAT = 2
 
 
 def validate_project_name(value: str) -> str:
@@ -119,6 +124,17 @@ class SchemaSnapshot(BaseModel):
     key_overlay_summary: dict[str, int] = Field(default_factory=dict)
     key_overlay_source: str | None = None
     key_overlay_fingerprint: str | None = None
+    # Defaults to the legacy format so anything not deliberately stamped by
+    # create_snapshot is treated as "uniqueness not recorded" -- the safe reading.
+    schema_format_version: int = 1
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        out = handler(self)
+        # Omitted at format 1 so legacy snapshots re-save byte-identically.
+        if out.get("schema_format_version") == 1:
+            out.pop("schema_format_version")
+        return out
 
 
 class Project(BaseModel):
@@ -436,6 +452,7 @@ class CatalogManager:
             key_overlay_summary=key_overlay_summary or {},
             key_overlay_source=key_overlay_source,
             key_overlay_fingerprint=key_overlay_fingerprint,
+            schema_format_version=CURRENT_SCHEMA_FORMAT,
         )
         catalog.snapshots[snap.id] = snap
         self._save(catalog)
