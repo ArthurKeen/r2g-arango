@@ -98,7 +98,7 @@ class Table(_RsaTable):
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
         full = handler(self)
-        return {
+        out = {
             "name": full["name"],
             "columns": full["columns"],
             "primary_key": full["primary_key"],
@@ -106,6 +106,31 @@ class Table(_RsaTable):
             "is_partitioned": full["is_partitioned"],
             "partition_of": full["partition_of"],
         }
+        # UNIQUE keys are FK-inference *targets* (RSA indexes candidate keys as
+        # PK or UNIQUE), so dropping them on save silently erased every FK
+        # inferred through a natural key once the catalog reloaded the snapshot.
+        # Written last and only when present, so every table without one --
+        # i.e. every snapshot persisted before this -- stays byte-identical.
+        if full.get("unique_constraints"):
+            out["unique_constraints"] = full["unique_constraints"]
+        return out
+
+    @model_validator(mode="after")
+    def _derive_column_uniqueness(self) -> "Table":
+        # Column.is_unique is not persisted (r2g's Column keeps its historical
+        # key set), but RSA sets it at capture for exactly two cases -- a
+        # single-column PK and a single-column UNIQUE key -- and its ontology
+        # baseline reads only that flag. Both sources are persisted at table
+        # level, so re-derive it here: a reloaded table then answers "is this a
+        # key column?" the same way it did when captured, with no change on disk.
+        # Only ever sets the flag; never clears one a capture set for another reason.
+        single = {u[0] for u in self.unique_constraints if len(u) == 1}
+        if len(self.primary_key) == 1:
+            single.add(self.primary_key[0])
+        for col in self.columns:
+            if col.name in single:
+                col.is_unique = True
+        return self
 
 
 class Schema(_RsaSchema):

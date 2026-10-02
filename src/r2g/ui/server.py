@@ -312,6 +312,9 @@ def create_app(
             and latest.key_overlay_summary == expected_overlay_summary
             and latest.key_overlay_fingerprint
             == expected_overlay_fingerprint
+            # An older snapshot that dropped overlay UNIQUE keys is not reusable
+            # even if everything else matches: its natural-key FKs are gone.
+            and not latest.lost_overlay_unique_keys
         )
         try:
             if snapshot_reusable:
