@@ -7,6 +7,17 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **relational-schema-analyzer raised to `>=0.9.0,<0.10.0`.** RSA 0.9.0 reports a unique
+  index with no constraint as a UNIQUE key, so foreign keys that reference such a column are
+  now inferred. On Postgres this is common (pagila's `store.manager_staff_id`). These keys
+  are stored in `unique_constraints`, which snapshots already keep, so the inferred FK
+  survives a catalog reload. Schemas with such indexes fingerprint differently once after
+  upgrading. 0.9.0 also adds the Snowflake value sampler, primary-key profiling and draft
+  key overlays that `r2g source suggest-keys` will build on. r2g's own connectors still
+  read neither UNIQUE constraints nor unique indexes; that is Plan B.
+
 ### Fixed
 
 - **UNIQUE keys were lost when a snapshot was saved.** r2g's table serializer kept primary and
