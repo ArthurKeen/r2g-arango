@@ -152,3 +152,21 @@ def test_an_invalid_overlay_file_is_rejected(warehouse):
     (warehouse / "bad.json").write_text(json.dumps({"version": 1, "tables": {"X": {"oops": 1}}}))
     result = runner.invoke(app, ["source", "set-key-overlay", "wh", "bad.json"])
     assert result.exit_code == 1 and "Not a valid key overlay" in result.output
+
+
+def test_a_sampler_that_cannot_connect_fails_loudly_and_writes_nothing(warehouse, monkeypatch):
+    # r2g's connector reads the schema; RSA's sampler opens its own connection. If
+    # only the sampler fails (say it parses a key-pair URL differently), every probe
+    # declines -- which must not pass for a clean run that found no keys.
+    class _Refuses:
+        @staticmethod
+        def connect(**_params):
+            raise RuntimeError("Incorrect username or password was specified.")
+
+    monkeypatch.setattr(
+        "relational_schema_analyzer.connectors.snowflake._load_snowflake_connector", lambda: _Refuses
+    )
+    result = runner.invoke(app, ["source", "suggest-keys", "wh"])
+    assert result.exit_code == 1, result.output
+    assert "could not connect" in result.output
+    assert not (warehouse / "wh.keys.draft.json").exists()

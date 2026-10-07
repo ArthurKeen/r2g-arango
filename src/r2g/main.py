@@ -2386,16 +2386,9 @@ def source_suggest_keys(
         console.print(f"[red]{out_path} exists.[/red] Pass --force to overwrite it.")
         raise typer.Exit(code=1)
 
-    try:
-        # unused-ignore: these exist from relational-schema-analyzer 0.8.1; drop the
-        # ignore once pyproject requires it.
-        from relational_schema_analyzer.fk_inference import (  # type: ignore[attr-defined, unused-ignore]
-            SnowflakeValueSampler,
-        )
-        from relational_schema_analyzer.key_profiling import draft_key_overlay
-    except ImportError:
-        console.print("[red]This needs relational-schema-analyzer with key profiling (0.8.1 or later).[/red]")
-        raise typer.Exit(code=1)
+    # Both arrived in relational-schema-analyzer 0.9.0, the floor pyproject requires.
+    from relational_schema_analyzer.fk_inference import SnowflakeValueSampler
+    from relational_schema_analyzer.key_profiling import draft_key_overlay
 
     try:
         connector = create_source_connector(
@@ -2424,6 +2417,15 @@ def source_suggest_keys(
     except Exception as e:  # noqa: BLE001
         log.exception("source_suggest_keys_failed")
         console.print(f"[red]Key suggestion failed:[/red] {e}")
+        raise typer.Exit(code=1)
+
+    # A sampler that never connected declines every probe, which would otherwise
+    # read as a clean run that found no keys (exit 0, "Cost: 0 queries").
+    if stats.get("connect_failed"):
+        console.print(
+            "[red]Key suggestion failed:[/red] the sampler could not connect to Snowflake, "
+            "so no table was profiled. No draft written."
+        )
         raise typer.Exit(code=1)
 
     out_path.write_text(json.dumps(draft.overlay, indent=2) + "\n")
