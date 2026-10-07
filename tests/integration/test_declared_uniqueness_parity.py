@@ -13,16 +13,20 @@ and pins what each side sees today:
 - ``stores.manager_id`` -- uniqueness expressed only as a UNIQUE *index*, with no
   constraint (common in Postgres; pagila's ``store.manager_staff_id`` is one).
 - ``orders.account_code`` -- references the natural key, not the surrogate PK.
+- ``shifts.manager_id`` -- references the index-only key.
 
-Two assertions pin known gaps and are *expected to flip*:
+One assertion pins a known gap and is *expected to flip*: r2g's own connector
+reads no UNIQUE constraint and no unique index. Plan B (introspection via RSA)
+closes this; when it does, update the assertions.
 
-- r2g's own connector reads no UNIQUE constraint. Plan B (introspection via RSA)
-  closes this; when it does, update the assertion.
-- RSA reads no unique *index*. Plan A step A3a closes this; when it does, update
-  the assertion.
+The second gap -- RSA reading no unique index -- was closed by Plan A step A3a in
+RSA 0.9.0, which reports such an index as a UNIQUE key in ``unique_constraints``.
+That is the field A1 persists, so the index survives a catalog reload without a
+serializer change.
 
-The end-to-end assertion is the one that must hold now: RSA's output, carried
-through r2g's Schema, saved and reloaded, still yields the natural-key FK.
+The end-to-end assertions are the ones that must hold now: RSA's output, carried
+through r2g's Schema, saved and reloaded, still yields both natural-key FKs --
+the one backed by a constraint and the one backed only by an index.
 """
 
 from __future__ import annotations
@@ -80,6 +84,10 @@ def uniqueness_schema():
                 order_id     integer PRIMARY KEY,
                 account_code text
             );
+            CREATE TABLE {name}.shifts (
+                shift_id   integer PRIMARY KEY,
+                manager_id integer
+            );
             """
         )
         yield name
@@ -105,14 +113,15 @@ def test_r2g_connector_reads_no_unique_constraint_yet(uniqueness_schema):
     assert _unique(r2g, "accounts") == []
 
 
-def test_neither_side_reads_a_unique_index_yet(uniqueness_schema):
-    # Known gap, pinned. A unique index with no constraint is a real candidate
-    # key that inference cannot see. Plan A step A3a (RSA) closes it.
+def test_rsa_reads_a_unique_index_r2g_does_not_yet(uniqueness_schema):
+    # RSA 0.9.0 (Plan A step A3a) reports a constraint-less unique index as a
+    # UNIQUE key. r2g's own connector still does not -- a known gap, pinned;
+    # Plan B (introspection via RSA) closes it.
     rsa = rsa_create_source_connector("postgresql", PG_CONN, uniqueness_schema).get_schema()
     r2g = create_source_connector("postgresql", PG_CONN, uniqueness_schema).get_schema()
     stores_rsa = rsa.tables["stores"]
-    assert _unique(rsa, "stores") == []
-    assert not any(c.is_unique for c in stores_rsa.columns if c.name == "manager_id")
+    assert _unique(rsa, "stores") == [["manager_id"]]
+    assert any(c.is_unique for c in stores_rsa.columns if c.name == "manager_id")
     assert _unique(r2g, "stores") == []
 
 
@@ -133,3 +142,7 @@ def test_natural_key_fk_survives_snapshot_persistence(uniqueness_schema, tmp_pat
         (c.table, tuple(c.columns), c.foreign_table, tuple(c.foreign_columns)) for c in infer_foreign_keys(schema)
     }
     assert ("orders", ("account_code",), "accounts", ("account_code",)) in inferred
+    # Backed only by a unique index: found because RSA reports the index as a
+    # UNIQUE key, and still found after the reload because A1 persists those.
+    assert _unique(schema, "stores") == [["manager_id"]]
+    assert ("shifts", ("manager_id",), "stores", ("manager_id",)) in inferred

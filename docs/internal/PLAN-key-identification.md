@@ -1,6 +1,6 @@
 # Plan A — identify keys a source does not declare
 
-**Status:** A1–A5 built and verified live 2026-10-02; release of RSA 0.8.1 pending · **Supersedes in part:** the Cursor plan
+**Status:** A1–A5 built and verified live 2026-10-02. A3a, A3, A4 and RSA's half of A5 shipped in RSA 0.9.0 (2026-10-02); r2g's half of A5 is `r2g source suggest-keys` / `set-key-overlay` (PR #14). A6 measured live on the Customer 360 demo only · **Supersedes in part:** the Cursor plan
 `rsa-connector-consolidation` (split into Plan A here and Plan B below).
 
 ## Why
@@ -31,11 +31,30 @@ Three defects stand between r2g and finding keys on its own. All three were repr
 |---|---|---|---|
 | A1 ✅ | r2g | Persist `unique_constraints` (written only when non-empty, so existing snapshots stay byte-identical). Mark snapshots with `schema_format_version`: absent = 1 = "cannot hold UNIQUE keys", 2 = "keeps what the capture produced". A *storage* version only -- it does not claim the capture looked for UNIQUE keys; that becomes true per connector in Plan B (corrected in PR #12 review). | An overlay-declared UNIQUE survives save + reload and still yields its inferred FK; the compat corpus is unchanged |
 | A2 ✅ | r2g | Pin the declared-UNIQUE gap in the RSA parity test against RSA's **raw** output, instead of normalising both sides through r2g's serializer (which is how the gap stayed hidden). | The test states the exact current difference and fails when Plan B closes it |
-| A3a ✅ RSA #4 | RSA | Read UNIQUE *indexes* (not only UNIQUE constraints) as candidate keys. Postgres often expresses uniqueness this way: pagila has three such indexes, e.g. `store.manager_staff_id`, and RSA records no indexes at all, so inference cannot see them. Pinned in `tests/integration/test_declared_uniqueness_parity.py`. | The pinned assertion flips; inference finds a natural-key FK backed only by a unique index -- **and it survives a catalog reload.** r2g's `Table` serializer is an allowlist and drops `indexes`, so A3a must either express unique indexes as `unique_constraints` (already persisted) or extend the serializer the way A1 did; otherwise the A1 bug returns for indexes (PR #12 review) |
-| A3 ✅ RSA #5 | RSA | Cost-governed Snowflake value sampler, modelled on the BigQuery sampler design in RSA's `PLAN-bigquery.md` (dry-run/limit gating, sampling, a per-session query budget). | Conformance tests pass; a live run stays under its budget |
-| A4 ✅ RSA #6 | RSA | PK candidate profiler: a column or column set is a candidate when it is never empty and its values are distinct, in a sample and then confirmed. Each candidate carries its evidence. | Deterministic tests, with mutation checks |
-| A5 ✅ RSA #7 + r2g | RSA + r2g | Emit candidates as a **draft overlay** for review. `r2g source suggest-keys` writes it; a person edits it; the existing `--key-overlay` applies it. Nothing is applied automatically. | Draft → review → apply round-trips through existing P6.8 code |
+| A3a ✅ RSA #4 (0.9.0) | RSA | Read UNIQUE *indexes* (not only UNIQUE constraints) as candidate keys. Postgres often expresses uniqueness this way: pagila has three such indexes, e.g. `store.manager_staff_id`, and RSA records no indexes at all, so inference cannot see them. Pinned in `tests/integration/test_declared_uniqueness_parity.py`. | The pinned assertion flips; inference finds a natural-key FK backed only by a unique index -- **and it survives a catalog reload.** r2g's `Table` serializer is an allowlist and drops `indexes`, so A3a must either express unique indexes as `unique_constraints` (already persisted) or extend the serializer the way A1 did; otherwise the A1 bug returns for indexes (PR #12 review) |
+| A3 ✅ RSA #5 (0.9.0) | RSA | Cost-governed Snowflake value sampler, modelled on the BigQuery sampler design in RSA's `PLAN-bigquery.md` (dry-run/limit gating, sampling, a per-session query budget). | Conformance tests pass; a live run stays under its budget |
+| A4 ✅ RSA #6 (0.9.0) | RSA | PK candidate profiler: a column or column set is a candidate when it is never empty and its values are distinct, in a sample and then confirmed. Each candidate carries its evidence. | Deterministic tests, with mutation checks |
+| A5 ✅ RSA #7 (0.9.0) + r2g #14 | RSA + r2g | Emit candidates as a **draft overlay** for review. `r2g source suggest-keys` writes it; a person edits it; the existing `--key-overlay` applies it. Nothing is applied automatically. | Draft → review → apply round-trips through existing P6.8 code |
 | A6 | both | Acceptance: on the constraint-free Customer 360 data, compare the draft with the bundled reviewed overlay (5 PKs, 6 FKs). | Precision/recall reported; misses explained |
+
+RSA's work shipped as **0.9.0**, not the 0.8.x patch planned here: A3a changes
+introspection output (constraint-less unique indexes now appear in
+`unique_constraints`), and r2g pinned `<0.9.0`, so a patch release would have changed
+r2g's results with nobody choosing it. r2g raised its band to `>=0.9.0,<0.10.0`
+deliberately. BigQuery, previously RSA 0.9.0, moved to 0.10.0.
+
+- **A3a** — RSA reports a constraint-less unique index as a UNIQUE key (Postgres, SQL
+  Server), in `unique_constraints`, the field A1 persists, so it survives a catalog reload
+  with no serializer change. Verified in `test_declared_uniqueness_parity.py`: the pinned
+  assertion flipped, and a natural-key FK backed only by a unique index is inferred after a
+  save and reload.
+- **A3** — `SnowflakeValueSampler`: query budget, per-query timeout, query tag; overlap
+  measured against the whole referenced column.
+- **A4** — `profile_primary_keys`: sample screen, whole-table confirmation, ranked with
+  reasons; an unfinished search is reported as not evaluated, never as keyless.
+- **A5 (RSA half)** — `draft_key_overlay` emits proposed PKs and the FKs they unlock as an
+  overlay for review. On the Customer 360 data it matches the reviewed overlay exactly
+  (5/5 PKs, 6/6 FKs), which is A6's acceptance check run from the RSA side.
 
 **A6, measured live 2026-10-02** through the real CLI (`suggest-keys` -> `set-key-overlay
 --reviewed` -> `snapshot`) on the constraint-free Customer 360 data: the snapshot's keys match
@@ -49,9 +68,6 @@ real test.
 upper-case words, so `CUSTOMERS` never matched `CUSTOMER` (A4). Also noted, not fixed: the
 Postgres/MySQL/SQL Server value samplers compare against an arbitrary slice of the foreign
 table, which scores a valid FK into a large table near zero.
-
-RSA work ships as a patch release (0.8.1); r2g raises its minimum. RSA's planned 0.9.0 is
-BigQuery, so the patch must be cut before that lands or from a 0.8 branch.
 
 ## Plan B — read declared keys; consolidate introspection
 

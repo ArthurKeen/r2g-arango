@@ -13,28 +13,14 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Snowflake), proposes primary keys and the references between them from the data and writes
   a **draft** key overlay with the evidence for every entry. Nothing is applied. Every query is
   counted against `--max-queries` (default 200), each is cancelled by the warehouse after
-  `--timeout` seconds, and the run's cost is reported. Needs relational-schema-analyzer 0.8.1+.
+  `--timeout` seconds, and the run's cost is reported. Uses relational-schema-analyzer 0.9.0's
+  key profiler and Snowflake sampler.
 - **`r2g source set-key-overlay NAME FILE`** attaches a reviewed overlay to an existing source,
   applied at the next `source snapshot`; `--clear` removes it. A file still marked DRAFT is
   refused unless `--reviewed` is passed, and structural mistakes are rejected immediately
   rather than at the next snapshot.
 
-### Fixed
-
-- **UNIQUE keys were lost when a snapshot was saved.** r2g's table serializer kept primary and
-  foreign keys but not `unique_constraints`, so a UNIQUE key present at capture -- including one
-  declared in a reviewed key overlay -- vanished on catalog reload, and any FK inferred through
-  that natural key vanished with it. UNIQUE keys are now persisted; tables without one serialize
-  byte-identically to before. New snapshots record `schema_format_version: 2` ("can hold UNIQUE
-  keys"); older snapshots read as format 1 and re-save unchanged. The marker versions storage,
-  not introspection: r2g's connectors do not read declared UNIQUE constraints yet, so today
-  UNIQUE keys reach a snapshot only through a key overlay. Re-snapshot a source to recover
-  overlay UNIQUE keys an older snapshot dropped.
-  Related: a reloaded table now re-derives each column's `is_unique` flag from its persisted
-  single-column primary and UNIQUE keys, so ontology key detection agrees with the capture; a
-  format-1 snapshot whose overlay declared UNIQUE keys is detected, logged on load, and never
-  reused by the Customer 360 preset; and a snapshot from a newer r2g re-saves under this
-  version's format marker rather than claiming data it just dropped.
+## [0.5.0] — 2026-10-02
 
 ### Added
 
@@ -57,8 +43,33 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Previewing performs no command execution or server-side file writes; Studio
   Load remains the direct HTTP streaming path.
 
+### Changed
+
+- **relational-schema-analyzer raised to `>=0.9.0,<0.10.0`.** RSA 0.9.0 reports a unique
+  index with no constraint as a UNIQUE key, so foreign keys that reference such a column are
+  now inferred. On Postgres this is common (pagila's `store.manager_staff_id`). These keys
+  are stored in `unique_constraints`, which snapshots already keep, so the inferred FK
+  survives a catalog reload. Schemas with such indexes fingerprint differently once after
+  upgrading. 0.9.0 also adds the Snowflake value sampler, primary-key profiling and draft
+  key overlays that `r2g source suggest-keys` will build on. r2g's own connectors still
+  read neither UNIQUE constraints nor unique indexes; that is Plan B.
+
 ### Fixed
 
+- **UNIQUE keys were lost when a snapshot was saved.** r2g's table serializer kept primary and
+  foreign keys but not `unique_constraints`, so a UNIQUE key present at capture -- including one
+  declared in a reviewed key overlay -- vanished on catalog reload, and any FK inferred through
+  that natural key vanished with it. UNIQUE keys are now persisted; tables without one serialize
+  byte-identically to before. New snapshots record `schema_format_version: 2` ("can hold UNIQUE
+  keys"); older snapshots read as format 1 and re-save unchanged. The marker versions storage,
+  not introspection: r2g's connectors do not read declared UNIQUE constraints yet, so today
+  UNIQUE keys reach a snapshot only through a key overlay. Re-snapshot a source to recover
+  overlay UNIQUE keys an older snapshot dropped.
+  Related: a reloaded table now re-derives each column's `is_unique` flag from its persisted
+  single-column primary and UNIQUE keys, so ontology key detection agrees with the capture; a
+  format-1 snapshot whose overlay declared UNIQUE keys is detected, logged on load, and never
+  reused by the Customer 360 preset; and a snapshot from a newer r2g re-saves under this
+  version's format marker rather than claiming data it just dropped.
 - CSV-direct generation now honors `overwrite_on_initial`; both import modes
   resolve renamed endpoint collections consistently, warn when CSV cannot
   represent mapping transforms, and reject misleading LPG previews.
@@ -85,6 +96,8 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Forge Snowflake round-trip test uses the `R2G_RT_` throwaway-schema prefix**
   (was `FORGE_RT_`), aligning the integration test with the shared naming convention.
+
+## [0.4.2] — 2026-09-21
 
 ### Added
 - **Federation Forge S2 dialects: `snowflake`, `clickhouse`, `arango`** behind the
@@ -114,14 +127,16 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/derive_reserved_words.py` probes Postgres's own `pg_get_keywords()`
   against live Postgres and ClickHouse and unions Snowflake's documented set.
 
-- **Federation Forge walking skeleton** (`r2g forge` CLI; contextual-data-fabric
-  ADR-0006, D-4). `generate(ontology, dialect, seed)` returns
+- **Federation Forge walking skeleton** (`r2g forge generate --ontology … --dialect …
+  [--seed] [--rows-per-entity] [--out-dir]`; contextual-data-fabric ADR-0006, D-4).
+  `generate(ontology, dialect, seed, rows_per_entity=10)` returns
   `ForgeArtifacts(ddl, load_sql, rows)`, with naive seeded synthesis and declared
-  PK/FK always emitted; the integration test proves `introspect(generate(O)) ≡ O`.
-  Landed as a single `src/r2g/forge.py` for Postgres only; superseded within this
-  same unreleased version by the S2 entry above, which makes it a package and adds
-  three dialects. Plan in `docs/internal/PLAN-federation-forge.md`
-  (F-1..F-6).
+  PK/FK always emitted. The integration test checks that `introspect(generate(O))`
+  matches `O` up to the CC-12 naming normalization, with generated `id` keys and FK
+  columns allowed as extras. Landed as a single `src/r2g/forge.py` for Postgres
+  only; superseded within this same release by the S2 entry above, which makes it a
+  package and adds three dialects. Plan in `docs/internal/PLAN-federation-forge.md`
+  (F-1..F-6 at the time; F-7 reserved words and F-8 followed).
 
 ### Changed
 - **`snowflake` extra floor raised to `>=3.12,<4.0`.** Earlier
@@ -134,14 +149,26 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`singularize` / `pluralize` are case-insensitive.** Snowflake uppercases
   unquoted identifiers and the suffix rules only matched lowercase, so
   `USAGE_METRICS` produced the plural class `UsageMetrics`. Replacement suffixes
-  now follow the case of the word's trailing letter (`USAGE_METRICS` →
-  `UsageMetric`); removes the forced-lowercase workaround downstream consumers
-  carried (fixes ArthurKeen/r2g-arango#4).
+  now follow the case of the word's trailing character (`USAGE_METRICS` singularizes
+  to `USAGE_METRIC`, so the class becomes `UsageMetric`). The forced-lowercase
+  workaround downstream consumers carried becomes removable once their mappings are
+  regenerated against 0.4.2 (fixes ArthurKeen/r2g-arango#4).
 - **CI green again on the 3.10/3.11/3.12 matrix.** The 3.12 dependency-install
   failure above cascaded (via `fail-fast`) into cancelled 3.10/3.11 legs; the
   matrix now sets `fail-fast: false` and upgrades pip/setuptools/wheel before
   install. Also fixed 4 mypy `union-attr` errors in `src/r2g/ui/server.py`
   (cross-source sampler loop re-fetched `source`/`snapshot` without a None-guard).
+- **Forge walking-skeleton defects found in the S2 review.** Foreign keys named the
+  child's primary key where the parent's belonged (correct only because every
+  planned table shared one surrogate key). `split_sql_statements` silently dropped
+  the rest of a script after an unterminated `/*`, and mis-scanned dollar quoting
+  and backtick identifiers. The Arango loader skipped `create_graph` on an existing
+  graph, so a second ontology kept the first one's edge definitions and still
+  exited 0. The reserved-word guard accepted `current_date` and `array` and refused
+  `key` and `range`; it is now derived from the engines (see the breaking entry
+  above). The integration suite never loaded `.env`, so correctly configured
+  Postgres and Snowflake credentials were invisible and the tests skipped as though
+  the services were down.
 
 ## [0.4.1] — 2026-09-14
 
@@ -685,8 +712,10 @@ Initial phased implementation (not yet published to PyPI):
   pipeline, `r2g source dump` CLI, pure-Python FK inference with
   optional value-overlap sampler.
 
-[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.3...HEAD
-[0.4.3]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.1...v0.4.3
+[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.3...v0.5.0
+[0.4.3]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.2.0...v0.3.0
