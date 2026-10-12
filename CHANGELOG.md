@@ -7,6 +7,8 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-12
+
 ### Added
 
 - **Key suggestion from data (`r2g source suggest-keys`).** For sources that declare no keys
