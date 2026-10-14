@@ -16,7 +16,12 @@ import.sh
 test_run/
 
 .prd-drift-queue/
-.claude/
+.claude/*
+# Skills are source and meant to be shared -- but only ones reviewed for private
+# content (absolute paths, internal endpoints) are un-ignored, one at a time.
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/code-quality-review/
 CLAUDE.md
 .coverage
 .no-drift-gate
