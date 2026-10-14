@@ -690,3 +690,122 @@ class TestCandidateKeyTargeting:
     def test_the_surrogate_pk_is_not_the_chosen_target(self):
         res = infer_foreign_keys(self._schema(), options=InferenceOptions(min_confidence=0.0))
         assert not any(c.foreign_columns == ["row_id"] for c in res)
+
+
+# ── `source infer-fks --accept`: accepted guesses are labelled, not laundered ──
+
+
+@pytest.fixture
+def accept_catalog(tmp_path, monkeypatch):
+    """A catalog whose latest snapshot declares PKs only, built on a reviewed overlay.
+
+    ``contracts.account_id`` and ``contacts.account_id`` both resolve to ``accounts.id``
+    by name (``name_suffix``), so --accept has two keys from one method to write.
+    """
+    import sys
+
+    import structlog
+
+    from r2g.catalog import CatalogManager
+
+    def quiet(*_a, **_k):
+        structlog.reset_defaults()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(0),
+            logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+            cache_logger_on_first_use=False,
+        )
+
+    monkeypatch.setattr("r2g.main.setup_logging", quiet)
+    root = str(tmp_path / "catalog")
+    monkeypatch.setattr("r2g.main._get_catalog", lambda: CatalogManager(root))
+    quiet()
+
+    def table(name, *cols):
+        return Table(
+            name=name,
+            columns=[Column(name="id", data_type="integer", is_nullable=False, is_primary_key=True)]
+            + [Column(name=c, data_type="integer") for c in cols],
+            primary_key=["id"],
+            foreign_keys=[],
+        )
+
+    schema = Schema(
+        tables={
+            "accounts": table("accounts"),
+            "contracts": table("contracts", "account_id"),
+            "contacts": table("contacts", "account_id"),
+        }
+    )
+    mgr = CatalogManager(root)
+    mgr.add_source("crm", "postgresql", "postgresql://u@h/db")
+    mgr.create_snapshot(
+        "crm",
+        schema,
+        key_overlay_summary={"primaryKeys": 3},
+        key_overlay_source="/reviewed/crm.keys.json",
+        key_overlay_fingerprint="sha256-reviewed",
+    )
+    yield CatalogManager(root)
+    quiet()
+
+
+def _accept():
+    from typer.testing import CliRunner
+
+    from r2g.main import app
+
+    return CliRunner().invoke(app, ["source", "infer-fks", "crm", "--accept"])
+
+
+class TestAcceptLabelsInferredKeys:
+    def test_an_accepted_key_is_not_enforced_and_says_so_in_json(self, accept_catalog):
+        result = _accept()
+        assert result.exit_code == 0, result.output
+        snap = accept_catalog.get_latest_snapshot("crm")
+        (fk,) = snap.schema_data.tables["contracts"].foreign_keys
+        assert fk.enforced is False
+        # The serializer drops enforced when it is True, so a default would leave no trace.
+        assert '"enforced":false' in fk.model_dump_json()
+
+    def test_keys_accepted_by_one_method_get_their_own_names(self, accept_catalog):
+        _accept()
+        tables = accept_catalog.get_latest_snapshot("crm").schema_data.tables
+        names = {t: tables[t].foreign_keys[0].constraint_name for t in ("contracts", "contacts")}
+        assert names == {
+            "contracts": "inferred:contracts_account_id_fk",
+            "contacts": "inferred:contacts_account_id_fk",
+        }
+
+    def test_method_and_confidence_are_kept_on_the_snapshot(self, accept_catalog):
+        _accept()
+        records = accept_catalog.get_latest_snapshot("crm").inferred_keys
+        by_table = {r["table"]: r for r in records}
+        assert set(by_table) == {"contracts", "contacts"}
+        assert by_table["contracts"]["method"] == "name_suffix"
+        assert by_table["contracts"]["foreign_table"] == "accounts"
+        assert 0 < by_table["contracts"]["confidence"] <= 1
+
+    def test_the_overlay_record_survives_accept(self, accept_catalog):
+        _accept()
+        snap = accept_catalog.get_latest_snapshot("crm")
+        assert snap.key_overlay_summary == {"primaryKeys": 3}
+        assert snap.key_overlay_source == "/reviewed/crm.keys.json"
+        assert snap.key_overlay_fingerprint == "sha256-reviewed"
+
+    def test_a_second_accept_skips_declared_keys_and_keeps_the_record(self, accept_catalog):
+        _accept()
+        first = accept_catalog.get_latest_snapshot("crm")
+        again = _accept()
+        assert again.exit_code == 0, again.output
+        # Inference already skips columns a declared key covers, so a second run
+        # usually proposes nothing; either way nothing may be added twice.
+        assert "Accepted" not in again.output
+        latest = accept_catalog.get_latest_snapshot("crm")
+        assert latest.id == first.id  # nothing new, so no new snapshot
+        assert len(latest.schema_data.tables["contracts"].foreign_keys) == 1
+        assert len(latest.inferred_keys) == 2
+
+    def test_snapshots_without_accepted_keys_serialize_as_before(self, accept_catalog):
+        snap = accept_catalog.get_latest_snapshot("crm")
+        assert "inferred_keys" not in snap.model_dump()

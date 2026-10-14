@@ -51,10 +51,32 @@ from relational_schema_analyzer.fk_inference import Sampler as Sampler  # noqa: 
 from relational_schema_analyzer.fk_inference import SamplerResult as SamplerResult  # noqa: F401
 from relational_schema_analyzer.fk_inference import SQLServerValueSampler as _RsaSQLServerValueSampler
 from relational_schema_analyzer.fk_inference import infer_foreign_keys as _rsa_infer_foreign_keys
+from relational_schema_analyzer.overlay import OVERLAY_CONSTRAINT_PREFIX as OVERLAY_CONSTRAINT_PREFIX
 
 from r2g.log import get_logger
 from r2g.naming import edge_collection_name as _edge_name
-from r2g.types import EdgeDefinition, Schema
+from r2g.types import EdgeDefinition, ForeignKey, Schema
+
+#: Name prefix for a foreign key a person accepted from inference
+#: (``source infer-fks --accept``). Kept beside RSA's overlay prefix because the two
+#: mark the same thing: a key asserted on top of the source rather than declared by
+#: it. Both are saved ``enforced=False`` -- labelled, not laundered -- so nothing
+#: downstream mistakes a guess for a constraint the database guarantees.
+INFERRED_CONSTRAINT_PREFIX = "inferred:"
+
+
+def key_provenance(constraint_name: Optional[str]) -> str:
+    """Where a foreign key came from, read from its name.
+
+    ``curated-overlay`` (a reviewed overlay), ``inferred`` (accepted from
+    ``infer-fks``), or ``source-declared`` (anything else: the catalog's own).
+    """
+    name = constraint_name or ""
+    if name.startswith(OVERLAY_CONSTRAINT_PREFIX):
+        return "curated-overlay"
+    if name.startswith(INFERRED_CONSTRAINT_PREFIX):
+        return "inferred"
+    return "source-declared"
 
 logger = get_logger(__name__)
 
@@ -71,6 +93,38 @@ class InferredForeignKey(_RsaInferredForeignKey):
     stays in r2g (RSA's relational analogue, ``to_foreign_key``, produces a
     declared :class:`~relational_schema_analyzer.types.ForeignKey` instead).
     """
+
+    def to_accepted_foreign_key(self) -> ForeignKey:
+        """This candidate as the key ``infer-fks --accept`` writes into a snapshot.
+
+        ``enforced=False``, and named ``inferred:<table>_<cols>_fk`` the way the
+        overlay names its keys, so each accepted key has its own name and reads as
+        asserted rather than declared. RSA's ``to_foreign_key`` leaves ``enforced`` at
+        its default of ``True``, which the serializer then omits -- erasing the only
+        record that the key was a guess.
+        """
+        return ForeignKey(
+            columns=list(self.columns),
+            foreign_table=self.foreign_table,
+            foreign_columns=list(self.foreign_columns),
+            constraint_name=f"{INFERRED_CONSTRAINT_PREFIX}{self.table}_{'_'.join(self.columns)}_fk",
+            enforced=False,
+        )
+
+    def accepted_record(self) -> dict[str, Any]:
+        """What the key cannot carry: how it was inferred and how confidently.
+
+        ``ForeignKey`` has no field for either, so the snapshot keeps one of these
+        per accepted key (``SchemaSnapshot.inferred_keys``).
+        """
+        return {
+            "table": self.table,
+            "columns": list(self.columns),
+            "foreign_table": self.foreign_table,
+            "foreign_columns": list(self.foreign_columns),
+            "method": self.method,
+            "confidence": round(float(self.confidence), 3),
+        }
 
     def to_edge_definition(self, edge_collection: Optional[str] = None) -> EdgeDefinition:
         """Convert the suggestion to an :class:`EdgeDefinition` for mapping.

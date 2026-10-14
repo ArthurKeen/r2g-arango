@@ -348,3 +348,29 @@ class TestFromAutoConfig:
         assert "<!DOCTYPE html>" in html
         assert "users" in html
         assert "posts_to_users" in html
+
+
+class TestInferredKeyProvenance:
+    """A key accepted from `infer-fks --accept` is neither source-declared nor curated."""
+
+    def _accepted(self, viz_schema):
+        fk = viz_schema.tables["posts"].foreign_keys[0]
+        fk.constraint_name = "inferred:posts_author_id_fk"
+        fk.enforced = False
+        return viz_schema
+
+    def test_config_edges_report_inferred(self, viz_schema, viz_config):
+        visualizer = MappingVisualizer(self._accepted(viz_schema), viz_config)
+        edge = next(
+            item
+            for item in visualizer._build_config_data()["edges"]
+            if item["edgeCollection"] == "posts_to_users"
+        )
+        assert edge["keyProvenance"] == "inferred"
+        assert edge["enforced"] is False
+
+    def test_tables_report_inferred(self, viz_schema, viz_config):
+        visualizer = MappingVisualizer(self._accepted(viz_schema), viz_config)
+        posts = next(t for t in visualizer._build_tables_data() if t["name"] == "posts")
+        provenance = {fk["constraint_name"]: fk["key_provenance"] for fk in posts["foreignKeys"]}
+        assert provenance["inferred:posts_author_id_fk"] == "inferred"

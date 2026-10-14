@@ -18,6 +18,22 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--schema`; the command then prints the `--pg-schema` the snapshot needs. Other source
   types are still refused. Requires relational-schema-analyzer 0.9.5.
 
+### Fixed
+
+- **`source infer-fks --accept` saved guessed foreign keys as if the source enforced them.**
+  Each accepted key was written with the default `enforced: true`, which the serializer
+  omits, and every key from one method shared one name (`inferred_name_suffix`). A
+  snapshot or `schema.json` built from it read as constraints the database declared and
+  enforces, so the visualizer called them source-declared, and relational-schema-analyzer's
+  baseline treated those tables as authoritative and stopped inferring there. The new
+  snapshot also lost its key-overlay record. Accepted keys are now `enforced: false`, named
+  `inferred:<table>_<cols>_fk` the way overlay keys are, and their method and confidence
+  are recorded on the snapshot (`inferred_keys`). The overlay record is carried forward,
+  and the visualizer and Studio show these keys as `inferred`.
+  **Migration:** snapshots written by earlier versions keep the old names and still read as
+  enforced. Re-running `--accept` does not relabel them, because it skips keys already
+  declared by column. To relabel, take a fresh `r2g source snapshot`, then accept again.
+
 ## [0.6.0] — 2026-10-12
 
 ### Added

@@ -3530,12 +3530,18 @@ function showEdgeProps(edgeColl) {
       <div class="prop-row"><span class="prop-label">Source</span><span class="prop-value" style="color:var(--green)">Curated key overlay</span></div>
       <div style="font-size:11px;color:var(--text-muted);line-height:1.5;margin-top:6px">Snowflake does not enforce this relationship. The reviewed overlay asserts it for graph mapping.</div>
       ${edge.constraintName ? `<div class="prop-row"><span class="prop-label">Constraint</span><span class="prop-value">${escHtml(edge.constraintName)}</span></div>` : ''}
+    </div>` : (provenance === 'inferred' ? `
+    <div class="prop-group">
+      <div class="prop-group-title">Constraint provenance</div>
+      <div class="prop-row"><span class="prop-label">Source</span><span class="prop-value" style="color:var(--amber, #fbbf24)">Inferred, accepted</span></div>
+      <div style="font-size:11px;color:var(--text-muted);line-height:1.5;margin-top:6px">Proposed by FK inference and accepted with <code>r2g source infer-fks --accept</code>. The source does not declare or enforce this relationship.</div>
+      ${edge.constraintName ? `<div class="prop-row"><span class="prop-label">Constraint</span><span class="prop-value">${escHtml(edge.constraintName)}</span></div>` : ''}
     </div>` : (provenance === 'source-declared' ? `
     <div class="prop-group">
       <div class="prop-group-title">Constraint provenance</div>
       <div class="prop-row"><span class="prop-label">Source</span><span class="prop-value">Source-declared</span></div>
       <div class="prop-row"><span class="prop-label">Enforced</span><span class="prop-value">${edge.enforced === false ? 'No' : 'Yes'}</span></div>
-    </div>` : '');
+    </div>` : ''));
 
   header.textContent = 'Edge: ' + edgeColl;
   body.innerHTML = `
