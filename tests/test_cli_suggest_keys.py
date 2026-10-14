@@ -99,11 +99,12 @@ def test_the_query_budget_is_reported_when_it_runs_out(warehouse):
     assert "Query budget used up" in result.output
 
 
-def test_non_snowflake_sources_are_refused(warehouse):
-    CatalogManager(str(warehouse / "catalog")).add_source("pg", "postgresql", "postgresql://h/db")
-    result = runner.invoke(app, ["source", "suggest-keys", "pg"])
+def test_sources_without_a_governed_key_probe_are_refused(warehouse):
+    # Snowflake and PostgreSQL samplers can profile keys under a budget; MySQL's cannot.
+    CatalogManager(str(warehouse / "catalog")).add_source("my", "mysql", "mysql://h/db")
+    result = runner.invoke(app, ["source", "suggest-keys", "my"])
     assert result.exit_code == 2
-    assert "Snowflake" in result.output
+    assert "Snowflake and PostgreSQL" in result.output
 
 
 def test_an_unreviewed_draft_is_refused_then_accepted_with_reviewed(warehouse):
