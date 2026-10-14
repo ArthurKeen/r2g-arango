@@ -54,9 +54,10 @@ What the result means:
   - Transformation consistency has four open drift alerts. The same expression can produce
     different results depending on whether it is evaluated locally or handed to the database.
 - **The cheapest gain is one benchmark harness.** A harness that writes a dated, inspectable
-  report would move several dimensions to level 3 together, because correctness, throughput,
-  key discovery and source breadth can all be measured on the same Forge workloads. See the
-  prioritized backlog.
+  report moves throughput to level 3 at once, and evaluation rigor after two releases. It
+  measures load correctness and key discovery on the same Forge workloads too. Load
+  correctness counts only after P5c.1.6 is closed, because until then bulk load and CDC can
+  silently drop a field. See the prioritized backlog.
 
 ## Scoring rule
 
@@ -84,7 +85,10 @@ The rules:
   exists at the commit being scored. A level with nothing to cite drops to the highest level
   that has evidence.
 - **An open defect caps a dimension.** If an open defect contradicts a dimension's claim, that
-  dimension cannot rise above 2 until the defect is closed.
+  dimension cannot rise above 2 until the defect is closed. A defect contradicts a claim when
+  r2g produces a wrong or silently incomplete result. A combination that r2g refuses with an
+  error is a scope limit, not a defect. It does not cap the dimension, but the dimension's
+  level-3 report must name it.
 
 ## Dimension scores
 
@@ -109,8 +113,14 @@ dropped, duplicated or altered?
 - The checks are pass/fail inside pytest.
 - No report records counts, mismatches or fidelity per table for a named workload version.
 
-**To reach level 3:** a harness that loads each Forge seed and Customer 360, then writes a
-dated report. The report should include:
+**Capped at 2 by an open defect:**
+- **P5c.1.6 (open drift alert).** An expression the local evaluator cannot compile is handed
+  to ArangoDB, but only the streaming pipeline does that (`src/r2g/streaming/pipeline.py:404`).
+  Bulk load and CDC write the document without the expression's target field, with no error.
+  `NodeTransformer.transform_row` leaves the field unset (`src/r2g/transformers/node_transformer.py:213`).
+
+**To reach level 3:** close P5c.1.6, then build a harness that loads each Forge seed and
+Customer 360 and writes a dated report. The report should include:
 - source and target row counts per table and edge collection
 - the number of documents that differ field by field from their source rows, with the target
   set at zero
@@ -158,8 +168,10 @@ right primary and foreign keys?
   result as weak evidence.
 - The measurement was a one-off and was not recorded as a versioned report.
 - r2g's own connectors still read no declared UNIQUE constraints; Plan B closes this.
-- Known weakness: the Postgres, MySQL and SQL Server samplers compare against an arbitrary
-  slice of the referenced table, which scores a valid foreign key into a large table near zero.
+- Known weakness, inherited from relational-schema-analyzer (RSA): its Postgres, MySQL and
+  SQL Server value samplers compare against an arbitrary slice of the referenced table. That
+  scores a valid foreign key into a large table near zero. The fix belongs in RSA, and reaches
+  r2g through its RSA version band.
 
 **To reach level 3:** precision and recall for primary and foreign keys, recorded per release.
 - Run it on a schema of realistic size with its constraints removed. pagila or the Forge
@@ -183,14 +195,24 @@ without a full reload, and without losing a person's decisions?
 - Config migration: `test_config_migrate.py`.
 
 **Capped at 2 by open defects:**
-- **R2G-5 (issue #3, open).** `migrate-config` brings back tables a person deliberately
-  excluded, and it strips curator comments. A schema change can therefore undo a reviewed
-  decision without any warning.
-- **P13.12 (open drift alert).** LPG layout support is guarded but not complete.
+- **The `migrate-config` defect
+  ([ArthurKeen/r2g-arango#3](https://github.com/ArthurKeen/r2g-arango/issues/3), open).**
+  `migrate-config` brings back tables a person deliberately excluded, and it strips curator
+  comments. A schema change can therefore undo a reviewed decision without any warning.
+- **P5c.1.6 (open drift alert).** CDC builds a document without a delegated expression's
+  target field and then replaces the whole stored document
+  (`src/r2g/cdc/delta_transformer.py:171`, `src/r2g/cdc/conflict.py:184`). An update can
+  therefore erase a field that the initial streaming load filled.
 
-**To reach level 3:** two steps.
-1. Close R2G-5.
-2. Add a scripted change workload: a Forge seed and a sequence of inserts, updates, deletes and
+**Scope limit, not a cap:** temporal mode is refused in the LPG layout (P13.12, open drift
+alert). `CDCHandler` raises an error naming both ways out (`src/r2g/cdc/handler.py:101`), so
+no wrong graph is built. The
+change workload's report must say that this combination is not covered.
+
+**To reach level 3:** three steps.
+1. Close the `migrate-config` defect.
+2. Close P5c.1.6 for CDC.
+3. Add a scripted change workload: a Forge seed and a sequence of inserts, updates, deletes and
    schema changes, applied through CDC and through `migrate-config`. Record graph-to-source
    agreement after each step, and the time from source commit to graph update.
 
@@ -253,7 +275,8 @@ and expressions it cannot compile are delegated on the streaming path.
 - **P5c.1.4:** the evaluator is partial.
 - **P5c.1.6:** bulk load and CDC must evaluate or reject a delegated expression. A bulk-loaded
   document must never silently omit the expression's target field.
-- **P5c.1.7:** KSQL translation has not started.
+- **P5c.1.7:** KSQL translation has not started, and a KSQL expression today loads the raw
+  source value with only a warning (`src/r2g/transformers/node_transformer.py:64`).
 - **P5c.2.5:** the UI still offers KSQL and Python.
 
 The transformation-language research (PR #10) covers the longer-term choice of language.
@@ -297,8 +320,11 @@ leak rate (the target is zero) and manifest completeness for each release.
   - its Snowflake and ClickHouse adapters
   - its Forge evaluation
   - CDF pins `r2g-arango==0.6.1`
-- A CSI defect (P12.1, conceptual label uniqueness) was found and reported downstream with
-  benchmark evidence.
+- CDF found a CSI defect (P12.1, conceptual label uniqueness) and reported it to r2g with
+  benchmark evidence. r2g resolved it with `export-csi --label-policy`.
+- One part of the output has no consumer yet. r2g emits accepted shared join keys as
+  `conceptualModel.joinKeys` (`src/r2g/csi.py:696`), but CDF does not read them (open drift
+  alert P6.7-E1-ROUTING). The gap is on CDF's side, so it does not cap this dimension.
 
 **Why it is not level 3:**
 - The benchmark evidence is CDF's, not r2g's.
@@ -325,11 +351,12 @@ pass rate on the W3C R2RML test cases that apply to r2g.
 - It has the Studio UI, bound to 127.0.0.1, and an MCP server with 23 tools.
 - CI enforces 80% line coverage.
 
-**Capped at 2:** R2G-5 is also an operability defect, because an upgrade-time migration
-silently undoes reviewed exclusions.
+**Capped at 2:** the `migrate-config` defect
+([ArthurKeen/r2g-arango#3](https://github.com/ArthurKeen/r2g-arango/issues/3)) is also an
+operability defect, because an upgrade-time migration silently undoes reviewed exclusions.
 
 **To reach level 3:** two steps.
-1. Close R2G-5.
+1. Close the `migrate-config` defect.
 2. Run a recorded "fresh operator" trial: a clean machine, the README only, and a Forge seed
    loaded. Report the time and the number of times the operator needed help. Repeat the trial
    for each minor release.
@@ -341,9 +368,11 @@ silently undoes reviewed exclusions.
 **Evidence:**
 - The CI coverage gate.
 - An integration suite against live engines.
-- Mutation checks have been used since Plan A. They found three real bugs that the tests had
-  missed (`PLAN-key-identification.md`, "Found along the way").
-- The `/code-quality-review` skill (PR #22) requires every finding to be verified by execution.
+- New tests are mutation-checked: the bug is injected to confirm the test catches it
+  (`docs/internal/NOTE-denorm-engine-location.md:150`; Plan A's A4 row in
+  `docs/internal/PLAN-key-identification.md:36`).
+- Plan A's live runs found two bugs, both fixed in RSA (`PLAN-key-identification.md`,
+  "Found along the way").
 
 **Why it is not level 3:** this scorecard is the first record of any measured claim. No run
 has produced a versioned, inspectable benchmark report yet.
@@ -354,20 +383,22 @@ for at least two consecutive releases.
 ## Prioritized backlog
 
 The items are ordered by score gained per unit of work. Items 1 and 2 are a single harness.
+Item 1's load-correctness gain depends on item 3, because P5c.1.6 caps dimension 1 at 2.
 
 | # | Work | Dimensions moved | Gain |
 |---|---|---|---:|
-| 1 | **Benchmark harness.** Load each Forge seed plus Customer 360 and write a dated JSON report and a Markdown report. The reports cover row/edge counts, field mismatches, rows per second, memory, the workload hash and versions. | 1 → 3, 5 → 3, 11 → 3 (after two releases) | 3.0 + 4.0 + 1.0 = **8.0** |
-| 2 | **Key-discovery measurement in the harness.** Strip constraints from pagila and the Forge seeds, then record precision, recall and query cost. | 3 → 3 | **2.0** |
-| 3 | **Close P5c.1.6 and add the cross-path differential test.** | 7 → 2 | **1.6** |
-| 4 | **Close R2G-5,** which is already briefed for GS. | Removes the cap on 4 and 10 | enables 2.0 + 1.2 |
-| 5 | **Expert reference mappings for Northwind, Chinook and pagila, with a scoring test.** | 2 → 2 | **2.4** |
-| 6 | **R2RML cross-engine check (Ontop, Morph-KGC).** | 9 → 3 | **1.6** |
-| 7 | **Source capability matrix from the Forge suite.** | 6 → 3 | **1.6** |
-| 8 | **Classified-column leak audit.** | 8 → 3 | **1.6** |
+| 1 | **Benchmark harness.** Load each Forge seed plus Customer 360 and write a dated JSON report and a Markdown report. The reports cover row/edge counts, field mismatches, rows per second, memory, the workload hash and versions. | dim 5: 1 → 3; dim 11: 2 → 3 (after two releases); dim 1: 2 → 3 (once item 3 closes P5c.1.6) | 4.0 + 1.0 = **5.0**, then +3.0 with item 3 |
+| 2 | **Key-discovery measurement in the harness.** Strip constraints from pagila and the Forge seeds, then record precision, recall and query cost. | dim 3: 2 → 3 | **2.0** |
+| 3 | **Close P5c.1.6 and add the cross-path differential test.** | dim 7: 1 → 2; removes the P5c.1.6 cap on dims 1 and 4 | **1.6** |
+| 4 | **Close the `migrate-config` defect** ([ArthurKeen/r2g-arango#3](https://github.com/ArthurKeen/r2g-arango/issues/3)). | Removes the cap on dim 10, and with item 3 the cap on dim 4 | enables 2.0 + 1.2 |
+| 5 | **Expert reference mappings for Northwind, Chinook and pagila, with a scoring test.** | dim 2: 1 → 2 | **2.4** |
+| 6 | **R2RML cross-engine check (Ontop, Morph-KGC).** | dim 9: 2 → 3 | **1.6** |
+| 7 | **Source capability matrix from the Forge suite, and close Plan B.** | dim 6: 2 → 3 | **1.6** |
+| 8 | **Classified-column leak audit.** | dim 8: 2 → 3 | **1.6** |
 
-Completing 1–3 and 5–8 takes the baseline from 34.0 to 52.8. With item 4 and a change
-workload as well (dimensions 4 and 10 to level 3), the score would be 56.0. The ceiling for
+Completing 1–3 and 5–8 takes the baseline from 34.0 to 52.8. Adding item 4, the change
+workload (dimension 4 to level 3) and the fresh-operator trial (dimension 10 to level 3)
+takes it to 56.0. The ceiling for
 self-assessment is 60, when every dimension is at level 3. Going past it needs level 4 on at
 least one heavily weighted dimension, which means a public, reproducible benchmark. LDBC SNB
 is the candidate.
