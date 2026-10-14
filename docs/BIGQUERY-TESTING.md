@@ -6,7 +6,7 @@ exercise r2g's relational→graph mapping and FK inference.
 
 > **Read this first — how it connects to r2g.** r2g does **not** have a BigQuery
 > source connector today. Its source types are `postgresql`, `mysql`,
-> `sqlserver`, `snowflake`, `csv`, and `kafka` (see `add-source`). So BigQuery is
+> `sqlserver`, `snowflake`, `clickhouse`, `csv`, and `kafka` (see `add-source`). So BigQuery is
 > used here as a **source of test data**, not a live source. The flow is:
 >
 > ```
