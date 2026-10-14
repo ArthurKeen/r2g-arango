@@ -7,6 +7,17 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`r2g source suggest-keys` works on PostgreSQL sources**, not only Snowflake. It
+  proposes keys for tables that declare none, and, on tables that declare only a surrogate
+  key, the natural key beside it (as a UNIQUE key, never as the primary key), with the
+  references those keys unlock. The same cost controls apply on both: `--max-queries`, a
+  per-query `--timeout` the database enforces, a query tag (`application_name` on
+  PostgreSQL), and the cost report. For a PostgreSQL schema other than `public`, use
+  `--schema`; the command then prints the `--pg-schema` the snapshot needs. Other source
+  types are still refused. Requires relational-schema-analyzer 0.9.5.
+
 ## [0.6.0] — 2026-10-12
 
 ### Added

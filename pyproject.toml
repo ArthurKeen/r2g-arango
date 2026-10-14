@@ -79,7 +79,9 @@ dependencies = [
     # and adds PK profiling and draft key overlays (A4, A5). A minor bump, not a
     # patch, because it changes introspection output -- so this band moves on
     # purpose rather than silently. Raised 2026-10-02.
-    "relational-schema-analyzer>=0.9.0,<0.10.0",
+    # 0.9.5 makes the Postgres sampler governable (budget, timeout, query tag,
+    # stats), which `source suggest-keys` needs to accept PostgreSQL sources.
+    "relational-schema-analyzer>=0.9.5,<0.10.0",
 ]
 
 # Optional extras let users install only what they need:

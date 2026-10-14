@@ -2340,6 +2340,29 @@ def source_dump(
         session.close()
 
 
+#: Source types suggest-keys can profile, with the schema used when --schema is
+#: absent. Each needs a sampler that implements key profiling AND can be governed
+#: (budget, per-query timeout, query tag, stats) -- relational-schema-analyzer's
+#: sampler contract requires both together. Snowflake's default defers to the
+#: schema in the connection URL, which RSA and r2g both let win over "PUBLIC".
+_KEY_PROBE_SOURCES: dict[str, str] = {"snowflake": "PUBLIC", "postgresql": "public"}
+
+
+def _key_probe_sampler(kind: str, connection_string: str, **governed: Any) -> Any:
+    """A governed key-profiling sampler for ``kind`` (one of ``_KEY_PROBE_SOURCES``)."""
+    from r2g.connectors.base import expand_env_vars
+
+    url = expand_env_vars(connection_string)
+    if kind == "snowflake":
+        from relational_schema_analyzer.fk_inference import SnowflakeValueSampler
+
+        return SnowflakeValueSampler(url, **governed)
+    from r2g.fk_inference import PostgresValueSampler
+
+    # Governance on the Postgres sampler arrived in relational-schema-analyzer 0.9.5.
+    return PostgresValueSampler(url, **governed)
+
+
 @source_app.command("suggest-keys")
 def source_suggest_keys(
     name: str = typer.Argument(..., help="Source name"),
@@ -2348,11 +2371,13 @@ def source_suggest_keys(
     ),
     force: bool = typer.Option(False, "--force", help="Overwrite an existing draft file"),
     schema_name: Optional[str] = typer.Option(
-        None, "--schema", help="Schema to profile (default: the one in the connection string)"
+        None,
+        "--schema",
+        help="Schema to profile (default: the connection string's for Snowflake, public for PostgreSQL)",
     ),
-    max_queries: int = typer.Option(200, "--max-queries", min=1, help="Hard cap on warehouse queries for this run"),
+    max_queries: int = typer.Option(200, "--max-queries", min=1, help="Hard cap on database queries for this run"),
     timeout_s: int = typer.Option(
-        60, "--timeout", min=1, help="Per-query timeout in seconds, enforced by the warehouse"
+        60, "--timeout", min=1, help="Per-query timeout in seconds, enforced by the database"
     ),
     sample_limit: int = typer.Option(
         10_000, "--sample-limit", min=100, help="Rows/values read per column when screening"
@@ -2366,41 +2391,43 @@ def source_suggest_keys(
     per table and the references between them, and writes a draft key overlay.
     Nothing is applied: review the file, then attach it with
     `r2g source set-key-overlay NAME FILE --reviewed` and re-run `source snapshot`.
-    Snowflake only for now; every query is counted against --max-queries.
+    Snowflake and PostgreSQL; every query is counted against --max-queries, and the
+    database cancels any single query past --timeout.
     """
-    from r2g.connectors.base import create_source_connector, expand_env_vars, normalize_source_type
+    from r2g.connectors.base import create_source_connector, normalize_source_type
 
     mgr = _get_catalog()
     source = mgr.get_source(name)
     if source is None:
         console.print(f"[red]Source '{name}' not found.[/red]")
         raise typer.Exit(code=1)
-    if normalize_source_type(source.source_type) != "snowflake":
+    kind = normalize_source_type(source.source_type)
+    if kind not in _KEY_PROBE_SOURCES:
         console.print(
-            f"[red]suggest-keys supports Snowflake sources; '{name}' is {source.source_type}.[/red] "
-            "Sources that declare keys need no suggestion; use `source infer-fks` for references."
+            f"[red]suggest-keys supports Snowflake and PostgreSQL sources; '{name}' is "
+            f"{source.source_type}.[/red] Use `source infer-fks` for references between declared keys."
         )
         raise typer.Exit(code=2)
+    profiled_schema = schema_name or _KEY_PROBE_SOURCES[kind]
     out_path = Path(output or f"{name}.keys.draft.json").expanduser()
     if out_path.exists() and not force:
         console.print(f"[red]{out_path} exists.[/red] Pass --force to overwrite it.")
         raise typer.Exit(code=1)
 
-    # Both arrived in relational-schema-analyzer 0.9.0, the floor pyproject requires.
-    from relational_schema_analyzer.fk_inference import SnowflakeValueSampler
     from relational_schema_analyzer.key_profiling import draft_key_overlay
 
     try:
         connector = create_source_connector(
             source.source_type,
             source.connection_string,
-            schema_name=schema_name or "PUBLIC",
+            schema_name=profiled_schema,
             source_params=source.source_params,
         )
         schema = connector.get_schema()
-        with SnowflakeValueSampler(
-            expand_env_vars(source.connection_string),
-            schema_name=schema_name or "PUBLIC",
+        with _key_probe_sampler(
+            kind,
+            source.connection_string,
+            schema_name=profiled_schema,
             limit=sample_limit,
             max_queries=max_queries,
             statement_timeout_s=timeout_s,
@@ -2441,6 +2468,8 @@ def source_suggest_keys(
     for table, why in sorted(draft.no_key_proposed.items()):
         console.print(f"  [yellow]none[/yellow] {table}: {why}")
     spent = f"{stats['queries_run']} of {stats['max_queries']} queries"
+    # The snapshot must read the schema the draft was built from.
+    snapshot_flag = f" --pg-schema {profiled_schema}" if kind == "postgresql" and profiled_schema != "public" else ""
     if stats["budget_exhausted"]:
         console.print(f"[yellow]Query budget used up ({spent}); some tables were not evaluated.[/yellow]")
     else:
@@ -2449,7 +2478,7 @@ def source_suggest_keys(
         f"\nDraft written to [bold]{out_path}[/bold]. Review it -- delete what is wrong, add what "
         "is missing -- then:\n"
         f"  r2g source set-key-overlay {name} {out_path} --reviewed\n"
-        f"  r2g source snapshot {name}"
+        f"  r2g source snapshot {name}{snapshot_flag}"
     )
 
 
