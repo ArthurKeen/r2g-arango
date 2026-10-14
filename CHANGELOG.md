@@ -7,6 +7,8 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-10-14
+
 ### Changed
 
 - **`r2g source suggest-keys` works on PostgreSQL sources**, not only Snowflake. It
@@ -741,7 +743,9 @@ Initial phased implementation (not yet published to PyPI):
   pipeline, `r2g source dump` CLI, pure-Python FK inference with
   optional value-overlap sampler.
 
-[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/ArthurKeen/r2g-arango/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.1...v0.4.2
