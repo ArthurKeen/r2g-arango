@@ -128,6 +128,12 @@ class SchemaSnapshot(BaseModel):
     key_overlay_summary: dict[str, int] = Field(default_factory=dict)
     key_overlay_source: str | None = None
     key_overlay_fingerprint: str | None = None
+    #: Foreign keys a person accepted from inference (``source infer-fks --accept``):
+    #: ``{table, columns, foreign_table, foreign_columns, method, confidence}`` each.
+    #: The keys themselves are in ``schema_data``, named ``inferred:...`` and
+    #: ``enforced=False``; this keeps what a ``ForeignKey`` has no field for.
+    #: Written only when non-empty, so every other snapshot re-saves byte-identically.
+    inferred_keys: list[dict[str, Any]] = Field(default_factory=list)
     # Defaults to the legacy format so anything not deliberately stamped by
     # create_snapshot is treated as unable to hold UNIQUE keys -- the safe reading.
     schema_format_version: int = 1
@@ -145,6 +151,8 @@ class SchemaSnapshot(BaseModel):
         # Omitted at format 1 so legacy snapshots re-save byte-identically.
         if version == 1:
             out.pop("schema_format_version")
+        if not out.get("inferred_keys"):
+            out.pop("inferred_keys", None)
         return out
 
     @property
@@ -463,6 +471,7 @@ class CatalogManager:
         key_overlay_summary: dict[str, int] | None = None,
         key_overlay_source: str | None = None,
         key_overlay_fingerprint: str | None = None,
+        inferred_keys: list[dict[str, Any]] | None = None,
     ) -> SchemaSnapshot:
         catalog = self._load()
         snap = SchemaSnapshot(
@@ -474,6 +483,7 @@ class CatalogManager:
             key_overlay_summary=key_overlay_summary or {},
             key_overlay_source=key_overlay_source,
             key_overlay_fingerprint=key_overlay_fingerprint,
+            inferred_keys=list(inferred_keys or []),
             schema_format_version=CURRENT_SCHEMA_FORMAT,
         )
         catalog.snapshots[snap.id] = snap

@@ -2612,8 +2612,9 @@ def source_infer_fks(
         False,
         "--accept",
         help=(
-            "Write accepted candidates back into the latest snapshot as "
-            "declared foreign keys. Skips anything already declared."
+            "Write the candidates into a new snapshot as accepted keys: "
+            "enforced=false, named inferred:<table>_<cols>_fk, with method and "
+            "confidence recorded on the snapshot. Skips anything already declared."
         ),
     ),
 ) -> None:
@@ -2704,10 +2705,14 @@ def source_infer_fks(
     console.print(tbl)
 
     if accept:
-        from r2g.types import ForeignKey
-
+        # An accepted key is a person's decision about a guess, not a constraint the
+        # source declared: saved enforced=False and named inferred:<table>_<cols>_fk,
+        # with its method and confidence on the snapshot. Unlabelled, RSA's baseline
+        # would treat the table as authoritative and stop inferring there, and every
+        # consumer would read the key as source-declared.
         accepted = 0
         schema = snap.schema_data
+        records = list(snap.inferred_keys)
         for c in candidates:
             tbl_def = schema.tables.get(c.table)
             if tbl_def is None:
@@ -2715,17 +2720,21 @@ def source_infer_fks(
             existing = {tuple(sorted(fk.columns)) for fk in tbl_def.foreign_keys}
             if tuple(sorted(c.columns)) in existing:
                 continue
-            tbl_def.foreign_keys.append(
-                ForeignKey(
-                    columns=list(c.columns),
-                    foreign_table=c.foreign_table,
-                    foreign_columns=list(c.foreign_columns),
-                    constraint_name=f"inferred_{c.method}",
-                )
-            )
+            tbl_def.foreign_keys.append(c.to_accepted_foreign_key())
+            records.append(c.accepted_record())
             accepted += 1
         if accepted:
-            mgr.create_snapshot(name, schema, pg_schema=snap.pg_schema)
+            # Carry the overlay record forward: this snapshot is the previous one
+            # plus accepted keys, so it was still built on that reviewed overlay.
+            mgr.create_snapshot(
+                name,
+                schema,
+                pg_schema=snap.pg_schema,
+                key_overlay_summary=snap.key_overlay_summary,
+                key_overlay_source=snap.key_overlay_source,
+                key_overlay_fingerprint=snap.key_overlay_fingerprint,
+                inferred_keys=records,
+            )
             console.print(
                 f"[green]Accepted {accepted} candidate(s); wrote a new snapshot "
                 f"with merged FKs.[/green]"

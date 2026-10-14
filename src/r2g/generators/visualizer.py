@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from r2g.fk_inference import key_provenance
 from r2g.log import get_logger
 from r2g.types import EdgeDefinition, MappingConfig, Schema
 
@@ -66,11 +67,7 @@ class MappingVisualizer:
                 return {
                     "constraintName": constraint_name,
                     "enforced": fk.enforced,
-                    "keyProvenance": (
-                        "curated-overlay"
-                        if constraint_name.startswith("overlay:")
-                        else "source-declared"
-                    ),
+                    "keyProvenance": key_provenance(constraint_name),
                 }
         return {}
 
@@ -146,11 +143,7 @@ class MappingVisualizer:
                     "foreign_columns": list(fk.foreign_columns),
                     "constraint_name": fk.constraint_name or "",
                     "enforced": fk.enforced,
-                    "key_provenance": (
-                        "curated-overlay"
-                        if (fk.constraint_name or "").startswith("overlay:")
-                        else "source-declared"
-                    ),
+                    "key_provenance": key_provenance(fk.constraint_name),
                 })
             tables.append({
                 "name": table_name,
