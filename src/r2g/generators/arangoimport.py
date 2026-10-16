@@ -642,6 +642,33 @@ class CsvImportGenerator:
 
         Nullable columns are also skipped for number/boolean because
         arangoimport cannot coerce an empty CSV value to those types.
+
+        .. warning::
+
+           That nullable skip is a partial guard against a silent data-loss
+           bug, not a complete one. arangoimport substitutes the raw CSV token
+           into its JSON request body, so a token that is not a legal JSON
+           value for the requested type makes the body malformed. It then
+           fails to parse its own payload, **drops that row**, and **exits 0**
+           -- so a generated script running under ``set -euo pipefail``
+           continues and reports success with a row missing.
+
+           Verified against ArangoDB 3.12.4. An empty field in a column typed
+           ``number`` produces ``["2",]`` and loses the row; so does a
+           zero-padded value such as ``00042``, which is not a legal JSON
+           number. Three rows in, two stored, exit status 0 in both cases.
+
+           The exposure here is a column the schema declares NOT NULL whose
+           dump nonetheless contains an empty field, or whose declared type
+           does not match the data. Those rows vanish with only a WARNING in
+           the log.
+
+           Options, in increasing order of effort: check import counts against
+           source row counts after a load; drop the number/boolean datatype
+           flags entirely and let the values arrive as strings; or use a loader
+           that does not have this failure mode (arangox reports an
+           unconvertible value as an error naming the column and never drops a
+           row silently).
         """
         if table_name not in self.schema.tables:
             return []
