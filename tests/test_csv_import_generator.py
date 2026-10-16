@@ -408,6 +408,57 @@ class TestGenerateCsvScript:
         assert "jsonl" not in cleaned
 
 
+class TestSilentRowLossGuard:
+    """A discarded row must fail the script, not pass unnoticed."""
+
+    def test_every_import_runs_through_the_guard(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        """arangoimport exits 0 after discarding rows, so `set -e` is blind.
+
+        Measured on ArangoDB 3.12.4: an empty field in a column typed
+        ``number`` makes arangoimport emit a malformed request body, discard
+        that row, print it only as a warning, and exit 0. Fifty discarded rows
+        still exit 0 as long as one row loaded. Its ``--max-errors`` option is
+        not a usable guard either -- it returns non-zero only when every row
+        failed.
+
+        The printed summary is the reliable signal, so every invocation runs
+        through ``run_import``, which fails when the count is not zero.
+        """
+        plan = CsvImportGenerator(
+            ecommerce_config, ecommerce_schema, password="pw"
+        ).build_plan(graph_name="demo")
+
+        invocations = [
+            line
+            for line in plan.script.splitlines()
+            if line.strip().startswith(("arangoimport", "run_import"))
+        ]
+        assert invocations, "the plan must contain import commands"
+        unguarded = [l for l in invocations if not l.strip().startswith("run_import")]
+        assert not unguarded, (
+            f"every arangoimport invocation must run through run_import; "
+            f"unguarded: {unguarded}"
+        )
+        assert "run_import() {" in plan.script, "the guard function must be defined"
+        # The check must key off the summary line, not the exit status.
+        assert "warnings/errors" in plan.script
+        assert "exit 1" in plan.script
+
+    def test_guard_is_defined_before_it_is_used(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        """A guard defined after the first call would be a runtime error."""
+        plan = CsvImportGenerator(
+            ecommerce_config, ecommerce_schema, password="pw"
+        ).build_plan(graph_name="demo")
+        definition = plan.script.index("run_import() {")
+        # shlex.quote leaves a simple collection name unquoted.
+        first_call = plan.script.index("\nrun_import ")
+        assert definition < first_call, "run_import must be defined before use"
+
+
 class TestStructuredCsvPreview:
     def test_plan_groups_commands_and_matches_cli_renderer(
         self, generator, tmp_path
