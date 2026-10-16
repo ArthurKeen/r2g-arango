@@ -18,6 +18,17 @@ logger = get_logger(__name__)
 _VALID_ON_DUPLICATE = frozenset({"error", "update", "replace", "ignore"})
 
 
+#: How the password is referenced in every generated command.
+#:
+#: ArangoDB's client tools resolve a startup option wrapped in at signs from
+#: the environment (``--server.password @ARANGO_PASSWORD@``). Their own help
+#: text gives the reason: it "helps to expose the password less, like to the
+#: process list". A plain ``"$ARANGO_PASSWORD"`` is expanded by the shell
+#: before exec, so the secret is visible in ``ps`` to every user on the host
+#: for as long as the import runs.
+PASSWORD_ENV_REF = "@ARANGO_PASSWORD@"
+
+
 def _bash_env_default(var_name: str, value: str) -> str:
     if value == "":
         return f'{var_name}="${{{var_name}:-}}"'
@@ -83,12 +94,18 @@ def _build_jsonl_import_command(
         create_collection_type
         or ("edge" if collection_type == "edge" else "document")
     )
+    # The password is always passed as @ARANGO_PASSWORD@, never as a shell
+    # expansion or a literal. ArangoDB's client tools resolve a startup option
+    # wrapped in at signs from the environment themselves, so the value never
+    # reaches the process list where any other user on the host can read it.
+    # The ARANGO_PASSWORD export at the top of the script supplies it in both
+    # credential modes.
     server_values = (
-        ('"$ARANGO_ENDPOINT"', '"$ARANGO_DB"', '"$ARANGO_USER"', '"$ARANGO_PASSWORD"')
+        ('"$ARANGO_ENDPOINT"', '"$ARANGO_DB"', '"$ARANGO_USER"', PASSWORD_ENV_REF)
         if environment_credentials
-        else tuple(
-            shlex.quote(value)
-            for value in (endpoint, database, username, password)
+        else (
+            *(shlex.quote(value) for value in (endpoint, database, username)),
+            PASSWORD_ENV_REF,
         )
     )
     parts: list[str] = [
@@ -157,7 +174,7 @@ def _build_graph_creation_arangosh(
             ' --server.endpoint "$ARANGO_ENDPOINT"'
             ' --server.database "$ARANGO_DB"'
             ' --server.username "$ARANGO_USER"'
-            ' --server.password "$ARANGO_PASSWORD"'
+            f" --server.password {PASSWORD_ENV_REF}"
             f" --javascript.execute-string {shlex.quote(js_code)}"
         ),
     ]
@@ -647,7 +664,7 @@ class CsvImportGenerator:
             "--server.endpoint", '"$ARANGO_ENDPOINT"',
             "--server.database", '"$ARANGO_DB"',
             "--server.username", '"$ARANGO_USER"',
-            "--server.password", '"$ARANGO_PASSWORD"',
+            "--server.password", PASSWORD_ENV_REF,
         ]
 
     def _build_doc_command(

@@ -445,7 +445,11 @@ class TestStructuredCsvPreview:
         assert "./dumps/customers.csv" in plan.documents[0].command
         assert "sentinel-password" not in plan.script
         assert "sentinel-target-secret" not in plan.script
-        assert '"$ARANGO_PASSWORD"' in plan.script
+        # The password is referenced as @ARANGO_PASSWORD@, resolved from the
+        # environment by the client tool itself. A shell expansion would put
+        # the secret in the process list for the duration of the import.
+        assert "@ARANGO_PASSWORD@" in plan.script
+        assert '--server.password "$ARANGO_PASSWORD"' not in plan.script
 
     def test_custom_artifact_root_is_shell_quoted(
         self, ecommerce_config, ecommerce_schema
@@ -476,7 +480,8 @@ class TestStructuredCsvPreview:
 
         assert plan.graph_script.startswith("#!/usr/bin/env bash")
         assert "arangosh" in plan.graph_script
-        assert '"$ARANGO_PASSWORD"' in plan.graph_script
+        assert "@ARANGO_PASSWORD@" in plan.graph_script
+        assert '--server.password "$ARANGO_PASSWORD"' not in plan.graph_script
         assert "password-secret" not in plan.graph_script
         assert "target-secret" not in plan.graph_script
 
