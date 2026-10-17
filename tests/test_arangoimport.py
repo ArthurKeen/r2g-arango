@@ -280,3 +280,16 @@ class TestFromSampleSchema:
         path = str(tmp_path / "import.sh")
         content = gen.generate_script(path)
         assert "orders_to_users" in content
+
+
+def test_jsonl_imports_all_run_through_the_strict_guard(generator):
+    """JSONL mode drops NULL-FK edges before writing, so nothing is tolerated."""
+    script = generator.render_script()
+
+    calls = [line for line in script.splitlines() if line.startswith("run_import ")]
+    assert [call.split()[:3] for call in calls] == [
+        ["run_import", "users", "strict"],
+        ["run_import", "orders", "strict"],
+        ["run_import", "orders_to_users", "strict"],
+    ]
+    assert "export ARANGO_PASSWORD=" in script

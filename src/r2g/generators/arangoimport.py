@@ -41,11 +41,34 @@ PASSWORD_ENV_REF = "@ARANGO_PASSWORD@"
 #:
 #: The summary arangoimport prints is the reliable signal, so each import runs
 #: through this wrapper, which fails the script when the count is not zero.
+#: A missing summary also fails: the wrapper fails closed, never open.
+#:
+#: One kind of rejection is the correct outcome: a CSV-direct edge whose
+#: foreign key is NULL. ``_to`` is built from the FK column plus
+#: ``--to-collection-prefix``, so a NULL arrives as the bare prefix
+#: (``customers/``) and the server rejects it. There is nothing for that edge
+#: to point to, so skipping it loses no data; failing on it would stop every
+#: load of a schema with an optional FK. (JSONL mode drops those edges before
+#: writing the file, so it never reaches arangoimport.)
+#:
+#: arangoimport logs at most 20 rejected documents however many there are
+#: (measured on 3.12.11: 150 rejections, 20 logged), so the rejections cannot
+#: be classified one by one. The ``null-fk-ok`` policy therefore accepts them
+#: only when the generator knows the FK column is nullable, *and* every
+#: rejection that was logged is a NULL-FK one. Any logged rejection of another
+#: kind fails the script. Edge rows carry nothing but the two endpoints (every
+#: other column is removed and none gets number or boolean coercion), so the
+#: only other way to reject one is an FK value that is not a legal document
+#: key. With an enforced FK that value is also the parent's primary key, whose
+#: document import already failed under ``strict``. With an unenforced or
+#: inferred FK, an orphan value of that kind falling beyond the first 20 logged
+#: rejections is counted as a NULL FK: that is this guard's known limit.
 IMPORT_GUARD = r'''
 # arangoimport exits 0 even when it discards rows, so `set -e` cannot catch a
 # partial load. Its printed summary is the reliable signal; check that instead.
+#   run_import <label> strict|null-fk-ok <command...>
 run_import() {
-  local label="$1"; shift
+  local label="$1" policy="$2"; shift 2
   local output
   if ! output="$("$@" 2>&1)"; then
     printf '%s\n' "$output" >&2
@@ -53,25 +76,41 @@ run_import() {
     exit 1
   fi
   printf '%s\n' "$output"
-  local errors
+  local errors logged null_fk
   errors="$(printf '%s\n' "$output" | sed -n 's|^warnings/errors: *\([0-9][0-9]*\).*|\1|p' | tail -1)"
-  if [ -n "$errors" ] && [ "$errors" != "0" ]; then
-    echo "FAILED: $label discarded $errors row(s); the load is incomplete." >&2
-    echo "        arangoimport reports this as a warning and exits 0, so this" >&2
-    echo "        check exists to stop the script rather than report success." >&2
+  if [ -z "$errors" ]; then
+    echo "FAILED: $label (no 'warnings/errors:' summary; cannot confirm every row loaded)" >&2
     exit 1
   fi
+  [ "$errors" -eq 0 ] && return 0
+  # An edge whose foreign key is NULL reaches the server as the bare prefix
+  # ("customers/") and is rejected; it has nothing to point to, so skipping it
+  # is correct. Accept that only for a nullable FK, and only if every logged
+  # rejection is of that kind (arangoimport logs at most 20 of them).
+  logged="$(printf '%s\n' "$output" | grep -c 'offending ' || true)"
+  null_fk="$(printf '%s\n' "$output" | grep -cE 'offending document: .*"_(from|to)":"[^"/]+/"[,}]' || true)"
+  if [ "$policy" = "null-fk-ok" ] && [ "$logged" -gt 0 ] && [ "$null_fk" -eq "$logged" ]; then
+    echo "NOTE: $label skipped $errors edge(s) whose foreign key is NULL (nothing to link to)."
+    return 0
+  fi
+  echo "FAILED: $label discarded $errors row(s); the load is incomplete." >&2
+  echo "        arangoimport reports this as a warning and exits 0, so this" >&2
+  echo "        check exists to stop the script rather than report success." >&2
+  exit 1
 }
 '''
 
 
-def _guarded(command: str, label: str) -> str:
+def _guarded(command: str, label: str, *, null_fk_ok: bool = False) -> str:
     """Wrap an arangoimport invocation so a discarded row fails the script.
 
     ``command`` is a backslash-continued ``arangoimport ...`` string, so
-    prefixing the shell function and its label is all that is required.
+    prefixing the shell function, its label and its policy is all that is
+    required. ``null_fk_ok`` is for a CSV-direct edge import whose FK column
+    is nullable; see ``IMPORT_GUARD``.
     """
-    return f"run_import {shlex.quote(label)} {command}"
+    policy = "null-fk-ok" if null_fk_ok else "strict"
+    return f"run_import {shlex.quote(label)} {policy} {command}"
 
 
 def _bash_env_default(var_name: str, value: str) -> str:
@@ -115,7 +154,13 @@ def _script_environment(
         ),
         _bash_env_default("ARANGO_DB", database),
         _bash_env_default("ARANGO_USER", username),
-        _bash_env_default("ARANGO_PASSWORD", "" if secret_safe else password),
+        # Exported because the commands read it as @ARANGO_PASSWORD@, which the
+        # client tool resolves from its own environment. A plain assignment is
+        # a shell variable only: a password baked into the script would never
+        # reach arangoimport, and the import would fail with HTTP 401.
+        "export " + _bash_env_default(
+            "ARANGO_PASSWORD", "" if secret_safe else password
+        ),
     ]
 
 
@@ -699,22 +744,24 @@ class CsvImportGenerator:
            -- so a generated script running under ``set -euo pipefail``
            continues and reports success with a row missing.
 
-           Verified against ArangoDB 3.12.4. An empty field in a column typed
-           ``number`` produces ``["2",]`` and loses the row; so does a
-           zero-padded value such as ``00042``, which is not a legal JSON
-           number. Three rows in, two stored, exit status 0 in both cases.
+           Verified against ArangoDB 3.12.4 and 3.12.11. An empty field in a
+           column typed ``number`` produces ``["2",]`` and loses the row; so
+           does a zero-padded value such as ``00042``, which is not a legal
+           JSON number. Three rows in, two stored, exit status 0 in both cases.
 
            The exposure here is a column the schema declares NOT NULL whose
            dump nonetheless contains an empty field, or whose declared type
-           does not match the data. Those rows vanish with only a WARNING in
-           the log.
+           does not match the data. arangoimport logs only a WARNING for it.
+           The generated script's ``run_import`` wrapper (``IMPORT_GUARD``)
+           works around this: it reads the printed summary and fails the
+           script, so the load stops instead of reporting success. It cannot
+           recover the row; the data or the declared type has to be fixed.
 
-           Options, in increasing order of effort: check import counts against
-           source row counts after a load; drop the number/boolean datatype
-           flags entirely and let the values arrive as strings; or use a loader
-           that does not have this failure mode (arangox reports an
-           unconvertible value as an error naming the column and never drops a
-           row silently).
+           An alternative loader was measured on the same input (arangox at
+           d060f6a): it keeps the row, storing an empty value as ``null`` with
+           no error even when the column is NOT NULL, and stores ``00042`` as
+           ``42``. It rejects a genuinely unconvertible value such as ``abc``
+           with an error naming the column, and loads nothing.
         """
         if table_name not in self.schema.tables:
             return []
@@ -728,6 +775,19 @@ class CsvImportGenerator:
             if arango_dt and not (col.is_nullable and arango_dt in ("number", "boolean")):
                 flags.extend(["--datatype", shlex.quote(f"{col.name}={arango_dt}")])
         return flags
+
+    def _fk_is_nullable(self, table_name: str, fk_cols: tuple[str, ...]) -> bool:
+        """Whether a NULL is legal in any of an edge's FK columns.
+
+        Decides the guard policy for that edge import: only a nullable FK can
+        legitimately produce rejected (bare-prefix) edges.
+        """
+        table = self.schema.tables.get(table_name)
+        if table is None:
+            return False
+        return any(
+            col.is_nullable for col in table.columns if col.name in fk_cols
+        )
 
     def _csv_file_path(self, table_name: str) -> str:
         return f"{self.data_dir.rstrip('/')}/{table_name}.csv"
@@ -1035,7 +1095,15 @@ class CsvImportGenerator:
                     f"from {spec.source_table}.csv..."
                 )
             )
-            lines.append(_guarded(spec.command, spec.target_collection))
+            lines.append(
+                _guarded(
+                    spec.command,
+                    spec.target_collection,
+                    null_fk_ok=self._fk_is_nullable(
+                        spec.source_table, spec.from_fields
+                    ),
+                )
+            )
             lines.append("")
         if graph_name:
             lines.append("# === Named graph ===")
