@@ -97,6 +97,7 @@ The roadmap is organized into phases: Phases 1–4 (MVP through Kafka), Phase 5 
 | **P1.6** | **`arangoimport` script generation** | Emit executable shell scripts to run `arangoimport` for all generated document and edge files. | Done |
 | **P1.7** | **CSV-direct import** | Generate `arangoimport --type csv` scripts that import PG CSV dumps directly using `--translate` for key remapping, `--datatype` for type coercion, and `--from-collection-prefix` / `--to-collection-prefix` for edge `_from`/`_to`. No intermediate JSONL step required. | Done |
 | **P1.8** | **Mapping visualizer** | Interactive HTML visualization of the relational-to-graph mapping using D3.js force-directed graph layout, with relational schema cards and edge mapping detail views. | Done |
+| **P1.9** | **Import script safety** | Generated `arangoimport` / `arangosh` scripts (P1.6, P1.7) never put the ArangoDB password in the process list (it is passed as `@ARANGO_PASSWORD@` and read by the client tool from its exported environment), and they fail instead of reporting success when `arangoimport` rejects rows, which it does while exiting 0. The one tolerated rejection is a CSV-direct edge whose nullable foreign key is NULL; it is skipped and counted. | Done |
 
 ### Phase 2: Direct PostgreSQL connection and streaming -- Implemented
 

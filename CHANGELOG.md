@@ -7,6 +7,29 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Generated import scripts no longer put the ArangoDB password in the process list.**
+  `arangoimport` and `arangosh` commands passed `--server.password "$ARANGO_PASSWORD"`,
+  which the shell expands before running the command, so any user on the host could read
+  the password with `ps` for as long as the import ran. They now pass
+  `@ARANGO_PASSWORD@`, which the ArangoDB client tool reads from its own environment. The
+  script exports `ARANGO_PASSWORD`, so a password set beforehand or written into the
+  script both still work.
+
+### Fixed
+
+- **Generated import scripts stop when `arangoimport` silently loses rows.** This works
+  around an `arangoimport` defect: it discards a row whose value is not valid for the type
+  it was told to use (for example, an empty field in a column typed `number`), logs only a
+  warning, and exits 0, so the script used to report success with rows missing. Each
+  import now runs through a check of `arangoimport`'s printed summary and the script stops
+  if any row was rejected. One rejection is expected and allowed: in CSV-direct mode, an
+  edge whose foreign key column is nullable and holds NULL is skipped, with a note saying
+  how many, because it has nothing to link to. Known limit: `arangoimport` logs at most
+  20 rejections, so for a nullable foreign key that the source does not enforce, an
+  unlogged rejection of another kind can be counted as a NULL.
+
 ## [0.6.1] — 2026-10-14
 
 ### Changed
