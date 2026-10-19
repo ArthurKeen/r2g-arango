@@ -1,8 +1,8 @@
 # Plan — raise the SOTA scorecard to level 3
 
 **Status:** proposed 2026-10-19; nothing started · **Baseline:** 34.0 / 100
-(`docs/internal/SOTA-SCORECARD.md`, version 1, 2026-10-14) · **Target:** about 46–47 at the
-2027-01 review, 50 as a stretch, 56.0 the quarter after.
+(`docs/internal/SOTA-SCORECARD.md`, version 1, 2026-10-14) · **Target:** about 48–49 at the
+2027-01 review, 52 as a stretch, 57.6 the quarter after.
 
 ## Why
 
@@ -14,8 +14,8 @@ expression's result, in some cases by silently dropping a field.
 
 ## Approach
 
-1. **Fix silent wrong results before measuring.** A benchmark taken while bulk load and CDC
-   can drop a field would measure the bug. The scorecard's cap rule also holds load
+1. **Fix silent wrong results before measuring.** A benchmark taken while bulk load (JSONL
+   and CSV-direct) and CDC can drop a field would measure the bug. The scorecard's cap rule also holds load
    correctness and change handling at level 2 until P5c.1.6 is closed. This is why Phase 1
    comes before the harness, although the scorecard's backlog ranks the harness first by gain
    per unit of work.
@@ -33,12 +33,26 @@ expression's result, in some cases by silently dropping a field.
 
 ### 1.1 Bulk export refuses expressions it cannot compute (P5c.1.6, bulk)
 
-- **Context:** `transform-all` and `transform-nodes` write documents without the target field
-  of any expression that must be evaluated by ArangoDB. They have no database connection.
-- **Action:** refuse when the transformers are built, with an error naming the collection and
-  the target field, as P5c.1.6 requires. Server-side evaluation behind an `--endpoint` option
-  can follow if anyone needs it.
-- **Result:** bulk output never silently omits an expression's target field.
+There are two bulk paths, and both drop fields today.
+
+- **Context:**
+  - **JSONL** (`transform-all`, `transform-nodes`) writes documents without the target field
+    of any expression that must be evaluated by ArangoDB. These commands have no database
+    connection.
+  - **CSV-direct** (`generate-csv-import`, and Studio's CSV-direct export) never runs
+    `NodeTransformer`, so it skips *every* field expression, including ones the local
+    evaluator computes. The command exits 0, and the only notice is a `# WARNING` comment
+    inside the generated script (`src/r2g/generators/arangoimport.py:1005`). The README calls
+    CSV-direct the preferred pipeline.
+- **Action:**
+  - JSONL: refuse when the transformers are built, with an error naming the collection and
+    the target field, as P5c.1.6 requires. Server-side evaluation behind an `--endpoint`
+    option can follow if anyone needs it.
+  - CSV-direct: refuse a collection whose mapping uses any feature the generator's own
+    fidelity warning lists, naming the collection and the feature, and point to JSONL mode.
+    Routing those collections through JSONL automatically is the alternative (open
+    decision 2).
+- **Result:** no bulk output silently omits an expression's target field.
 
 ### 1.2 CDC evaluates delegated expressions on the server (P5c.1.6, CDC)
 
@@ -55,21 +69,26 @@ expression's result, in some cases by silently dropping a field.
 - **Context:** a `ksql` or `python` expression loads the raw source value with only a warning
   (`src/r2g/transformers/node_transformer.py:64`), and Studio still offers both engines
   (`src/r2g/ui/static/index.html:1219`, `:6224`).
-- **Action:** `NodeTransformer` raises instead of warning, which covers every load path in one
-  place. `validate_config` reports the same error, and Studio offers AQL only.
-- **Result:** P5c.2.5 and P5c.1.4's code gap are closed. P5c.1.7 stays open as not built, but
-  no longer fails silently. This is a behaviour change: a CHANGELOG `### Changed` entry and a
+- **Action:** `NodeTransformer` raises instead of warning. That covers every load path that
+  builds documents through it: streaming, JSONL bulk and CDC. CSV-direct does not, and is
+  handled by 1.1. `validate_config` reports the same error, and Studio offers AQL only.
+- **Result:** P5c.2.5 and P5c.1.4's code gap are closed; P5c.2.5's PRD row then cites the
+  KSQL menu entry (`index.html:6224`) rather than the start of its function (`:6218`).
+  P5c.1.7 stays open as not built, but no longer fails silently. This is a behaviour change: a CHANGELOG `### Changed` entry and a
   minor version.
 
 ### 1.4 A test that the load paths agree
 
-- **Context:** nothing checks that streaming, bulk and CDC give the same result.
+- **Context:** nothing checks that streaming, JSONL bulk, CSV-direct and CDC give the same
+  result.
 - **Action:** an integration test that runs every expression in `tests/test_expressions.py`
-  and in `docs/research/transformation-language-probes/` through all three paths, and asserts
-  that they produce the same document or all refuse.
+  and in the probe corpus (`docs/research/transformation-language-probes/probe_delegation.py:51`)
+  through all four paths, and asserts that they produce the same document or all refuse. Copy
+  the probe expressions into a test fixture, so the test does not import from `docs/` or need
+  the probes' live connections.
 - **Result:** dimension 7 moves from level 1 to level 2 (**+1.6**).
 
-## Phase 2 — the benchmark harness (about 4 weeks; → 47.2)
+## Phase 2 — the benchmark harness (about 4 weeks; → 48.8)
 
 ### 2.1 Harness and report format
 
@@ -87,7 +106,7 @@ expression's result, in some cases by silently dropping a field.
 - **Action:** for each Forge dialect and for Customer 360, record source and target counts per
   table and edge collection, and diff every document field by field against its source row.
   Threshold: zero mismatches and exact counts.
-- **Result:** dimension 1 reaches level 3 (**+3.0**). Depends on 1.2.
+- **Result:** dimension 1 reaches level 3 (**+3.0**). Depends on 1.1 and 1.2.
 
 ### 2.3 Throughput
 
@@ -112,9 +131,10 @@ expression's result, in some cases by silently dropping a field.
 ### 2.5 Sensitive-data leak audit (backlog item 8, moved up)
 
 - **Context:** this costs little once the harness exists.
-- **Action:** load a Forge workload with classification tags on chosen columns. Count the
-  above-threshold columns that reach the graph unmasked (target 0), and the columns the
-  manifest fails to account for (target 0).
+- **Action:** load a Forge workload with classification tags on chosen columns, through every
+  load path (streaming, JSONL bulk, CSV-direct and CDC). Count the above-threshold columns
+  that reach the graph unmasked (target 0), and the columns the manifest fails to account for
+  (target 0).
 - **Result:** dimension 8 reaches level 3 (**+1.6**).
 
 ### 2.6 A report at every release, and a CI regression check
@@ -125,10 +145,22 @@ expression's result, in some cases by silently dropping a field.
   build; throughput is advisory, because CI hardware is noisy.
 - **Result:** dimension 11 reaches level 3 after the second release (**+1.0**).
 
+### 2.7 Transformation consistency in the report
+
+- **Context:** after Phase 1, 1.4's differential test exists but records nothing.
+- **Action:** run it from the harness on the versioned expression corpus, and write its result
+  (expressions run, paths compared, disagreements, refusals) into each release's report.
+  Threshold: zero disagreements between paths. P5c.1.4's documented differences from
+  ArangoDB's own results do not cap this dimension: after Phase 1 every path routes an
+  expression the same way (local when it compiles, delegated otherwise, or refused), so the
+  paths agree with each other. The report names those differences as a known limit.
+- **Result:** dimension 7 reaches level 3 (**+1.6**). The scorecard's backlog does not list
+  this; it is cheap once 1.4 and 2.1 exist.
+
 Customer 360 lives in Snowflake and needs an account to run. Its results are recorded, but
 they are not part of the outside-rerun set and do not run in CI.
 
-## Phase 3 — change handling and operability (about 3 weeks, can overlap Phase 2; → 50.4)
+## Phase 3 — change handling and operability (about 3 weeks, can overlap Phase 2; → 52.0)
 
 ### 3.1 `migrate-config` keeps people's decisions
 
@@ -159,7 +191,7 @@ they are not part of the outside-rerun set and do not run in CI.
   each minor release.
 - **Result:** dimension 10 reaches level 3 (**+1.2**).
 
-## Phase 4 — next quarter (→ 56.0)
+## Phase 4 — next quarter (→ 57.6)
 
 - **4.1 Expert reference mappings** for Northwind, Chinook and pagila (all under `docker/`),
   and a test that scores r2g's unedited proposal against them: collections and edges matched,
@@ -193,11 +225,12 @@ they are not part of the outside-rerun set and do not run in CI.
 |---|---:|
 | Baseline (2026-10-14) | 34.0 |
 | Phase 1 | 35.6 |
-| Phase 2, first release with a report | 46.2 |
-| Phase 2, second release with a report | 47.2 |
-| Phase 3 | 50.4 |
-| Phase 4 | 56.0 |
+| Phase 2, first release with a report | 47.8 |
+| Phase 2, second release with a report | 48.8 |
+| Phase 3 | 52.0 |
+| Phase 4 | 57.6 |
 
+Phase 4 leaves only mapping quality below level 3 (level 2, 2.4 short of 60).
 60 is the ceiling for a self-assessment. Going past it needs an outside party to rerun a
 benchmark (level 4).
 
@@ -206,7 +239,9 @@ benchmark (level 4).
 - **PRD.** The harness and the scorecard check are new code with no requirement yet. Each
   phase's PR adds its PRD rows alongside the code, and the commit subject names the PRD edit.
   Phase 1 closes P5c.1.6, P5c.2.5 and P5c.1.4's code gap through `/prd-sync`, with
-  `file:line` evidence.
+  `file:line` evidence. CSV-direct's dropped fields fall under P5c.1.6's rule that a
+  bulk-loaded document never silently omits an expression's target field; the next
+  `/prd-sync` adds them to that drift alert's gap rather than editing the PRD.
 - **CHANGELOG and release.** Phase 1 refuses input that used to load, so it ships as a minor
   release with a `### Changed` entry.
 - **Downstream.** CDF pins r2g exactly and adopts each release deliberately. Before it moves
@@ -220,6 +255,9 @@ benchmark (level 4).
    - primary keys at precision ≥ 0.95 and recall ≥ 0.9; foreign keys at ≥ 0.9 and ≥ 0.8
    - operator trial under 30 minutes, with no help
 2. **Bulk expressions.** Refuse only, or also evaluate on the server through `--endpoint`.
+   For CSV-direct: refuse, or route the affected collections through JSONL. CDF uses no field
+   expressions today (every CDF mapping has `field_expressions: []`), so refusing breaks
+   nothing downstream.
 3. **People.** Who writes the expert reference mappings, and who runs the operator trial.
 4. **Releases.** Dimension 11 needs two releases with reports before the 2027-01 review.
 5. **Where the `migrate-config` issue lives.** It is on ArthurKeen/r2g-arango, and the

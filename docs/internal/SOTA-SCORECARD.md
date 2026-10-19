@@ -57,8 +57,8 @@ What the result means:
 - **The cheapest gain is one benchmark harness.** A harness that writes a dated, inspectable
   report moves throughput to level 3 at once, and evaluation rigor after two releases. It
   measures load correctness and key discovery on the same Forge workloads too. Load
-  correctness counts only after P5c.1.6 is closed, because until then bulk load and CDC can
-  silently drop a field. See the prioritized backlog.
+  correctness counts only after P5c.1.6 is closed, because until then bulk load (JSONL and
+  CSV-direct) and CDC can silently drop a field. See the prioritized backlog.
 
 ## Scoring rule
 
@@ -119,6 +119,9 @@ dropped, duplicated or altered?
   to ArangoDB, but only the streaming pipeline does that (`src/r2g/streaming/pipeline.py:404`).
   Bulk load and CDC write the document without the expression's target field, with no error.
   `NodeTransformer.transform_row` leaves the field unset (`src/r2g/transformers/node_transformer.py:213`).
+  The CSV-direct import (`generate-csv-import`) goes further: it never runs `NodeTransformer`,
+  so it omits every expression's target field, including ones the local evaluator computes. Its
+  only notice is a comment inside the generated script (`src/r2g/generators/arangoimport.py:1005`).
 
 **To reach level 3:** close P5c.1.6, then build a harness that loads each Forge seed and
 Customer 360 and writes a dated report. The report should include:
@@ -275,7 +278,8 @@ and expressions it cannot compile are delegated on the streaming path.
 **Why it is level 1:** four open drift alerts say the paths can disagree:
 - **P5c.1.4:** the evaluator is partial.
 - **P5c.1.6:** bulk load and CDC must evaluate or reject a delegated expression. A bulk-loaded
-  document must never silently omit the expression's target field.
+  document must never silently omit the expression's target field. The CSV-direct import omits
+  every expression's target field today, not only delegated ones.
 - **P5c.1.7:** KSQL translation has not started, and a KSQL expression today loads the raw
   source value with only a warning (`src/r2g/transformers/node_transformer.py:64`).
 - **P5c.2.5:** the UI still offers KSQL and Python.
