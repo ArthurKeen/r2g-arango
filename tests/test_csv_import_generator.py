@@ -10,11 +10,17 @@ import subprocess
 import pytest
 
 from r2g.config import ConfigManager
-from r2g.generators.arangoimport import IMPORT_GUARD, CsvImportGenerator
+from r2g.generators.arangoimport import (
+    IMPORT_GUARD,
+    CsvDirectUnsupportedError,
+    CsvImportGenerator,
+)
+from r2g.masking import make_mask_expression
 from r2g.types import (
     CollectionMapping,
     Column,
     EdgeDefinition,
+    FieldExpression,
     ForeignKey,
     MappingConfig,
     Schema,
@@ -695,15 +701,6 @@ class TestStructuredCsvPreview:
         command = plan.documents[0].command.replace(" \\\n    ", " ")
         assert "--translate name=display_name" in command
 
-    def test_warns_when_csv_cannot_apply_include_filter(
-        self, ecommerce_config, ecommerce_schema
-    ):
-        ecommerce_config.collections["customers"].include_fields = ["id", "name"]
-        plan = CsvImportGenerator(
-            ecommerce_config, ecommerce_schema
-        ).build_plan()
-        assert plan.warnings
-        assert "include-field filters" in plan.warnings[0]
 
     def test_renamed_collections_drive_edge_prefixes(
         self, ecommerce_config, ecommerce_schema
@@ -741,3 +738,81 @@ class TestFromSampleSchema:
         assert "orders" in content
         assert "ecom_graph" in content
         assert "arangosh" in content
+
+
+class TestCsvDirectRefusesUnfaithfulMappings:
+    """CSV-direct loads every CSV column as it stands, so a mapping feature it
+    cannot reproduce must refuse, never load the column unmasked or unfiltered."""
+
+    def _refusal(self, config, schema) -> str:
+        gen = CsvImportGenerator(config, schema)
+        with pytest.raises(CsvDirectUnsupportedError) as plan_err:
+            gen.build_plan()
+        with pytest.raises(CsvDirectUnsupportedError) as script_err:
+            gen.render_script()
+        assert str(plan_err.value) == str(script_err.value)
+        return str(plan_err.value)
+
+    @pytest.mark.parametrize("kind", ["redact", "nullify", "hash", "tokenize"])
+    def test_masked_column_is_refused(self, ecommerce_config, ecommerce_schema, kind):
+        ecommerce_config.collections["customers"].field_expressions = [
+            make_mask_expression("email", kind)
+        ]
+        msg = self._refusal(ecommerce_config, ecommerce_schema)
+        assert "customers: field expressions (email)" in msg
+        assert "JSONL mode" in msg
+
+    def test_excluded_column_is_refused(self, ecommerce_config, ecommerce_schema):
+        ecommerce_config.collections["customers"].exclude_fields = ["email", "balance"]
+        msg = self._refusal(ecommerce_config, ecommerce_schema)
+        assert "customers: excluded fields (balance, email)" in msg
+
+    def test_include_filter_is_refused(self, ecommerce_config, ecommerce_schema):
+        ecommerce_config.collections["customers"].include_fields = ["id", "name"]
+        msg = self._refusal(ecommerce_config, ecommerce_schema)
+        assert "customers: an include-field filter" in msg
+
+    def test_computed_field_is_refused(self, ecommerce_config, ecommerce_schema):
+        ecommerce_config.collections["customers"].field_expressions = [
+            FieldExpression(
+                target="label", sources=["name", "email"],
+                expression='CONCAT(@name, " <", @email, ">")',
+            )
+        ]
+        msg = self._refusal(ecommerce_config, ecommerce_schema)
+        assert "customers: field expressions (label)" in msg
+
+    def test_type_overrides_are_refused(self, ecommerce_config, ecommerce_schema):
+        ecommerce_config.type_overrides = {"numeric": "string"}
+        msg = self._refusal(ecommerce_config, ecommerce_schema)
+        assert "mapping-level type overrides (numeric)" in msg
+
+    def test_every_problem_is_named_at_once(self, ecommerce_config, ecommerce_schema):
+        ecommerce_config.collections["customers"].exclude_fields = ["email"]
+        ecommerce_config.collections["orders"].field_expressions = [
+            make_mask_expression("notes", "redact")
+        ]
+        msg = self._refusal(ecommerce_config, ecommerce_schema)
+        assert "customers: excluded fields (email)" in msg
+        assert "orders: field expressions (notes)" in msg
+
+    def test_identity_expression_that_changes_nothing_is_allowed(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        ecommerce_config.collections["customers"].field_expressions = [
+            FieldExpression(target="name", sources=["name"]),
+            FieldExpression(target="email"),
+        ]
+        plan = CsvImportGenerator(ecommerce_config, ecommerce_schema).build_plan()
+        assert plan.warnings == ()
+
+    def test_identity_rename_expression_is_refused(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        # A rename belongs in field_mappings (reproduced with --translate); as a
+        # field expression CSV-direct would load it under the source name.
+        ecommerce_config.collections["customers"].field_expressions = [
+            FieldExpression(target="display_name", sources=["name"])
+        ]
+        msg = self._refusal(ecommerce_config, ecommerce_schema)
+        assert "customers: field expressions (display_name)" in msg

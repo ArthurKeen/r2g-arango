@@ -361,6 +361,11 @@ Opens an interactive HTML report in your browser showing the PG-to-graph mapping
 
 ### 4. Generate CSV-direct import script (preferred)
 
+CSV-direct loads each CSV column as it stands. If your mapping masks or excludes columns,
+filters them with `include_fields`, computes fields with expressions, or sets type
+overrides, `generate-csv-import` refuses it and names what it cannot reproduce; use the
+JSONL path (4a) instead. Renames in `field_mappings` work on both paths.
+
 ```bash
 r2g generate-csv-import \
   --schema schema.json \

@@ -691,6 +691,10 @@ _PG_TO_ARANGO_DATATYPE = {
 }
 
 
+class CsvDirectUnsupportedError(ValueError):
+    """A mapping uses a feature the CSV-direct import cannot reproduce."""
+
+
 class CsvImportGenerator:
     """Generates arangoimport commands that work directly on PG CSV dumps.
 
@@ -1002,24 +1006,48 @@ class CsvImportGenerator:
             )
         return tuple(specs)
 
-    def _fidelity_warnings(self) -> tuple[str, ...]:
-        limitations: set[str] = set()
-        for mapping in self.config.collections.values():
-            if mapping.field_expressions:
-                limitations.add("field expressions")
+    def _refuse_unfaithful_mapping(self) -> None:
+        """Refuse a mapping this CSV-direct script cannot reproduce faithfully.
+
+        ``arangoimport --type csv`` loads every CSV column as it stands, so a
+        field expression (a mask included), an include or exclude filter, or a
+        mapping-level type override would be silently ignored: a masked or
+        excluded column would load in clear, and a computed field would be
+        missing. Renames via ``field_mappings`` are reproduced with
+        ``--translate``, and an identity expression that leaves a column as it
+        is changes nothing, so neither is refused.
+        """
+        problems: list[str] = []
+        for key, mapping in self.config.collections.items():
+            features: list[str] = []
+            changed = sorted(
+                fx.target
+                for fx in mapping.field_expressions
+                if not (fx.is_identity and fx.sources in ([], [fx.target]))
+            )
+            if changed:
+                features.append(f"field expressions ({', '.join(changed)})")
             if mapping.include_fields is not None:
-                limitations.add("include-field filters")
+                features.append("an include-field filter")
             if mapping.exclude_fields:
-                limitations.add("exclude-field filters")
+                features.append(
+                    f"excluded fields ({', '.join(sorted(mapping.exclude_fields))})"
+                )
+            if features:
+                problems.append(f"{key}: {'; '.join(features)}")
         if self.config.type_overrides:
-            limitations.add("mapping-level type overrides")
-        if not limitations:
-            return ()
-        return (
-            "CSV-direct import cannot reproduce "
-            + ", ".join(sorted(limitations))
-            + "; use JSONL mode for mapping-faithful output.",
-        )
+            problems.append(
+                "mapping-level type overrides ("
+                + ", ".join(sorted(self.config.type_overrides))
+                + ")"
+            )
+        if problems:
+            raise CsvDirectUnsupportedError(
+                "CSV-direct import cannot reproduce this mapping, and would load "
+                "these columns as they stand in the CSV: "
+                + " | ".join(problems)
+                + ". Use JSONL mode instead (transform-all, then generate-import)."
+            )
 
     def _build_graph_creation_arangosh(self, graph_name: str) -> list[str]:
         """Build arangosh command to create a named graph."""
@@ -1034,6 +1062,7 @@ class CsvImportGenerator:
         generated_at: str | None = None,
     ) -> str:
         """Render direct-CSV commands without writing a script."""
+        self._refuse_unfaithful_mapping()
         documents = self.build_document_specs(overwrite=overwrite_on_initial)
         edges = self.build_edge_specs(overwrite=overwrite_on_initial)
         return self._render_script(
@@ -1073,8 +1102,6 @@ class CsvImportGenerator:
             ),
             "",
         ]
-        for warning in self._fidelity_warnings():
-            lines.append(f"# WARNING: {warning}")
         lines.extend(["", "# === Document collections ===", ""])
         for spec in documents:
             msg = (
@@ -1125,6 +1152,7 @@ class CsvImportGenerator:
                 "arangoimport preview does not support LPG layout; use the "
                 "Studio streaming Load path for this mapping"
             )
+        self._refuse_unfaithful_mapping()
         documents = self.build_document_specs(overwrite=overwrite_on_initial)
         edges = self.build_edge_specs(overwrite=overwrite_on_initial)
         return ImportPlan(
@@ -1147,7 +1175,6 @@ class CsvImportGenerator:
                 password=self.password,
                 secret_safe=secret_safe,
             ),
-            warnings=self._fidelity_warnings(),
         )
 
     def generate_csv_script(

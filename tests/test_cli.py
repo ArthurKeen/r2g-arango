@@ -400,6 +400,37 @@ class TestGenerateCsvImport:
         assert result.exit_code == 0
         assert "Wrote CSV import script" in result.output
 
+    def test_refuses_a_masked_column_and_writes_no_script(
+        self, schema_file, config_file, dumps_dir, tmp_path, monkeypatch
+    ):
+        import structlog
+
+        from r2g.config import ConfigManager
+        from r2g.masking import make_mask_expression
+
+        # r2g.main's module logger is cached on first use (cache_logger_on_first_use),
+        # so an earlier CliRunner test can leave it bound to a closed stream; the error
+        # path's log.exception would then raise before the message prints.
+        monkeypatch.setattr("r2g.main.log", structlog.get_logger("test_cli"))
+
+        mapping = ConfigManager.load_config(config_file)
+        users = next(k for k, cm in mapping.collections.items() if cm.source_table == "users")
+        mapping.collections[users].field_expressions = [make_mask_expression("email", "redact")]
+        ConfigManager.save_config(mapping, config_file)
+        output = tmp_path / "import_csv.sh"
+        result = runner.invoke(app, [
+            "generate-csv-import",
+            "--schema", schema_file,
+            "--config", config_file,
+            "--data-dir", dumps_dir,
+            "--output", str(output),
+        ])
+        assert result.exit_code == 1
+        said = " ".join(plain_output(result).split())  # Rich wraps long errors
+        assert "cannot reproduce this mapping" in said
+        assert f"{users}: field expressions (email)" in said
+        assert not output.exists()
+
 
 class TestVisualizeMappingCLI:
     def test_generate_visualization(self, schema_file, config_file, tmp_path):
