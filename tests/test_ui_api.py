@@ -830,7 +830,9 @@ class TestMappingEndpoints:
         assert body["data_dir"] == "./output"
         assert body["documents"][0]["mapping_id"] == "users"
         assert "Studio Load streams data directly over HTTP" in body["load_note"]
-        assert "$ARANGO_PASSWORD" in body["script"]
+        # @ARANGO_PASSWORD@ is resolved from the environment by the client
+        # tool, so the secret never reaches the process list.
+        assert "@ARANGO_PASSWORD@" in body["script"]
 
     def test_arangoimport_preview_accepts_shell_quoted_artifact_directory(
         self, client, tmp_path, catalog_dir

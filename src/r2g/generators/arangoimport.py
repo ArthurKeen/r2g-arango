@@ -18,6 +18,101 @@ logger = get_logger(__name__)
 _VALID_ON_DUPLICATE = frozenset({"error", "update", "replace", "ignore"})
 
 
+#: How the password is referenced in every generated command.
+#:
+#: ArangoDB's client tools resolve a startup option wrapped in at signs from
+#: the environment (``--server.password @ARANGO_PASSWORD@``). Their own help
+#: text gives the reason: it "helps to expose the password less, like to the
+#: process list". A plain ``"$ARANGO_PASSWORD"`` is expanded by the shell
+#: before exec, so the secret is visible in ``ps`` to every user on the host
+#: for as long as the import runs.
+PASSWORD_ENV_REF = "@ARANGO_PASSWORD@"
+
+
+#: Shell preamble that turns a silently-discarded row into a failed script.
+#:
+#: arangoimport discards a row whose raw CSV token is not a legal JSON value
+#: for the type it was told to use -- an empty field in a column typed
+#: ``number`` is the common case -- and **exits 0 anyway**, so ``set -e`` does
+#: not fire and the script reports success with rows missing. Its
+#: ``--max-errors`` option is not a usable guard: measured on ArangoDB 3.12.4,
+#: fifty discarded rows still exit 0 whenever at least one row loaded, and it
+#: only returns non-zero when every row failed.
+#:
+#: The summary arangoimport prints is the reliable signal, so each import runs
+#: through this wrapper, which fails the script when the count is not zero.
+#: A missing summary also fails: the wrapper fails closed, never open.
+#:
+#: One kind of rejection is the correct outcome: a CSV-direct edge whose
+#: foreign key is NULL. ``_to`` is built from the FK column plus
+#: ``--to-collection-prefix``, so a NULL arrives as the bare prefix
+#: (``customers/``) and the server rejects it. There is nothing for that edge
+#: to point to, so skipping it loses no data; failing on it would stop every
+#: load of a schema with an optional FK. (JSONL mode drops those edges before
+#: writing the file, so it never reaches arangoimport.)
+#:
+#: arangoimport logs at most 20 rejected documents however many there are
+#: (measured on 3.12.11: 150 rejections, 20 logged), so the rejections cannot
+#: be classified one by one. The ``null-fk-ok`` policy therefore accepts them
+#: only when the generator knows the FK column is nullable, *and* every
+#: rejection that was logged is a NULL-FK one. Any logged rejection of another
+#: kind fails the script. Edge rows carry nothing but the two endpoints (every
+#: other column is removed and none gets number or boolean coercion), so the
+#: only other way to reject one is an FK value that is not a legal document
+#: key. With an enforced FK that value is also the parent's primary key, whose
+#: document import already failed under ``strict``. With an unenforced or
+#: inferred FK, an orphan value of that kind falling beyond the first 20 logged
+#: rejections is counted as a NULL FK: that is this guard's known limit.
+IMPORT_GUARD = r'''
+# arangoimport exits 0 even when it discards rows, so `set -e` cannot catch a
+# partial load. Its printed summary is the reliable signal; check that instead.
+#   run_import <label> strict|null-fk-ok <command...>
+run_import() {
+  local label="$1" policy="$2"; shift 2
+  local output
+  if ! output="$("$@" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    echo "FAILED: $label (arangoimport returned non-zero)" >&2
+    exit 1
+  fi
+  printf '%s\n' "$output"
+  local errors logged null_fk
+  errors="$(printf '%s\n' "$output" | sed -n 's|^warnings/errors: *\([0-9][0-9]*\).*|\1|p' | tail -1)"
+  if [ -z "$errors" ]; then
+    echo "FAILED: $label (no 'warnings/errors:' summary; cannot confirm every row loaded)" >&2
+    exit 1
+  fi
+  [ "$errors" -eq 0 ] && return 0
+  # An edge whose foreign key is NULL reaches the server as the bare prefix
+  # ("customers/") and is rejected; it has nothing to point to, so skipping it
+  # is correct. Accept that only for a nullable FK, and only if every logged
+  # rejection is of that kind (arangoimport logs at most 20 of them).
+  logged="$(printf '%s\n' "$output" | grep -c 'offending ' || true)"
+  null_fk="$(printf '%s\n' "$output" | grep -cE 'offending document: .*"_(from|to)":"[^"/]+/"[,}]' || true)"
+  if [ "$policy" = "null-fk-ok" ] && [ "$logged" -gt 0 ] && [ "$null_fk" -eq "$logged" ]; then
+    echo "NOTE: $label skipped $errors edge(s) whose foreign key is NULL (nothing to link to)."
+    return 0
+  fi
+  echo "FAILED: $label discarded $errors row(s); the load is incomplete." >&2
+  echo "        arangoimport reports this as a warning and exits 0, so this" >&2
+  echo "        check exists to stop the script rather than report success." >&2
+  exit 1
+}
+'''
+
+
+def _guarded(command: str, label: str, *, null_fk_ok: bool = False) -> str:
+    """Wrap an arangoimport invocation so a discarded row fails the script.
+
+    ``command`` is a backslash-continued ``arangoimport ...`` string, so
+    prefixing the shell function, its label and its policy is all that is
+    required. ``null_fk_ok`` is for a CSV-direct edge import whose FK column
+    is nullable; see ``IMPORT_GUARD``.
+    """
+    policy = "null-fk-ok" if null_fk_ok else "strict"
+    return f"run_import {shlex.quote(label)} {policy} {command}"
+
+
 def _bash_env_default(var_name: str, value: str) -> str:
     if value == "":
         return f'{var_name}="${{{var_name}:-}}"'
@@ -59,7 +154,13 @@ def _script_environment(
         ),
         _bash_env_default("ARANGO_DB", database),
         _bash_env_default("ARANGO_USER", username),
-        _bash_env_default("ARANGO_PASSWORD", "" if secret_safe else password),
+        # Exported because the commands read it as @ARANGO_PASSWORD@, which the
+        # client tool resolves from its own environment. A plain assignment is
+        # a shell variable only: a password baked into the script would never
+        # reach arangoimport, and the import would fail with HTTP 401.
+        "export " + _bash_env_default(
+            "ARANGO_PASSWORD", "" if secret_safe else password
+        ),
     ]
 
 
@@ -83,12 +184,18 @@ def _build_jsonl_import_command(
         create_collection_type
         or ("edge" if collection_type == "edge" else "document")
     )
+    # The password is always passed as @ARANGO_PASSWORD@, never as a shell
+    # expansion or a literal. ArangoDB's client tools resolve a startup option
+    # wrapped in at signs from the environment themselves, so the value never
+    # reaches the process list where any other user on the host can read it.
+    # The ARANGO_PASSWORD export at the top of the script supplies it in both
+    # credential modes.
     server_values = (
-        ('"$ARANGO_ENDPOINT"', '"$ARANGO_DB"', '"$ARANGO_USER"', '"$ARANGO_PASSWORD"')
+        ('"$ARANGO_ENDPOINT"', '"$ARANGO_DB"', '"$ARANGO_USER"', PASSWORD_ENV_REF)
         if environment_credentials
-        else tuple(
-            shlex.quote(value)
-            for value in (endpoint, database, username, password)
+        else (
+            *(shlex.quote(value) for value in (endpoint, database, username)),
+            PASSWORD_ENV_REF,
         )
     )
     parts: list[str] = [
@@ -157,7 +264,7 @@ def _build_graph_creation_arangosh(
             ' --server.endpoint "$ARANGO_ENDPOINT"'
             ' --server.database "$ARANGO_DB"'
             ' --server.username "$ARANGO_USER"'
-            ' --server.password "$ARANGO_PASSWORD"'
+            f" --server.password {PASSWORD_ENV_REF}"
             f" --javascript.execute-string {shlex.quote(js_code)}"
         ),
     ]
@@ -451,6 +558,7 @@ class ArangoImportGenerator:
             "# Generated by R2G ArangoImportGenerator",
             f"# {generated_at}",
             "set -euo pipefail",
+            IMPORT_GUARD,
             "",
             *_script_environment(
                 endpoint=self.endpoint,
@@ -471,7 +579,7 @@ class ArangoImportGenerator:
                     f"Importing document collection {spec.target_collection}..."
                 )
             )
-            lines.append(spec.command)
+            lines.append(_guarded(spec.command, spec.target_collection))
             lines.append("")
         for spec in edges:
             lines.append(
@@ -484,7 +592,7 @@ class ArangoImportGenerator:
                     f"Importing edge collection {spec.edge_collection}..."
                 )
             )
-            lines.append(spec.command)
+            lines.append(_guarded(spec.command, spec.target_collection))
             lines.append("")
         if graph_name:
             lines.extend(["# === Named graph ===", ""])
@@ -625,6 +733,35 @@ class CsvImportGenerator:
 
         Nullable columns are also skipped for number/boolean because
         arangoimport cannot coerce an empty CSV value to those types.
+
+        .. warning::
+
+           That nullable skip is a partial guard against a silent data-loss
+           bug, not a complete one. arangoimport substitutes the raw CSV token
+           into its JSON request body, so a token that is not a legal JSON
+           value for the requested type makes the body malformed. It then
+           fails to parse its own payload, **drops that row**, and **exits 0**
+           -- so a generated script running under ``set -euo pipefail``
+           continues and reports success with a row missing.
+
+           Verified against ArangoDB 3.12.4 and 3.12.11. An empty field in a
+           column typed ``number`` produces ``["2",]`` and loses the row; so
+           does a zero-padded value such as ``00042``, which is not a legal
+           JSON number. Three rows in, two stored, exit status 0 in both cases.
+
+           The exposure here is a column the schema declares NOT NULL whose
+           dump nonetheless contains an empty field, or whose declared type
+           does not match the data. arangoimport logs only a WARNING for it.
+           The generated script's ``run_import`` wrapper (``IMPORT_GUARD``)
+           works around this: it reads the printed summary and fails the
+           script, so the load stops instead of reporting success. It cannot
+           recover the row; the data or the declared type has to be fixed.
+
+           An alternative loader was measured on the same input (arangox at
+           d060f6a): it keeps the row, storing an empty value as ``null`` with
+           no error even when the column is NOT NULL, and stores ``00042`` as
+           ``42``. It rejects a genuinely unconvertible value such as ``abc``
+           with an error naming the column, and loads nothing.
         """
         if table_name not in self.schema.tables:
             return []
@@ -639,6 +776,19 @@ class CsvImportGenerator:
                 flags.extend(["--datatype", shlex.quote(f"{col.name}={arango_dt}")])
         return flags
 
+    def _fk_is_nullable(self, table_name: str, fk_cols: tuple[str, ...]) -> bool:
+        """Whether a NULL is legal in any of an edge's FK columns.
+
+        Decides the guard policy for that edge import: only a nullable FK can
+        legitimately produce rejected (bare-prefix) edges.
+        """
+        table = self.schema.tables.get(table_name)
+        if table is None:
+            return False
+        return any(
+            col.is_nullable for col in table.columns if col.name in fk_cols
+        )
+
     def _csv_file_path(self, table_name: str) -> str:
         return f"{self.data_dir.rstrip('/')}/{table_name}.csv"
 
@@ -647,7 +797,7 @@ class CsvImportGenerator:
             "--server.endpoint", '"$ARANGO_ENDPOINT"',
             "--server.database", '"$ARANGO_DB"',
             "--server.username", '"$ARANGO_USER"',
-            "--server.password", '"$ARANGO_PASSWORD"',
+            "--server.password", PASSWORD_ENV_REF,
         ]
 
     def _build_doc_command(
@@ -912,6 +1062,7 @@ class CsvImportGenerator:
             "# Imports PG CSV dumps directly via arangoimport --type csv",
             "# No intermediate JSONL transformation required",
             "set -euo pipefail",
+            IMPORT_GUARD,
             "",
             *_script_environment(
                 endpoint=self.endpoint,
@@ -931,7 +1082,7 @@ class CsvImportGenerator:
                 f"from {spec.source_table}.csv..."
             )
             lines.append("echo " + shlex.quote(msg))
-            lines.append(spec.command)
+            lines.append(_guarded(spec.command, spec.target_collection))
             lines.append("")
 
         lines.append("# === Edge collections ===")
@@ -944,7 +1095,15 @@ class CsvImportGenerator:
                     f"from {spec.source_table}.csv..."
                 )
             )
-            lines.append(spec.command)
+            lines.append(
+                _guarded(
+                    spec.command,
+                    spec.target_collection,
+                    null_fk_ok=self._fk_is_nullable(
+                        spec.source_table, spec.from_fields
+                    ),
+                )
+            )
             lines.append("")
         if graph_name:
             lines.append("# === Named graph ===")

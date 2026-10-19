@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import shutil
 import stat
+import subprocess
 
 import pytest
 
 from r2g.config import ConfigManager
-from r2g.generators.arangoimport import CsvImportGenerator
+from r2g.generators.arangoimport import IMPORT_GUARD, CsvImportGenerator
 from r2g.types import (
     CollectionMapping,
     Column,
@@ -408,6 +411,200 @@ class TestGenerateCsvScript:
         assert "jsonl" not in cleaned
 
 
+class TestSilentRowLossGuard:
+    """A discarded row must fail the script, not pass unnoticed."""
+
+    def test_every_import_runs_through_the_guard(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        """arangoimport exits 0 after discarding rows, so `set -e` is blind.
+
+        Measured on ArangoDB 3.12.4: an empty field in a column typed
+        ``number`` makes arangoimport emit a malformed request body, discard
+        that row, print it only as a warning, and exit 0. Fifty discarded rows
+        still exit 0 as long as one row loaded. Its ``--max-errors`` option is
+        not a usable guard either -- it returns non-zero only when every row
+        failed.
+
+        The printed summary is the reliable signal, so every invocation runs
+        through ``run_import``, which fails when the count is not zero.
+        """
+        plan = CsvImportGenerator(
+            ecommerce_config, ecommerce_schema, password="pw"
+        ).build_plan(graph_name="demo")
+
+        invocations = [
+            line
+            for line in plan.script.splitlines()
+            if line.strip().startswith(("arangoimport", "run_import"))
+        ]
+        assert invocations, "the plan must contain import commands"
+        unguarded = [l for l in invocations if not l.strip().startswith("run_import")]
+        assert not unguarded, (
+            f"every arangoimport invocation must run through run_import; "
+            f"unguarded: {unguarded}"
+        )
+        assert "run_import() {" in plan.script, "the guard function must be defined"
+        # The check must key off the summary line, not the exit status.
+        assert "warnings/errors" in plan.script
+        assert "exit 1" in plan.script
+
+    def test_guard_is_defined_before_it_is_used(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        """A guard defined after the first call would be a runtime error."""
+        plan = CsvImportGenerator(
+            ecommerce_config, ecommerce_schema, password="pw"
+        ).build_plan(graph_name="demo")
+        definition = plan.script.index("run_import() {")
+        # shlex.quote leaves a simple collection name unquoted.
+        first_call = plan.script.index("\nrun_import ")
+        assert definition < first_call, "run_import must be defined before use"
+
+    def test_only_a_nullable_fk_edge_tolerates_null_fk_rejections(
+        self, ecommerce_config, ecommerce_schema
+    ):
+        """orders.customer_id is NOT NULL; orders.referrer_id is nullable."""
+        script = CsvImportGenerator(
+            ecommerce_config, ecommerce_schema, password="pw"
+        ).render_script()
+
+        assert "run_import orders_to_customers strict " in script
+        assert "run_import orders_to_customers_referrer_id null-fk-ok " in script
+        for table in ("customers", "orders", "products", "order_items"):
+            assert f"run_import {table} strict " in script
+
+
+# Lines copied verbatim from arangoimport 3.12.11 output (an edge import from
+# a CSV dump whose nullable FK column holds NULLs and one illegal key).
+_REJECTED_NULL_FK = (
+    "2026-10-17T01:20:58.219443Z [2202-2] WARNING [e5a29] {general} at position 2: "
+    "creating document failed with error 'expecting both `_from` and `_to` attributes "
+    "to be defined in the edge document and have the format "
+    "`<collectionName>/<vertexKey>` ', offending document: "
+    '{"_from":"orders/1001","_to":"customers/"}'
+)
+_REJECTED_ILLEGAL_KEY = (
+    "2026-10-17T01:20:58.219431Z [2202-2] WARNING [e5a29] {general} at position 0: "
+    "creating document failed with error 'expecting both `_from` and `_to` attributes "
+    "to be defined in the edge document and have the format "
+    "`<collectionName>/<vertexKey>` ', offending document: "
+    '{"_from":"orders/3000","_to":"customers/a b"}'
+)
+_DISCARDED_ROW = (
+    "2026-10-17T00:14:46.967680Z [653-2] WARNING [e5a29] {general} at position 3: "
+    "invalid JSON type (expecting object, probably parse error), "
+    'offending context: ["2",]'
+)
+
+
+def _summary(created: int, errors: int) -> str:
+    return (
+        f"created:          {created}\n"
+        f"warnings/errors:  {errors}\n"
+        "updated/replaced: 0\n"
+        "ignored:          0\n"
+    )
+
+
+def _run_guard(
+    output: str, *, policy: str = "strict", status: int = 0
+) -> subprocess.CompletedProcess:
+    """Run the generated run_import against a stand-in arangoimport.
+
+    The stand-in prints ``output`` and exits ``status``, exactly as the real
+    tool does at the end of an import, so this exercises the shell the
+    generated script runs rather than looking for text in it.
+    """
+    script = "\n".join([
+        "set -euo pipefail",
+        IMPORT_GUARD,
+        f"fake_arangoimport() {{ printf '%s\\n' {shlex.quote(output)}; return {status}; }}",
+        f"run_import demo {policy} fake_arangoimport",
+        'echo "SCRIPT CONTINUED"',
+    ])
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=30
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+class TestGuardBehaviour:
+    """What run_import does, run in bash against arangoimport's real output."""
+
+    def test_clean_import_continues(self):
+        result = _run_guard(_summary(3, 0))
+        assert result.returncode == 0
+        assert "SCRIPT CONTINUED" in result.stdout
+
+    def test_discarded_row_stops_the_script(self):
+        result = _run_guard(_DISCARDED_ROW + "\n" + _summary(2, 1))
+        assert result.returncode == 1
+        assert "SCRIPT CONTINUED" not in result.stdout
+        assert "FAILED: demo discarded 1 row(s)" in result.stderr
+
+    def test_null_fk_rejection_fails_under_strict(self):
+        """A NOT NULL FK column must never produce a bare-prefix edge."""
+        result = _run_guard(_REJECTED_NULL_FK + "\n" + _summary(2, 1))
+        assert result.returncode == 1
+
+    def test_null_fk_rejections_beyond_the_log_cap_are_skipped(self):
+        """arangoimport logs 20 of 150 rejections; all logged are NULL FKs."""
+        output = "\n".join([_REJECTED_NULL_FK] * 20) + "\n" + _summary(150, 150)
+        result = _run_guard(output, policy="null-fk-ok")
+        assert result.returncode == 0
+        assert "SCRIPT CONTINUED" in result.stdout
+        assert "skipped 150 edge(s) whose foreign key is NULL" in result.stdout
+
+    def test_any_other_logged_rejection_fails_a_nullable_fk_edge(self):
+        output = "\n".join(
+            [_REJECTED_ILLEGAL_KEY] + [_REJECTED_NULL_FK] * 19
+        ) + "\n" + _summary(150, 151)
+        result = _run_guard(output, policy="null-fk-ok")
+        assert result.returncode == 1
+        assert "FAILED: demo discarded 151 row(s)" in result.stderr
+
+    def test_errors_with_nothing_logged_fail(self):
+        """Rejections that cannot be classified are not assumed harmless."""
+        result = _run_guard(_summary(2, 1), policy="null-fk-ok")
+        assert result.returncode == 1
+
+    def test_missing_summary_fails_closed(self):
+        result = _run_guard("Starting CSV import...")
+        assert result.returncode == 1
+        assert "no 'warnings/errors:' summary" in result.stderr
+
+    def test_non_zero_exit_fails(self):
+        result = _run_guard(_summary(0, 0), status=1)
+        assert result.returncode == 1
+        assert "arangoimport returned non-zero" in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_baked_in_password_reaches_the_client_tool(
+    ecommerce_config, ecommerce_schema
+):
+    """@ARANGO_PASSWORD@ is read from the tool's environment, so it must be exported.
+
+    Measured on 3.12.11: without the export, a password baked into the script
+    is a shell variable only, never reaches arangoimport, and the import fails
+    with HTTP 401.
+    """
+    script = CsvImportGenerator(
+        ecommerce_config, ecommerce_schema, password="baked-pw"
+    ).render_script()
+    preamble = script[: script.index("# === Document collections ===")]
+    probe = preamble + '\nbash -c \'printf "%s" "${ARANGO_PASSWORD-UNSET}"\'\n'
+    env = {k: v for k, v in os.environ.items() if k != "ARANGO_PASSWORD"}
+
+    result = subprocess.run(
+        ["bash", "-c", probe], capture_output=True, text=True, env=env, timeout=30
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "baked-pw"
+
+
 class TestStructuredCsvPreview:
     def test_plan_groups_commands_and_matches_cli_renderer(
         self, generator, tmp_path
@@ -445,7 +642,11 @@ class TestStructuredCsvPreview:
         assert "./dumps/customers.csv" in plan.documents[0].command
         assert "sentinel-password" not in plan.script
         assert "sentinel-target-secret" not in plan.script
-        assert '"$ARANGO_PASSWORD"' in plan.script
+        # The password is referenced as @ARANGO_PASSWORD@, resolved from the
+        # environment by the client tool itself. A shell expansion would put
+        # the secret in the process list for the duration of the import.
+        assert "@ARANGO_PASSWORD@" in plan.script
+        assert '--server.password "$ARANGO_PASSWORD"' not in plan.script
 
     def test_custom_artifact_root_is_shell_quoted(
         self, ecommerce_config, ecommerce_schema
@@ -476,7 +677,8 @@ class TestStructuredCsvPreview:
 
         assert plan.graph_script.startswith("#!/usr/bin/env bash")
         assert "arangosh" in plan.graph_script
-        assert '"$ARANGO_PASSWORD"' in plan.graph_script
+        assert "@ARANGO_PASSWORD@" in plan.graph_script
+        assert '--server.password "$ARANGO_PASSWORD"' not in plan.graph_script
         assert "password-secret" not in plan.graph_script
         assert "target-secret" not in plan.graph_script
 

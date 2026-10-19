@@ -134,7 +134,11 @@ class TestStructuredPreview:
 
         assert "sentinel-password" not in plan.script
         assert "sentinel-target-secret" not in plan.script
-        assert '"$ARANGO_PASSWORD"' in plan.script
+        # The password is referenced as @ARANGO_PASSWORD@, resolved from the
+        # environment by the client tool itself. A shell expansion would put
+        # the secret in the process list for the duration of the import.
+        assert "@ARANGO_PASSWORD@" in plan.script
+        assert '--server.password "$ARANGO_PASSWORD"' not in plan.script
 
     def test_plan_uses_fixed_jsonl_artifact_root(self, generator):
         plan = generator.build_plan()
@@ -164,7 +168,8 @@ class TestStructuredPreview:
 
         assert plan.graph_script.startswith("#!/usr/bin/env bash")
         assert "arangosh" in plan.graph_script
-        assert '"$ARANGO_PASSWORD"' in plan.graph_script
+        assert "@ARANGO_PASSWORD@" in plan.graph_script
+        assert '--server.password "$ARANGO_PASSWORD"' not in plan.graph_script
         assert "password-secret" not in plan.graph_script
         assert "target-secret" not in plan.graph_script
         assert "# === Named graph ===" in plan.script
@@ -275,3 +280,16 @@ class TestFromSampleSchema:
         path = str(tmp_path / "import.sh")
         content = gen.generate_script(path)
         assert "orders_to_users" in content
+
+
+def test_jsonl_imports_all_run_through_the_strict_guard(generator):
+    """JSONL mode drops NULL-FK edges before writing, so nothing is tolerated."""
+    script = generator.render_script()
+
+    calls = [line for line in script.splitlines() if line.startswith("run_import ")]
+    assert [call.split()[:3] for call in calls] == [
+        ["run_import", "users", "strict"],
+        ["run_import", "orders", "strict"],
+        ["run_import", "orders_to_users", "strict"],
+    ]
+    assert "export ARANGO_PASSWORD=" in script
