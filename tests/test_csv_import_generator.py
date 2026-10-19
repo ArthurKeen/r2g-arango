@@ -439,7 +439,7 @@ class TestSilentRowLossGuard:
             if line.strip().startswith(("arangoimport", "run_import"))
         ]
         assert invocations, "the plan must contain import commands"
-        unguarded = [l for l in invocations if not l.strip().startswith("run_import")]
+        unguarded = [line for line in invocations if not line.strip().startswith("run_import")]
         assert not unguarded, (
             f"every arangoimport invocation must run through run_import; "
             f"unguarded: {unguarded}"
