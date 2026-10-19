@@ -10,6 +10,7 @@ related:
   - docs/internal/PLAN-key-identification.md
   - docs/internal/PLAN-federation-forge.md
   - docs/internal/PLAN-code-quality-remediation.md
+  - docs/internal/PLAN-scorecard-level-3.md
 ---
 
 # r2g state-of-the-art scorecard
