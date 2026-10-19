@@ -58,9 +58,11 @@ Run it against both candidates. If neither has recent pull requests, ask.
   # upstream: <org>/arango-sparql-py#<n> — remove when the engine accepts a caller's validator
   ```
 
-  `tests/test_upstream_markers.py` holds the format: an `owner/repo#number` issue a
-  person can open, and a `remove when` condition someone can check. (Its source is
-  `templates/tests/test_upstream_markers.py` in arango-shared-memory.)
+  Where a repo has `tests/test_upstream_markers.py`, that test holds the format: an
+  `owner/repo#number` issue a person can open, and a `remove when` condition someone
+  can check. The shared-memory installers place this rule but not the test, so a
+  repo without it copies it from arango-shared-memory
+  `templates/tests/test_upstream_markers.py`.
 - **Listed in this repo's known-debt issue**, if it keeps one, with the same link.
 - **Removed in the pin bump that ships the fix**, not in a later cleanup: when you
   bump a pin, search for `upstream:` markers that name that library.
