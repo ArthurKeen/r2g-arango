@@ -1,0 +1,102 @@
+---
+description: When a library we own lacks something or gets it wrong, fix it in the library or file it there; a workaround in the consumer is temporary, marked and tracked
+alwaysApply: true
+---
+
+# Fix Upstream, Don't Fork
+
+> **Scope:** Any code that depends on a library we own — arango-sparql-py,
+> arango-query-core, r2g / r2g-arango, arango-schema-analyzer, arango-cypher-py,
+> arango-entity-resolution, or any other library the team maintains. Every one of
+> these is also a consumer of the others, so this applies inside the libraries too.
+
+> **"We own the library. A gap in it is an issue there, not a fork here."**
+
+Written after a 2026-10-15 finding in contextual-data-fabric: its English→SPARQL
+translator was never the library's. In July, arango-sparql-py could only check a
+generated query against one schema, so the consumer took the library's model client
+and wrote its own prompt, check and repair loop around it. That was a reasonable
+call — but no library issue was filed and nothing in the code said it was
+temporary. When the shared engine gained the seam the consumer needed, nobody
+noticed. Three months later there were three implementations, the design record
+still said the engine was reused, and the library's docstring named a function the
+consumer never imported.
+
+The same audit found the pattern again around arango-entity-resolution: a consumer
+guard that copies the resolver's checks line for line, configuration defects worked
+around in a comment instead of filed, and a service that declares the library as a
+dependency, says in its docstring that it runs the library's pipeline, and imports
+none of it.
+
+## When an owned library falls short
+
+| Do, in this order | Not |
+| --- | --- |
+| 1. **Check it isn't already there** — `main`, open branches, and the other org's copy | Assume the version you have pinned is the latest |
+| 2. **Fix it in the library** — we own it; open the pull request there | Patch around it here because this is the repo you have open |
+| 3. **Or file it there** — a bug or feature request on the repo that leads, saying what the consumer needs and why | File it on the mirror, or mention it only in this repo's pull request |
+| 4. **Only if this repo cannot wait** for a library release and a pin bump — a temporary workaround, held to the rules below | A permanent workaround nobody can find |
+
+**Which repo leads.** Most of these libraries exist under two owners, and which one
+leads has changed during 2026. Do not trust the remotes of your clone — a fresh
+clone has only the URL you were handed. The repository with recent pull requests is
+the one that leads:
+
+```sh
+gh pr list --repo <owner>/<name> --state all --limit 5
+```
+
+Run it against both candidates. If neither has recent pull requests, ask.
+
+## A workaround that is allowed
+
+- **Behind the seam the library would provide**, so removing it touches one place:
+  an adapter, or a wrapper with the library's own shape.
+- **Marked where it lives**, on one line at the code that works around the library:
+
+  ```python
+  # upstream: <org>/arango-sparql-py#<n> — remove when the engine accepts a caller's validator
+  ```
+
+  `tests/test_upstream_markers.py` holds the format: an `owner/repo#number` issue a
+  person can open, and a `remove when` condition someone can check. (Its source is
+  `templates/tests/test_upstream_markers.py` in arango-shared-memory.)
+- **Listed in this repo's known-debt issue**, if it keeps one, with the same link.
+- **Removed in the pin bump that ships the fix**, not in a later cleanup: when you
+  bump a pin, search for `upstream:` markers that name that library.
+
+## What counts as a fork
+
+| Fork | Why it costs |
+| --- | --- |
+| Taking a library's low-level piece (a client, a parser) and writing your own version of its main entry point around it | Fixes and new capabilities land in the library's version and never reach yours |
+| Copying library code into the consumer | The two copies drift |
+| Patching the library at runtime | The next pin bump breaks it without a word |
+| Reaching past the library's public API into its internals | Internals move without a release note |
+| Defining a public function or class with the same name and job as one the library exports | Readers take one for the other |
+| Declaring a library as a dependency and reimplementing what you would have called | The dependency says one thing and the code does another |
+| Holding a pin back to dodge a bug, with no issue | Nobody knows when it can move |
+
+A fork that is deliberate and permanent — the consumer needs something the library
+should not hold — is a **design record (ADR) in the consumer** plus an **issue in the
+library** for the seam that would let the two share the rest. It is never a silent
+decision.
+
+## The other side: claims about the other repo
+
+A library that says a consumer uses it ("this is what the fabric calls") must be able
+to point at the consumer's import. A consumer that says it uses a library ("runs the
+entity-resolution pipeline") must import it. If either cannot, the claim is a plan,
+and it is written as one.
+
+## Anti-Patterns
+
+| Anti-Pattern | Consequence |
+| --- | --- |
+| "The library can't do X, so I'll write X here" | A fork nobody tracks |
+| A workaround with no `upstream:` marker | Nobody removes it when the fix ships |
+| An issue filed in the consumer instead of the library | The library's maintainers never see it |
+| A library defect documented only in a config comment | The next consumer hits it too |
+| "It's our library, I'll fix it there later" | Later is after the third implementation |
+
+**We own the library: fix it there, or say where it will be fixed.**
