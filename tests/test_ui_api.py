@@ -912,6 +912,26 @@ class TestMappingEndpoints:
         assert body["focused_command"]["target_collection"] == "Customer"
         assert "./dumps/users.csv" in body["focused_command"]["command"]
 
+    def test_arangoimport_preview_refuses_csv_for_excluded_columns(
+        self, client, tmp_path, catalog_dir
+    ):
+        self._setup_project(client, tmp_path, catalog_dir)
+        draft = client.get("/api/projects/proj/mapping").json()
+        draft["collections"]["users"]["exclude_fields"] = ["name"]
+        resp = client.post(
+            "/api/projects/proj/arangoimport-preview",
+            json={"mode": "csv", "scope": "all", "mapping": draft},
+        )
+        assert resp.status_code == 422, resp.text
+        assert "cannot reproduce this mapping" in resp.text
+        assert "users: excluded fields" in resp.text
+
+        jsonl = client.post(
+            "/api/projects/proj/arangoimport-preview",
+            json={"mode": "jsonl", "scope": "all", "mapping": draft},
+        )
+        assert jsonl.status_code == 200, jsonl.text
+
     def test_arangoimport_preview_rejects_unknown_identity_and_paths(
         self, client, tmp_path, catalog_dir
     ):

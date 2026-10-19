@@ -33,25 +33,23 @@ expression's result, in some cases by silently dropping a field.
 
 ### 1.1 Bulk export refuses expressions it cannot compute (P5c.1.6, bulk)
 
-There are two bulk paths, and both drop fields today.
+There are two bulk paths. CSV-direct is done; JSONL still drops fields.
 
 - **Context:**
   - **JSONL** (`transform-all`, `transform-nodes`) writes documents without the target field
     of any expression that must be evaluated by ArangoDB. These commands have no database
     connection.
   - **CSV-direct** (`generate-csv-import`, and Studio's CSV-direct export) never runs
-    `NodeTransformer`, so it skips *every* field expression, including ones the local
-    evaluator computes. The command exits 0, and the only notice is a `# WARNING` comment
-    inside the generated script (`src/r2g/generators/arangoimport.py:1005`). The README calls
-    CSV-direct the preferred pipeline.
+    `NodeTransformer`. **Done:** it now refuses a mapping with field expressions (masks
+    included), include or exclude filters, or type overrides, naming each collection and
+    feature, instead of loading the columns as they stand (P1.7,
+    `src/r2g/generators/arangoimport.py:1009`).
 - **Action:**
   - JSONL: refuse when the transformers are built, with an error naming the collection and
     the target field, as P5c.1.6 requires. Server-side evaluation behind an `--endpoint`
     option can follow if anyone needs it.
-  - CSV-direct: refuse a collection whose mapping uses any feature the generator's own
-    fidelity warning lists, naming the collection and the feature, and point to JSONL mode.
-    Routing those collections through JSONL automatically is the alternative (open
-    decision 2).
+  - CSV-direct: done (above). Routing refused collections through JSONL automatically
+    remains an option (open decision 2).
 - **Result:** no bulk output silently omits an expression's target field.
 
 ### 1.2 CDC evaluates delegated expressions on the server (P5c.1.6, CDC)

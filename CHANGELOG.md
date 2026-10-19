@@ -16,6 +16,16 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@ARANGO_PASSWORD@`, which the ArangoDB client tool reads from its own environment. The
   script exports `ARANGO_PASSWORD`, so a password set beforehand or written into the
   script both still work.
+- **CSV-direct import no longer loads masked or excluded columns in clear.**
+  `generate-csv-import` and Studio's CSV-direct preview ignored a mapping's masks,
+  include and exclude filters, other field expressions and type overrides, because
+  `arangoimport --type csv` loads every CSV column as it stands. A column masked with
+  `redact` was stored with its original value, and an excluded column was loaded. The only
+  notice was a comment inside the generated script, and the command exited 0. Such a
+  mapping is now refused, with an error naming each collection and feature; use JSONL
+  mode (`transform-all`, then `generate-import`), which applies them. Mappings that only
+  rename columns (`field_mappings`) are unaffected. This refuses mappings that used to
+  generate a script.
 
 ### Fixed
 
