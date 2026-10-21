@@ -98,6 +98,7 @@ def mapping_to_r2rml(
     concept_base: str = DEFAULT_CONCEPT_BASE,
     resource_base: str = DEFAULT_RESOURCE_BASE,
     source_type: str = "relational",
+    curated_labels: Optional[dict] = None,
 ) -> str:
     """Serialize an r2g mapping to an R2RML Turtle document.
 
@@ -109,6 +110,10 @@ def mapping_to_r2rml(
             the AQL leg for federation).
         resource_base: IRI namespace for row-level subject IRIs.
         source_type: recorded in the document header for provenance.
+        curated_labels: an optional curated-labels document (P12.12). Classes,
+            predicates and relationships take their curated names from the same
+            plan :func:`r2g.csi.mapping_to_csi` applies, so the two legs agree;
+            rr:tableName / rr:column keep the physical names.
 
     Returns:
         An R2RML Turtle document as a string.
@@ -121,10 +126,25 @@ def mapping_to_r2rml(
     # the class IRI the fabric queries with), for resolving FK edge endpoints
     # to the TriplesMaps that host them. Physical table/column names stay in
     # rr:tableName / rr:column / rr:template.
-    from .csi import owl_entity_name, owl_property_name
+    from .csi import curated_plan_for_mapping, owl_entity_name, owl_property_name
+
+    plan = (
+        curated_plan_for_mapping(config, schema, curated_labels)
+        if curated_labels is not None
+        else None
+    )
+
+    def _entity(generated: str) -> str:
+        return plan.entity(generated) if plan is not None else generated
+
+    def _predicate(generated_entity: str, generated: str) -> str:
+        return plan.prop(generated_entity, generated) if plan is not None else generated
+
+    def _relationship(generated: str) -> str:
+        return plan.relationship(generated) if plan is not None else generated
 
     entity_by_source: Dict[str, str] = {
-        cm.source_table: owl_entity_name(cm.target_collection)
+        cm.source_table: _entity(owl_entity_name(cm.target_collection))
         for cm in config.collections.values()
         if cm.collection_type != "edge" and not cm.is_join_table
     }
@@ -143,7 +163,7 @@ def mapping_to_r2rml(
             continue
         rels_by_entity.setdefault(from_entity, []).append(
             {
-                "type": owl_property_name(edge.edge_collection),
+                "type": _relationship(owl_property_name(edge.edge_collection)),
                 "to_entity": to_entity,
                 "joins": list(zip(edge.from_fields, edge.to_fields)),
             }
@@ -161,7 +181,8 @@ def mapping_to_r2rml(
         if cm.collection_type == "edge" or cm.is_join_table:
             continue
         # CC-12 conceptual class name; physical names stay in the logical table.
-        entity = owl_entity_name(cm.target_collection)
+        generated_entity = owl_entity_name(cm.target_collection)
+        entity = _entity(generated_entity)
         table = schema.tables.get(cm.source_table)
         if table is None:
             raise R2RMLError(
@@ -207,7 +228,8 @@ def mapping_to_r2rml(
                 # Predicate IRI is the CC-12 conceptual name; rr:column above
                 # keeps the physical column — Ontop reads the column, queries
                 # use the concept.
-                f"        rr:predicate <{concept_base}{owl_property_name(prop)}> ;\n"
+                f"        rr:predicate <{concept_base}"
+                f"{_predicate(generated_entity, owl_property_name(prop))}> ;\n"
                 f"        rr:objectMap [ {obj} ] ;\n"
                 "    ]"
             )

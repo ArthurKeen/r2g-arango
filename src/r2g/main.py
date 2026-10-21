@@ -535,6 +535,31 @@ def generate_csv_import(
         raise typer.Exit(code=1)
 
 
+_CURATED_LABELS_HELP = (
+    "Curated-labels JSON (e.g. exported from arango-ontoextract's lexicon): the "
+    "curator's names for entities, properties and relationships, keyed by the "
+    "names r2g generates. Applied identically by export-csi and export-r2rml."
+)
+_ALLOW_UNAPPLIED_HELP = (
+    "Write the output even when a curated label is refused or matches nothing. "
+    "Without it the export fails, so a curator's decision is never silently missing."
+)
+
+
+def _report_curated_plan(plan) -> bool:
+    """Print what the curated labels did; True when every entry was applied."""
+    applied = [r for r in plan.records if r["resolution"] == "applied"]
+    if applied:
+        console.print(f"[green]Applied {len(applied)} curated label(s).[/green]")
+    for r in plan.problems:
+        where = f"{r['entity']}.{r['name']}" if r["kind"] == "property" else r["name"]
+        console.print(
+            f"[red]Curated {r['kind']} {where} -> {r['label']!r} {r['resolution']}:[/red] "
+            f"[dim]{r.get('reason', '')}[/dim]"
+        )
+    return not plan.problems
+
+
 @app.command("export-csi")
 def export_csi(
     config_path: str = typer.Option(..., "--config", "-c", help="Mapping config YAML"),
@@ -561,6 +586,12 @@ def export_csi(
             "always recorded in provenance.labelCollisions."
         ),
     ),
+    curated_labels_file: Optional[str] = typer.Option(
+        None, "--curated-labels", help=_CURATED_LABELS_HELP
+    ),
+    allow_unapplied_labels: bool = typer.Option(
+        False, "--allow-unapplied-labels", help=_ALLOW_UNAPPLIED_HELP
+    ),
 ) -> None:
     """Emit a forward CSI v1 interchange document from an r2g mapping.
 
@@ -573,10 +604,13 @@ def export_csi(
     derives a flat vocabulary from the document, and no consumer can recover the
     distinction afterwards. ``--label-policy`` decides what happens; the default
     qualifies them.
+
+    ``--curated-labels`` applies a curator's names (P12.12) before that check.
     """
     from datetime import datetime, timezone
 
     from r2g.csi import mapping_to_csi, validate_csi
+    from r2g.curated_labels import CuratedPlan, load_curated_labels
 
     # Validated before the try: typer.Exit is an Exception, so raising it inside
     # would be swallowed by the generic handler below and reported as an empty
@@ -591,6 +625,7 @@ def export_csi(
     try:
         mapping = ConfigManager.load_config(config_path)
         schema = Schema.load_from_file(schema_file) if schema_file else None
+        curated = load_curated_labels(curated_labels_file) if curated_labels_file else None
         generated_at = datetime.now(timezone.utc).isoformat()
         # Forward the bitemporal stamps RSA >= 0.8.0 records on the physical schema
         # (DESIGN-ADDENDUM-bitemporal): r2g neither mints nor reshapes them.
@@ -608,9 +643,18 @@ def export_csi(
             predecessor_fingerprint=(
                 getattr(schema, "predecessor_fingerprint", None) if schema is not None else None
             ),
+            curated_labels=curated,
         )
         if validate:
             validate_csi(doc)
+        if curated is not None:
+            plan = CuratedPlan(records=doc["provenance"]["curatedLabels"])
+            if not _report_curated_plan(plan) and not allow_unapplied_labels:
+                console.print(
+                    f"[red]Not written: {len(plan.problems)} curated label(s) not applied "
+                    f"(--allow-unapplied-labels to write anyway).[/red]"
+                )
+                raise typer.Exit(code=1)
         Path(output).write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
         console.print(f"[green]Wrote CSI v1 document:[/green] [bold]{output}[/bold]")
         console.print(
@@ -660,6 +704,8 @@ def export_csi(
                 console.print(
                     f"  [dim]{c['label']} on {', '.join(c['entities'])} — {c['reason']}[/dim]"
                 )
+    except typer.Exit:
+        raise
     except Exception as e:
         log.exception("export_csi_failed", output=output)
         console.print(f"[red]Failed to export CSI:[/red] {e}")
@@ -680,24 +726,44 @@ def export_r2rml(
     source_type: str = typer.Option(
         "relational", "--source-type", help="Source system kind (recorded in the header)"
     ),
+    curated_labels_file: Optional[str] = typer.Option(
+        None, "--curated-labels", help=_CURATED_LABELS_HELP
+    ),
+    allow_unapplied_labels: bool = typer.Option(
+        False, "--allow-unapplied-labels", help=_ALLOW_UNAPPLIED_HELP
+    ),
 ) -> None:
     """Emit an R2RML mapping (relational -> RDF) for SPARQL->SQL pushdown via Ontop.
 
     R2RML lets a Virtual Knowledge Graph engine answer SPARQL over the live
     relational database with no data movement. Concept IRIs default to the same
     namespace the AQL leg uses, so both federation legs share one vocabulary.
+    ``--curated-labels`` must be the same file given to ``export-csi``, or the
+    two legs will name concepts differently.
     """
+    from r2g.csi import curated_plan_for_mapping
+    from r2g.curated_labels import load_curated_labels
     from r2g.r2rml import mapping_to_r2rml
 
     try:
         mapping = ConfigManager.load_config(config_path)
         schema = Schema.load_from_file(schema_file)
+        curated = load_curated_labels(curated_labels_file) if curated_labels_file else None
+        if curated is not None:
+            plan = curated_plan_for_mapping(mapping, schema, curated)
+            if not _report_curated_plan(plan) and not allow_unapplied_labels:
+                console.print(
+                    f"[red]Not written: {len(plan.problems)} curated label(s) not applied "
+                    f"(--allow-unapplied-labels to write anyway).[/red]"
+                )
+                raise typer.Exit(code=1)
         ttl = mapping_to_r2rml(
             mapping,
             schema,
             concept_base=concept_base,
             resource_base=resource_base,
             source_type=source_type,
+            curated_labels=curated,
         )
         Path(output).write_text(ttl, encoding="utf-8")
         n_entities = sum(
@@ -709,6 +775,8 @@ def export_r2rml(
         console.print(
             f"  [dim]{n_entities} TriplesMaps, {len(mapping.edges)} FK relationships[/dim]"
         )
+    except typer.Exit:
+        raise
     except Exception as e:
         log.exception("export_r2rml_failed", output=output)
         console.print(f"[red]Failed to export R2RML:[/red] {e}")
