@@ -244,7 +244,7 @@ def plan_curated_labels(
     for entry in sorted(
         curated.get("properties", []), key=lambda e: (e["entity"], e["name"])
     ):
-        key = ("property", entry["entity"], entry["name"])
+        key: Tuple[str, ...] = ("property", entry["entity"], entry["name"])
         if entry["entity"] not in entity_props:
             records[key] = _record(
                 "property", entry, resolution="unmatched", reason="no entity with this generated name"
@@ -300,11 +300,11 @@ def plan_curated_labels(
         predicate_holders: Dict[str, Set[tuple]] = {}
         for e, props in entity_props.items():
             for p in props:
-                key = ("property", e, p)
-                predicate_holders.setdefault(_emitted(key), set()).add(key)
+                pkey: Tuple[str, ...] = ("property", e, p)
+                predicate_holders.setdefault(_emitted(pkey), set()).add(pkey)
         for r in relationship_names:
-            key = ("relationship", r)
-            predicate_holders.setdefault(_emitted(key), set()).add(key)
+            rkey: Tuple[str, ...] = ("relationship", r)
+            predicate_holders.setdefault(_emitted(rkey), set()).add(rkey)
 
         for key in sorted(accepted):
             target = wanted[key][1]
