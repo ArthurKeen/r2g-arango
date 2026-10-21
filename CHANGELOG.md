@@ -7,6 +7,17 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Curated labels at export (PRD P12.12).** `export-csi` and `export-r2rml` take
+  `--curated-labels FILE`: a curator's names for entities, properties and relationships,
+  keyed by the names r2g generates (arango-ontoextract's lexicon exports this file). Both
+  exports apply the same renames, so the SQL and graph legs agree; physical fields keep
+  their names. The curator's words are kept as `prefLabel` and the old name as an
+  `altLabels` entry. A rename that would break a join key or give two entities one label
+  is refused and recorded in `provenance.curatedLabels`, and the export fails while any
+  entry is refused or matches nothing, unless `--allow-unapplied-labels` is given.
+
 ### Security
 
 - **Generated import scripts no longer put the ArangoDB password in the process list.**

@@ -372,6 +372,57 @@ def _resolve_label_collisions(
     return records
 
 
+def _apply_curated_plan(
+    plan,
+    conceptual_entities: List[Dict[str, Any]],
+    physical_entities: Dict[str, Dict[str, Any]],
+    property_roles: Dict[tuple, str],
+    entity_name_by_collection: Dict[str, str],
+) -> None:
+    """Rename entities and properties to their curated names, in place (P12.12).
+
+    Conceptual names only: each physical property spec — the stored ``field`` —
+    moves to its new conceptual key untouched, so a curated name still resolves
+    to the column that holds the data. Property roles are re-keyed so the
+    ``roles`` collision policy still knows which renamed label is a key.
+    """
+    for entity in conceptual_entities:
+        generated = entity["name"]
+        new_name = plan.entity(generated)
+        entity.update(plan.annotations.get(("entity", generated), {}))
+        if new_name != generated:
+            entity["name"] = new_name
+            # labels[0] is the entity name (P13.13); extra LPG labels follow.
+            entity["labels"] = [new_name] + [
+                lbl for lbl in entity.get("labels", [])[1:] if lbl != new_name
+            ]
+            physical_entities[new_name] = physical_entities.pop(generated)
+            for collection, name in list(entity_name_by_collection.items()):
+                if name == generated:
+                    entity_name_by_collection[collection] = new_name
+        renamed_props: Dict[str, str] = {}
+        properties = []
+        for prop in entity["properties"]:
+            new_prop = plan.prop(generated, prop["name"])
+            annotated = {
+                **prop,
+                "name": new_prop,
+                **plan.annotations.get(("property", generated, prop["name"]), {}),
+            }
+            properties.append(annotated)
+            renamed_props[prop["name"]] = new_prop
+            role = property_roles.pop((generated, prop["name"]), None)
+            if role is not None:
+                property_roles[(new_name, new_prop)] = role
+        entity["properties"] = properties
+        physical = physical_entities.get(new_name)
+        if physical is not None:
+            physical["properties"] = {
+                renamed_props.get(name, name): spec
+                for name, spec in physical["properties"].items()
+            }
+
+
 def _key_owner(label: str, entities: List[str], roles: Dict[str, str]) -> Optional[str]:
     """The entity a shared key *belongs to*, or ``None``.
 
@@ -429,6 +480,50 @@ def _entity_property_names(cm: CollectionMapping, table: Optional[Table]) -> Lis
     return names
 
 
+def _join_key_labels(config: MappingConfig) -> set:
+    """Generated conceptual labels that are declared cross-source join keys (P6.7)."""
+    collection_by_source_table = {cm.source_table: cm for cm in config.collections.values()}
+    labels: set = set()
+    for sk in config.shared_keys:
+        for b in sk.bindings:
+            cm_b = collection_by_source_table.get(b.table)
+            if cm_b is None or cm_b.collection_type == "edge" or cm_b.is_join_table:
+                continue
+            stored = cm_b.field_mappings.get(b.column, b.column)
+            labels.add(owl_property_name(stored))
+    return labels
+
+
+def curated_plan_for_mapping(
+    config: MappingConfig,
+    schema: Optional[Schema],
+    curated: Dict[str, Any],
+):
+    """The :class:`~r2g.curated_labels.CuratedPlan` for one mapping (P12.12).
+
+    The single place both exporters get their curated names from: the entity and
+    property names are the ones :func:`mapping_to_csi` generates, so a CSI
+    document and the R2RML exported from the same mapping and labels agree.
+    """
+    from .curated_labels import plan_curated_labels
+
+    tables = schema.tables if schema is not None else {}
+    entities: Dict[str, List[str]] = {}
+    for cm in config.collections.values():
+        if cm.collection_type == "edge" or cm.is_join_table:
+            continue
+        entities[owl_entity_name(cm.target_collection)] = [
+            owl_property_name(p)
+            for p in _entity_property_names(cm, tables.get(cm.source_table))
+        ]
+    return plan_curated_labels(
+        curated,
+        entities=entities,
+        relationships=[owl_property_name(e.edge_collection) for e in config.edges],
+        join_key_labels=_join_key_labels(config),
+    )
+
+
 def mapping_to_csi(
     config: MappingConfig,
     schema: Optional[Schema] = None,
@@ -444,6 +539,7 @@ def mapping_to_csi(
     valid_time: Optional[Dict[str, Any]] = None,
     valid_time_source: Optional[str] = None,
     predecessor_fingerprint: Optional[str] = None,
+    curated_labels: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Emit a forward ``CSI v1`` document from an r2g :class:`MappingConfig`.
 
@@ -471,6 +567,12 @@ def mapping_to_csi(
             untouched; ``"off"`` skips the check. Whatever the policy, every
             collision is recorded in ``provenance.labelCollisions``; see
             :func:`_resolve_label_collisions`.
+        curated_labels: an optional curated-labels document
+            (:mod:`r2g.curated_labels`, P12.12). Its renames are applied
+            *before* the label-collision check, carry ``prefLabel`` /
+            ``description`` / ``altLabels`` onto the renamed concept, and are
+            recorded in ``provenance.curatedLabels``. Physical fields are never
+            renamed.
 
     Returns:
         A ``CSI v1``-valid ``dict`` (validate with :func:`validate_csi`).
@@ -548,14 +650,19 @@ def mapping_to_csi(
     # key is deliberately shared across entities, so the collision resolver must
     # keep it bare on every binding entity — qualifying it would rename the very
     # spine that ``conceptualModel.joinKeys`` (built below) references.
-    join_key_labels: set = set()
-    for sk in config.shared_keys:
-        for b in sk.bindings:
-            cm_b = collection_by_source_table.get(b.table)
-            if cm_b is None or cm_b.collection_type == "edge" or cm_b.is_join_table:
-                continue
-            stored = cm_b.field_mappings.get(b.column, b.column)
-            join_key_labels.add(owl_property_name(stored))
+    join_key_labels = _join_key_labels(config)
+
+    # Curated labels (P12.12) go first, so the collision check below sees the
+    # names a curator chose — a curated rename can itself resolve a collision.
+    plan = (
+        curated_plan_for_mapping(config, schema, curated_labels)
+        if curated_labels is not None
+        else None
+    )
+    if plan is not None:
+        _apply_curated_plan(
+            plan, conceptual_entities, physical_entities, property_roles, entity_name_by_collection
+        )
 
     # Resolve attribute labels shared by two or more entities *before* anything
     # downstream sees them: this is the only place with the whole document in
@@ -579,16 +686,18 @@ def mapping_to_csi(
     conceptual_relationships: List[Dict[str, Any]] = []
     physical_relationships: Dict[str, Dict[str, Any]] = {}
     for edge in config.edges:
-        rel_type = owl_property_name(edge.edge_collection)
+        generated_type = owl_property_name(edge.edge_collection)
+        rel_type = plan.relationship(generated_type) if plan is not None else generated_type
         from_coll = target_by_source.get(edge.from_collection, edge.from_collection)
         to_coll = target_by_source.get(edge.to_collection, edge.to_collection)
-        conceptual_relationships.append(
-            {
-                "type": rel_type,
-                "fromEntity": entity_name_by_collection.get(from_coll, owl_entity_name(from_coll)),
-                "toEntity": entity_name_by_collection.get(to_coll, owl_entity_name(to_coll)),
-            }
-        )
+        relationship: Dict[str, Any] = {
+            "type": rel_type,
+            "fromEntity": entity_name_by_collection.get(from_coll, owl_entity_name(from_coll)),
+            "toEntity": entity_name_by_collection.get(to_coll, owl_entity_name(to_coll)),
+        }
+        if plan is not None:
+            relationship.update(plan.annotations.get(("relationship", generated_type), {}))
+        conceptual_relationships.append(relationship)
         # NB: relationships must NOT carry ``collectionName`` (CSI schema
         # forbids it) — only ``edgeCollectionName``.
         rel_physical: Dict[str, Any] = {
@@ -685,6 +794,12 @@ def mapping_to_csi(
     # collision-free documents keep their historical bytes.
     if label_collisions:
         provenance["labelCollisions"] = label_collisions
+    # Every entry of a supplied curated-labels document, applied or not: a
+    # refused or unmatched decision must be as visible as an applied one.
+    if plan is not None:
+        provenance["curatedLabels"] = plan.records
+        if plan.source:
+            provenance["curatedLabelsSource"] = plan.source
 
     conceptual_model: Dict[str, Any] = {
         "entities": conceptual_entities,
