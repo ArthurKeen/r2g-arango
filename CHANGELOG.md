@@ -22,6 +22,30 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumer sees, so contextual-data-fabric manifests that list the old names must be
   updated with it.
 
+### Changed
+
+- **Class names no longer cut common plurals short (r2g-arango#30).** The singularizer
+  behind every CSI and R2RML class name turned `warehouses` into `Warehous`, `courses` into
+  `Cours`, `sizes` into `Siz`, `order_status` into `OrderStatu`, `analysis` into `Analysi`,
+  `news` into `New` and `movies` into `Movy`. It now drops `-es` only after a sibilant
+  (`addresses`, `boxes`, `batches`) or a singular that already ends in `s` (`statuses` →
+  `Status`), otherwise only the `s`; turns `-ses` into `-sis` for `-is` words; keeps `-ie`
+  words (`movies` → `Movie`); and leaves invariant words (`data`, `news`, `series`) and a
+  short irregular table (`people` → `Person`) to named lists. `pluralize`, which the Forge
+  uses for table names, is its inverse. **This renames classes** for any table named that
+  way the next time CSI or R2RML is exported; already-exported files and loaded graphs do
+  not change, and ArangoDB collection names never do. Cross-source key inference (`xsk`)
+  now uses the same function instead of its own copy.
+- **relational-schema-analyzer 0.10.0 (band `>=0.10.0,<0.11.0`).** RSA carries the same
+  singularizer rules and publishes the list of known answers that
+  `tests/test_naming_known_answers.py` checks r2g's copy, RSA's and
+  arangodb-schema-analyzer's against. It also now reads declared `CHECK (col IN (…))`
+  value lists from live PostgreSQL, MySQL and SQL Server, so such a schema gets a new
+  `physicalSchemaFingerprint` once; bitemporal `valid_from` continuity by fingerprint
+  restarts on that first export. The `test` and `dev` extras require
+  arangodb-schema-analyzer 0.16.0, so CI's test job runs the ASA cross-check rather than
+  skipping it.
+
 ### Security
 
 - **Generated import scripts no longer put the ArangoDB password in the process list.**

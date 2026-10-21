@@ -250,10 +250,12 @@ class TestOntologyValidation:
             ForgeOntology.from_conceptual(doc)
 
     def test_rejects_name_that_does_not_survive_naming_roundtrip(self):
-        # "Goose" -> table "gooses" -> owl_entity_name gives "Goos": the naive
-        # pluralize/singularize pair is not an inverse here, so the forge must
-        # refuse at generate time (PLAN F-2), never fail at compare time.
-        doc = {"entities": [{"name": "Goose", "properties": [{"name": "label", "type": "string"}]}]}
+        # "Cactus" -> table "cactuses" -> owl_entity_name gives "Cactuse": the
+        # singular-ending-in-s list does not cover it, so pluralize/singularize
+        # is not an inverse here and the forge must refuse at generate time
+        # (PLAN F-2), never fail at compare time. ("Goose" was the example until
+        # r2g-arango#30 taught singularize that "gooses" keeps its e.)
+        doc = {"entities": [{"name": "Cactus", "properties": [{"name": "label", "type": "string"}]}]}
         with pytest.raises(ForgeError, match="naming"):
             ForgeOntology.from_conceptual(doc)
 

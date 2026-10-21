@@ -81,7 +81,11 @@ dependencies = [
     # purpose rather than silently. Raised 2026-10-02.
     # 0.9.5 makes the Postgres sampler governable (budget, timeout, query tag,
     # stats), which `source suggest-keys` needs to accept PostgreSQL sources.
-    "relational-schema-analyzer>=0.9.5,<0.10.0",
+    # 0.10.0 carries the shared singularizer rules and the known-answer list r2g's
+    # tests check its own copy against (r2g-arango#30), and reads declared CHECK
+    # value lists on Postgres/MySQL/SQL Server (the schema fingerprint moves for
+    # schemas with one). Raised 2026-10-21.
+    "relational-schema-analyzer>=0.10.0,<0.11.0",
 ]
 
 # Optional extras let users install only what they need:
@@ -110,14 +114,22 @@ ontology = []
 all = ["r2g-arango[postgres,mysql,sqlserver,snowflake,clickhouse,kafka,ui,mcp,openmetadata,llm,ontology]"]
 # fakesnow (an in-process Snowflake emulator) is here, not only in dev: CI's test
 # job installs [all,test], and tests/test_cli_suggest_keys.py skips without it.
-test = ["pytest>=8.0", "pytest-cov>=5.0", "rdflib>=7.0,<8.0", "fakesnow>=0.11"]
+test = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "rdflib>=7.0,<8.0",
+  "fakesnow>=0.11",
+  # The singularizer cross-check (tests/test_naming_known_answers.py) tests ASA's copy
+  # too; without ASA here it would skip in CI's test job (r2g-arango#30).
+  "arangodb-schema-analyzer>=0.16.0",
+]
 dev = [
   "ruff>=0.4",
   "mypy>=1.10",
   # Present so tests/test_csi.py::test_vendored_csi_schema_matches_installed_analyzer
   # runs in CI: the vendored CSI schema must not drift from the analyzer's
   # authoritative copy (contextual-data-fabric unified-architecture paper, step 2).
-  "arangodb-schema-analyzer>=0.13.0",
+  "arangodb-schema-analyzer>=0.16.0",
   # In-process Snowflake emulator, so tests/test_cli_suggest_keys.py runs the
   # suggest -> review -> snapshot loop end to end in CI without an account.
   "fakesnow>=0.11",
