@@ -43,6 +43,11 @@ so the SQL leg and the graph leg can never disagree about a concept's name —
 contextual-data-fabric refuses to build a catalog whose CSI names a property the
 R2RML does not map.
 
+**Accents are folded; anything else that cannot become an identifier is refused.**
+Identifiers are ASCII (CC-12), so ``"Café owner"`` becomes ``cafeOwner``. A label
+with letters that have no ASCII form (``ß``, ``名前``) or with no letters or digits
+at all is refused, never silently shortened or written raw into an IRI.
+
 **A rename is refused rather than traded for a new defect.** Applied before the
 P12.1 label-collision check, a curated name must not:
 
@@ -61,6 +66,8 @@ refusal is repeated until nothing changes.
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
@@ -68,6 +75,33 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 CURATED_LABELS_VERSION = "1"
 
 _ENTRY_FIELDS = {"label", "description", "altLabels", "decidedBy", "decidedAt"}
+
+_IDENTIFIER = re.compile(r"[A-Za-z0-9_]+")
+
+
+def derive_identifier(label: str, kind: str) -> Tuple[Optional[str], Optional[str]]:
+    """``(identifier, None)`` for a curator's label, or ``(None, why not)``.
+
+    ``kind`` is ``"entity"`` (PascalCase) or anything else (lowerCamel). Accents
+    are folded first (NFKD, combining marks dropped) because the converter keeps
+    only ASCII letters and digits and would otherwise drop the whole letter:
+    ``"Café"`` must become ``Cafe``, not ``Caf``.
+    """
+    from .csi import owl_entity_name, owl_property_name
+
+    folded = "".join(
+        c for c in unicodedata.normalize("NFKD", label) if not unicodedata.combining(c)
+    )
+    foreign = list(dict.fromkeys(c for c in folded if c.isalnum() and not c.isascii()))
+    if foreign:
+        return None, (
+            f"label has letters with no ASCII form ({''.join(foreign)}); identifiers are "
+            "ASCII, so this label cannot name the concept without losing them"
+        )
+    identifier = owl_entity_name(folded) if kind == "entity" else owl_property_name(folded)
+    if not _IDENTIFIER.fullmatch(identifier):
+        return None, "label has no letters or digits to derive an identifier from"
+    return identifier, None
 
 
 class CuratedLabelsError(ValueError):
@@ -208,7 +242,7 @@ def plan_curated_labels(
     Pure and deterministic: entries are resolved in sorted order, so the result
     never depends on the order a curator's tool happened to write them.
     """
-    from .csi import owl_entity_name, owl_property_name
+    from .csi import _qualified_label
 
     join_key_labels = join_key_labels or set()
     entity_props = {e: list(props) for e, props in entities.items()}
@@ -222,14 +256,21 @@ def plan_curated_labels(
     # ("relationship", r).
     wanted: Dict[tuple, Tuple[Mapping[str, Any], str]] = {}
     records: Dict[tuple, Dict[str, Any]] = {}
+    unusable: Set[tuple] = set()  # claimed, but the label yields no identifier
 
-    def _claim(key: tuple, kind: str, entry: Mapping[str, Any], target: str) -> None:
-        if key in wanted:
+    def _claim(key: tuple, kind: str, entry: Mapping[str, Any]) -> None:
+        if key in wanted or key in unusable:
             # Two entries for one concept: neither can be the curator's decision.
             records[key] = _record(
                 kind, entry, resolution="refused", reason="curated more than once in this document"
             )
-            wanted[key] = (wanted[key][0], key[-1])
+            if key in wanted:
+                wanted[key] = (wanted[key][0], key[-1])
+            return
+        target, problem = derive_identifier(entry["label"], kind)
+        if target is None:
+            unusable.add(key)
+            records[key] = _record(kind, entry, resolution="refused", reason=problem)
             return
         wanted[key] = (entry, target)
 
@@ -239,7 +280,7 @@ def plan_curated_labels(
                 "entity", entry, resolution="unmatched", reason="no entity with this generated name"
             )
             continue
-        _claim(("entity", entry["name"]), "entity", entry, owl_entity_name(entry["label"]))
+        _claim(("entity", entry["name"]), "entity", entry)
 
     for entry in sorted(
         curated.get("properties", []), key=lambda e: (e["entity"], e["name"])
@@ -251,12 +292,25 @@ def plan_curated_labels(
             )
             continue
         if entry["name"] not in entity_props[entry["entity"]]:
-            records[key] = _record(
-                "property",
-                entry,
-                resolution="unmatched",
-                reason=f"{entry['entity']} has no property with this generated name",
+            reason = f"{entry['entity']} has no property with this generated name"
+            # The likeliest cause: the key came from a CSI exported under
+            # `qualify` / `roles`, which renamed a collided label.
+            qualified_from = next(
+                (
+                    p
+                    for p in entity_props[entry["entity"]]
+                    for seam in (False, True)
+                    if _qualified_label(entry["entity"], p, collapse_seam=seam) == entry["name"]
+                ),
+                None,
             )
+            if qualified_from is not None:
+                reason += (
+                    f"; it is the name --label-policy qualify/roles gives "
+                    f"{entry['entity']}.{qualified_from} — curate from a CSI exported "
+                    f"with --label-policy warn, whose names are the generated ones"
+                )
+            records[key] = _record("property", entry, resolution="unmatched", reason=reason)
             continue
         if entry["name"] in join_key_labels:
             records[key] = _record(
@@ -269,7 +323,7 @@ def plan_curated_labels(
                 ),
             )
             continue
-        _claim(key, "property", entry, owl_property_name(entry["label"]))
+        _claim(key, "property", entry)
 
     for entry in sorted(curated.get("relationships", []), key=lambda e: e["name"]):
         key = ("relationship", entry["name"])
@@ -281,7 +335,7 @@ def plan_curated_labels(
                 reason="no relationship with this generated name",
             )
             continue
-        _claim(key, "relationship", entry, owl_property_name(entry["label"]))
+        _claim(key, "relationship", entry)
 
     # ── Refuse until stable: a refusal restores a generated name, which can ──
     # collide with another entry's target.

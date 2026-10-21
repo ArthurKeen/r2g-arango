@@ -17,6 +17,10 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `altLabels` entry. A rename that would break a join key or give two entities one label
   is refused and recorded in `provenance.curatedLabels`, and the export fails while any
   entry is refused or matches nothing, unless `--allow-unapplied-labels` is given.
+  Accents in a label are folded (`Café owner` → `cafeOwner`); a label with letters that
+  have no ASCII form, or no letters at all, is refused. A rename changes the name every
+  consumer sees, so contextual-data-fabric manifests that list the old names must be
+  updated with it.
 
 ### Security
 

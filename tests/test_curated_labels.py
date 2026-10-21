@@ -339,6 +339,62 @@ def test_unmatched_entries_are_recorded_not_dropped():
     assert len(plan.problems) == 4
 
 
+def test_accents_are_folded_into_the_identifier():
+    # The converter keeps only ASCII; without folding, "Café" lost its "é".
+    labels = _labels(
+        entities=[{"name": "Account", "label": "Café owner"}],
+        properties=[{"entity": "Contract", "name": "amt", "label": "Montant dû"}],
+    )
+    doc = mapping_to_csi(_config(), _schema(), label_policy="warn", curated_labels=labels)
+    owner = _entity(doc, "CafeOwner")
+    assert owner["prefLabel"] == "Café owner"
+    assert "montantDu" in _prop_names(doc, "Contract")
+
+
+@pytest.mark.parametrize(
+    ("label", "reason"),
+    [
+        ("Straße", "no ASCII form (ß)"),
+        ("名前", "no ASCII form (名前)"),
+        ("!!!", "no letters or digits"),
+        ("> <", "no letters or digits"),
+    ],
+)
+def test_label_with_no_faithful_identifier_is_refused(label, reason):
+    labels = _labels(properties=[{"entity": "Contract", "name": "amt", "label": label}])
+    plan = mapping_plan(labels)
+    assert plan.records[0]["resolution"] == "refused"
+    assert reason in plan.records[0]["reason"]
+    assert plan.properties == {}
+    # Nothing raw reaches the R2RML either.
+    ttl = mapping_to_r2rml(_config(), _schema(), curated_labels=labels)
+    assert label not in ttl
+
+
+def test_a_refused_label_still_counts_as_a_duplicate():
+    labels = _labels(
+        properties=[
+            {"entity": "Contract", "name": "amt", "label": "!!!"},
+            {"entity": "Contract", "name": "amt", "label": "amount"},
+        ]
+    )
+    plan = mapping_plan(labels)
+    assert plan.properties == {}
+    assert plan.records[0]["resolution"] == "refused"
+
+
+def test_unmatched_key_from_a_qualified_csi_says_so():
+    # Under the default `qualify` policy Contract.renewalDate is exported as
+    # contractRenewalDate, so an ontology imported from that CSI uses it as a key.
+    labels = _labels(
+        properties=[{"entity": "Contract", "name": "contractRenewalDate", "label": "x"}]
+    )
+    rec = mapping_plan(labels).records[0]
+    assert rec["resolution"] == "unmatched"
+    assert "Contract.renewalDate" in rec["reason"]
+    assert "--label-policy warn" in rec["reason"]
+
+
 # ── Both exporters agree ────────────────────────────────────────────────────
 
 
