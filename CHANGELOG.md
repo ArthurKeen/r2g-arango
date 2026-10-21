@@ -7,6 +7,8 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-21
+
 ### Added
 
 - **Curated labels at export (PRD P12.12).** `export-csi` and `export-r2rml` take
@@ -815,7 +817,8 @@ Initial phased implementation (not yet published to PyPI):
   pipeline, `r2g source dump` CLI, pure-Python FK inference with
   optional value-overlap sampler.
 
-[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/ArthurKeen/r2g-arango/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.4.3...v0.5.0
