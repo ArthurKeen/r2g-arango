@@ -207,14 +207,14 @@ def concept_name(entity: str) -> str:
 
 
 def _singularize(word: str) -> str:
-    """Crude English singularization — enough for identifier naming."""
-    if len(word) > 3 and word.endswith("ies"):
-        return word[:-3] + "y"
-    if len(word) > 3 and word.endswith("ses"):
-        return word[:-2]
-    if len(word) > 2 and word.endswith("s") and not word.endswith("ss"):
-        return word[:-1]
-    return word
+    """The shared singularizer (:func:`r2g.naming.singularize`).
+
+    This module kept a private copy that never received the case or ``-se``
+    fixes; it now uses the one every other naming path does (r2g-arango#30).
+    """
+    from .naming import singularize
+
+    return singularize(word)
 
 
 def _table_matches_entity(table_name: str, entity: str) -> bool:
