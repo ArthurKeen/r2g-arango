@@ -7,7 +7,8 @@ STATIC_DIR = Path(__file__).parents[1] / "src" / "r2g" / "ui" / "static"
 
 def test_viewer_is_loaded_and_available_from_context_surfaces():
     index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    assert '<script src="/static/arangoimport-viewer.js"></script>' in index
+    # Relative, so it also loads under a path prefix (see test_control_plane_mode).
+    assert '<script src="static/arangoimport-viewer.js"></script>' in index
     assert index.count("View arangoimport script bundle") >= 3
     assert index.count("View arangoimport command") >= 2
     assert "scope: 'collection'" in index

@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Relational-to-Graph Studio</title>
-<link rel="icon" type="image/png" href="/static/r2g-icon.png">
-<link rel="apple-touch-icon" href="/static/r2g-icon.png">
+<link rel="icon" type="image/png" href="static/r2g-icon.png">
+<link rel="apple-touch-icon" href="static/r2g-icon.png">
 <script>
   // Resolve the theme before first paint to avoid a flash. Light is the
   // default; a stored choice or the OS preference can switch to dark.
@@ -1028,14 +1028,32 @@
   }
   .floating-card.compact { min-width: 280px; }
   .progress-bars-mini { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
+  .cp-banner { padding: 6px 14px; font-size: 13px; border-bottom: 1px solid rgba(127,127,127,.3); display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+  .cp-banner details { display: inline; }
+  .cp-banner summary { cursor: pointer; }
+  .cp-banner ul { max-height: 200px; overflow-y: auto; margin: 6px 0 0; padding-left: 18px; }
+  .cp-gate { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--bg, #fff); z-index: 10000; }
+  .cp-gate[hidden], .cp-banner[hidden] { display: none; }
+  .cp-gate-card { max-width: 560px; padding: 24px; }
+  .cp-gate-card h1 { font-size: 20px; margin: 0 0 8px; }
 </style>
 </head>
 <body class="body-flex">
 
+<!-- Under a control plane: who and where this tab is, and what to do without a context. -->
+<div id="cp-banner" class="cp-banner" hidden></div>
+<div id="cp-gate" class="cp-gate" role="alert" hidden>
+  <div class="cp-gate-card">
+    <h1 id="cp-gate-title">Open r2g from a project</h1>
+    <p id="cp-gate-text">r2g runs inside the control plane here. Open your project's home page and choose r2g there; it opens with your project's transformation project and ontology.</p>
+    <a id="cp-gate-home" href="/">Go to your projects</a>
+  </div>
+</div>
+
 <!-- Toolbar -->
 <div class="toolbar">
   <div class="toolbar-brand">
-    <img src="/static/r2g-icon.png" alt="" width="28" height="28" class="brand-icon" />
+    <img src="static/r2g-icon.png" alt="" width="28" height="28" class="brand-icon" />
     <div class="brand-text">
       <span class="brand-title">Relational-to-Graph Studio</span>
       <span class="brand-tagline">Auto-build an ArangoDB graph from your relational data</span>
@@ -1267,7 +1285,17 @@
 </div>
 
 <script>
-const API = '';
+// Where r2g is mounted: '' at the root, '/r2g' when a proxy serves it under a prefix.
+// From location.pathname, not document.baseURI, which drops the last path segment.
+function _basePath() {
+  let p = location.pathname;
+  if (!p.endsWith('/')) {
+    const leaf = p.slice(p.lastIndexOf('/') + 1);
+    p = leaf.includes('.') ? p.slice(0, p.lastIndexOf('/') + 1) : p + '/';
+  }
+  return p.replace(/\/$/, '');
+}
+const API = _basePath();
 let currentProject = null;
 let currentSourceName = null;
 let graphDataCache = null;
@@ -1284,7 +1312,105 @@ let rafPending = false;
 // ── Helpers ──
 
 function _apiToken() {
+  if (CP.on) return _cpToken() || '';
   try { return localStorage.getItem('r2g.apiToken') || ''; } catch (e) { return ''; }
+}
+
+// ── Under a control plane ──
+// The shell opens r2g at <entry>?ctx=<token>: a short-lived signed context for one user in
+// one project. It is kept for THIS TAB only (sessionStorage), removed from the address bar,
+// sent on every call, and renewed before it expires. Never localStorage or a cookie: every
+// tab shares those, so a second tab on another project would move this one into it.
+const CP = { on: false, home: '/', renewal: null };
+const CP_KEY = 'r2g.context';
+
+function _cpToken() {
+  try { return sessionStorage.getItem(CP_KEY); } catch (e) { return null; }
+}
+
+function _cpClaims(token) {
+  try {
+    const part = (token || '').split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(part));
+  } catch (e) { return null; }
+}
+
+function _cpAdopt() {
+  const url = new URL(location.href);
+  const arrived = url.searchParams.get('ctx');
+  if (arrived) {
+    try { sessionStorage.setItem(CP_KEY, arrived); } catch (e) {}
+    url.searchParams.delete('ctx');
+    history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+  }
+  return _cpToken();
+}
+
+function _cpScheduleRenewal() {
+  const claims = _cpClaims(_cpToken());
+  if (!claims || !claims.exp || !claims.ctx) return;
+  clearTimeout(CP.renewal);
+  const delay = Math.max(0, (claims.exp - 120) * 1000 - Date.now());
+  CP.renewal = setTimeout(async () => {
+    try {
+      const res = await fetch('/api/context', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'content-type': 'application/json', 'X-Control-Plane': '1' },
+        body: JSON.stringify({ project: claims.ctx.project }),
+      });
+      if (!res.ok) return;
+      const body = await res.json();
+      if (body.token) { sessionStorage.setItem(CP_KEY, body.token); _cpScheduleRenewal(); }
+    } catch (e) { /* the current token stays until it expires */ }
+  }, delay);
+}
+
+function _cpGate(title, text) {
+  document.getElementById('cp-gate-title').textContent = title;
+  document.getElementById('cp-gate-text').textContent = text;
+  document.getElementById('cp-gate-home').href = CP.home || '/';
+  document.getElementById('cp-gate').hidden = false;
+}
+
+function _cpSessionEnded() {
+  _cpGate('Your session ended',
+    'Your project pass for r2g is no longer valid: you signed out of the control plane, or it '
+    + 'expired while this tab was idle. Open r2g again from your project to continue.');
+}
+
+async function _cpStart() {
+  try {
+    const res = await fetch(API + '/api/mode');
+    const body = res.ok ? await res.json() : {};
+    CP.on = !!body.control_plane;
+    CP.home = body.home || '/';
+  } catch (e) { CP.on = false; }
+  if (!CP.on) return true;
+  if (!_cpAdopt()) {
+    _cpGate('Open r2g from a project', document.getElementById('cp-gate-text').textContent);
+    return false;
+  }
+  _cpScheduleRenewal();
+  return true;
+}
+
+async function _cpShowContext() {
+  const ctx = await apiFetch('/api/control-plane/context');
+  const banner = document.getElementById('cp-banner');
+  const esc = (t) => String(t ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const onto = ctx.ontology || {};
+  const classes = (onto.classes || []).map((c) => `<li title="${esc(c.uri)}">${esc(c.label)}</li>`).join('');
+  banner.innerHTML =
+    `<span>Project: <strong>${esc(ctx.project.name)}</strong></span>`
+    + `<span>Signed in as <strong>${esc(ctx.principal)}</strong></span>`
+    + (onto.ontology_id
+        ? `<details id="cp-ontology"><summary>Ontology: <strong>${esc(onto.ontology_id)}</strong>`
+          + ` (${(onto.classes || []).length} classes)</summary>`
+          + (onto.problem ? `<p>${esc(onto.problem)}</p>` : `<ul>${classes}</ul>`) + `</details>`
+        : '<span>No project ontology</span>')
+    + (ctx.opens ? '' : '<span>This project names no transformation project for r2g.</span>');
+  banner.hidden = false;
+  if (ctx.opens) await selectProject(ctx.opens);
 }
 
 function _authHeaders(extra) {
@@ -1295,13 +1421,17 @@ function _authHeaders(extra) {
 }
 
 async function apiFetch(path, opts = {}) {
-  let res = await fetch(API + path, { headers: _authHeaders(opts.headers), ...opts });
+  let res = await fetch(API + path, { ...opts, headers: _authHeaders(opts.headers) });
+  if (res.status === 401 && CP.on) {
+    _cpSessionEnded();
+    throw new Error('Your session ended');
+  }
   // Local-first auth: if the API requires a token, prompt once and retry.
   if (res.status === 401) {
     const entered = prompt('This R2G API requires an access token. Paste the token shown in the server console:');
     if (entered) {
       try { localStorage.setItem('r2g.apiToken', entered.trim()); } catch (e) {}
-      res = await fetch(API + path, { headers: _authHeaders(opts.headers), ...opts });
+      res = await fetch(API + path, { ...opts, headers: _authHeaders(opts.headers) });
     }
   }
   if (!res.ok) {
@@ -3865,9 +3995,9 @@ function scheduleExprCompile() {
   const seq = ++_exprCompileSeq;
   _exprCompileTimer = setTimeout(async () => {
     try {
-      const resp = await fetch('/api/expressions/compile', {
+      const resp = await fetch(API + '/api/expressions/compile', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: _authHeaders(),
         body: JSON.stringify({ expression: expr, engine }),
       });
       const data = await resp.json();
@@ -3946,9 +4076,9 @@ async function runExprPreview(expr, engine, seq) {
     return;
   }
   try {
-    const resp = await fetch('/api/expressions/preview', {
+    const resp = await fetch(API + '/api/expressions/preview', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: _authHeaders(),
       body: JSON.stringify({ expression: expr, engine, row }),
     });
     const data = await resp.json();
@@ -4069,7 +4199,7 @@ function initExpressionEditor() {
     ta.addEventListener('scroll', syncExprHighlightScroll);
   }
 
-  fetch('/api/expressions/functions').then(r => r.json()).then(data => {
+  fetch(API + '/api/expressions/functions', { headers: _authHeaders() }).then(r => r.json()).then(data => {
     const hint = document.getElementById('expr-fns-hint');
     if (data && Array.isArray(data.functions)) {
       _exprKnownFns = new Set(data.functions.map(f => f.toUpperCase()));
@@ -7043,7 +7173,10 @@ function showProgressViewFloating(loadId) {
 
   let source;
   try {
-    source = new EventSource(`${API}/api/projects/${currentProject}/load/${loadId}/stream`);
+    // An EventSource cannot send a header, so under a control plane the context rides as
+    // ?token= (the control plane's proxy keeps it out of its access log).
+    const streamToken = CP.on ? `?token=${encodeURIComponent(_cpToken() || '')}` : '';
+    source = new EventSource(`${API}/api/projects/${encodeURIComponent(currentProject)}/load/${loadId}/stream${streamToken}`);
     source.onmessage = (e) => {
       if (e.data.startsWith(':')) return;
       const evt = JSON.parse(e.data);
@@ -7838,14 +7971,18 @@ function initResizers() {
   });
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   applyTheme(currentTheme());
+  if (!(await _cpStart())) return;  // under a control plane, nothing without a context
   initExplorer();
   initMappingHighlight();
   loadCatalogs();
   loadSources();
   loadTargets();
-  loadProjects();
+  const projectsLoaded = loadProjects();
+  if (CP.on) {
+    Promise.resolve(projectsLoaded).then(_cpShowContext).catch((e) => console.error(e));
+  }
   initExpressionEditor();
   renderLegend();
   setLens('topology');
@@ -7860,6 +7997,6 @@ document.addEventListener('DOMContentLoaded', () => {
   if (hint) hint.style.display = '';
 });
 </script>
-<script src="/static/arangoimport-viewer.js"></script>
+<script src="static/arangoimport-viewer.js"></script>
 </body>
 </html>

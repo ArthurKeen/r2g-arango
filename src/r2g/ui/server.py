@@ -4,17 +4,21 @@ import asyncio
 import json
 import os
 import queue
+import re
 import secrets
 import threading
 from pathlib import Path
 from typing import Any, List, Literal, Optional
+from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.concurrency import run_in_threadpool
 
+from r2g import control_plane
 from r2g.catalog import CatalogManager, validate_project_name
 from r2g.config import ConfigManager, validate_config
 from r2g.connectors.arango_writer import ArangoWriter
@@ -75,6 +79,49 @@ _running_loads: dict[str, dict[str, Any]] = {}  # load_id -> {"thread", "queue",
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", ""}
 
 
+#: A route about one transformation project: ``/api/projects/<name>[/...]``.
+_PROJECT_ROUTE = re.compile(r"^/api/projects/([^/]+)")
+#: Under a control plane these need no context: the page itself, and how to start.
+_OPEN_PATHS = frozenset({"/api/health", "/api/mode"})
+
+
+def _add_control_plane_auth(app: FastAPI) -> None:
+    """Under a control plane: a context token on every ``/api`` call (``?token=`` on the
+    load-progress stream, which cannot carry a header), from this deployment's tenant,
+    and only the transformation project the control-plane project opens here."""
+    tenant = os.environ.get("R2G_TENANT", "").strip()
+
+    @app.middleware("http")
+    async def _require_context(request: Request, call_next):
+        path = request.url.path
+        if not path.startswith("/api/") or path in _OPEN_PATHS or request.method == "OPTIONS":
+            return await call_next(request)
+        auth = request.headers.get("authorization", "")
+        token = auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else ""
+        if not token and path.endswith("/stream"):
+            token = request.query_params.get("token", "").strip()
+        if not token:
+            return JSONResponse({"detail": "A context token is required"}, status_code=401)
+        gateway = control_plane.get()
+        try:
+            identity = await run_in_threadpool(gateway.verify, token)
+            if tenant and identity.tenant != tenant:
+                return JSONResponse({"detail": f"This r2g serves tenant {tenant!r}"},
+                                    status_code=403)
+            project = await run_in_threadpool(gateway.project, identity)
+        except control_plane.ContextRejected as exc:
+            return JSONResponse({"detail": f"Context refused: {exc}"}, status_code=401)
+        except control_plane.ContextUnavailable as exc:
+            return JSONResponse({"detail": f"Cannot check the context: {exc}"}, status_code=503)
+        m = _PROJECT_ROUTE.match(path)
+        if m and unquote(m.group(1)) != project.opens:
+            # Another project is not visible here, the way a foreign one is not found.
+            return JSONResponse({"detail": "Project not found"}, status_code=404)
+        request.state.cp_identity = identity
+        request.state.cp_project = project
+        return await call_next(request)
+
+
 def create_app(
     catalog_dir: str | None = None,
     *,
@@ -101,10 +148,16 @@ def create_app(
             allow_headers=["*"],
         )
 
-    # ── Optional Bearer-token auth. ──
+    # ── Under a control plane, its context token is the only credential. ──
+    governed = control_plane.mode()
+    app.state.control_plane = governed
+    if governed:
+        _add_control_plane_auth(app)
+
+    # ── Otherwise, optional Bearer-token auth. ──
     token = (api_token or os.environ.get("R2G_API_TOKEN") or "").strip()
     loopback = host in _LOOPBACK_HOSTS
-    require_auth = bool(token) or not loopback
+    require_auth = not governed and (bool(token) or not loopback)
     if require_auth and not token:
         token = secrets.token_urlsafe(32)
     app.state.api_token = token
@@ -127,7 +180,7 @@ def create_app(
     catalog = CatalogManager(catalog_dir)
     # Mapping files for API-created projects are confined here, never to a
     # client-supplied path (prevents path traversal / arbitrary file writes).
-    _projects_root = (Path(catalog_dir).expanduser() if catalog_dir else Path.home() / ".r2g") / "projects"
+    _projects_root = catalog.dir.expanduser() / "projects"
 
     def _resolve_target(project: Any) -> tuple[str, str, str, str]:
         """Resolve (endpoint, database, username, password) for a project's target.
@@ -166,6 +219,30 @@ def create_app(
     @app.get("/api/health")
     async def health():
         return {"status": "ok"}
+
+    @app.get("/api/mode")
+    async def run_mode():
+        """Whether r2g runs under a control plane, and where its home is: the page needs
+        to know before it has a context, to say where to open r2g from."""
+        return {"control_plane": governed,
+                "home": os.environ.get("CONTROL_PLANE_HOME", "/") if governed else None}
+
+    @app.get("/api/control-plane/context")
+    async def control_plane_context(request: Request):
+        """The context this tab is in: who, the control-plane project, the transformation
+        project it opens here, and the project ontology's classes (read from AOE)."""
+        if not governed:
+            raise HTTPException(status_code=404, detail="Not running under a control plane")
+        identity: control_plane.Identity = request.state.cp_identity
+        project: control_plane.Project = request.state.cp_project
+        ontology = await run_in_threadpool(control_plane.ontology_classes, identity)
+        return {
+            "principal": identity.principal,
+            "roles": list(identity.roles),
+            "project": {"id": project.id, "name": project.name},
+            "opens": project.opens,
+            "ontology": ontology,
+        }
 
     @app.get("/api/expressions/functions")
     async def list_expression_functions():
@@ -810,8 +887,12 @@ def create_app(
     # ── Project endpoints ─────────────────────────────────────────────
 
     @app.get("/api/projects")
-    async def list_projects():
-        return [p.model_dump() for p in catalog.list_projects()]
+    async def list_projects(request: Request):
+        projects = catalog.list_projects()
+        if governed:  # only the one the control-plane project opens here
+            opens = request.state.cp_project.opens
+            projects = [p for p in projects if p.name == opens]
+        return [p.model_dump() for p in projects]
 
     @app.get("/api/projects/{name}")
     async def get_project(name: str):
