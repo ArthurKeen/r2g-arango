@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from importlib import resources
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -514,13 +515,22 @@ def entity_names_for_mapping(
     matched *using* the singularizer, so they are not independent evidence. A
     column whose other words differ from the table's (``ship_via``,
     ``reports_to``, ``manager_id``) names a role, not the table, and is ignored,
-    as is any table whose collection the mapping renamed. Returns
+    as is any table whose collection the mapping renamed or that shares its
+    collection with another table.
+
+    A column that only repeats its table's name (``goods_id`` -> ``goods``) is
+    weaker evidence, because many schemas name every key ``<table>_id``
+    (``customers_id`` -> ``customers``). It counts only when the dictionary lists
+    the name as a noun in its own right, the schema elsewhere names a key with a
+    plural table's singular (``customer_id`` -> ``customers``), and no key
+    repeats the name of a table that is not such a noun. A column that gives a
+    *different* singular (``basis_id`` -> ``bases``) needs none of that. Returns
     ``(names, evidence)``: ``names`` maps every entity collection to its class
     name; ``evidence`` records each name the foreign keys decided.
     """
     from relational_schema_analyzer.overlay import INFERRED_CONSTRAINT_PREFIX
 
-    from .naming import convert_identifier, pluralize, singularize, split_identifier
+    from .naming import convert_identifier, noun_lexicon, pluralize, singularize, split_identifier
 
     def _words(name: str) -> List[str]:
         return [w.lower() for w in split_identifier(name)]
@@ -535,19 +545,14 @@ def entity_names_for_mapping(
                     continue
                 referencing.setdefault(fk.foreign_table, []).append((table_name, fk.columns[0]))
 
-    names: Dict[str, str] = {}
-    evidence: List[Dict[str, Any]] = []
-    for cm in config.collections.values():
-        if cm.collection_type == "edge" or cm.is_join_table:
-            continue
-        generated = owl_entity_name(cm.target_collection)
-        names[cm.target_collection] = generated
-        table_words = _words(cm.source_table)
-        if not table_words or _words(cm.target_collection) != table_words:
-            continue
+    def _named_after(table: str) -> List[Tuple[str, str]]:
+        """``(word for one row, "table.column")`` per column named after ``table``."""
+        table_words = _words(table)
+        if not table_words:
+            return []
         head, last = table_words[:-1], table_words[-1]
-        said: Dict[str, List[str]] = {}
-        for ref_table, column in referencing.get(cm.source_table, []):
+        found: List[Tuple[str, str]] = []
+        for ref_table, column in referencing.get(table, []):
             match = _KEY_SUFFIX.search(column)
             if match is None or match.start() == 0:
                 continue
@@ -556,7 +561,44 @@ def entity_names_for_mapping(
                 continue
             word = prefix_words[-1]
             if word == last or singularize(last).lower() == word or pluralize(word).lower() == last:
-                said.setdefault(word, []).append(f"{ref_table}.{column}")
+                found.append((word, f"{ref_table}.{column}"))
+        return found
+
+    # The schema's own convention for plural tables: does it name their keys with
+    # a singular (``customer_id``), or by repeating the table name (``customers_id``)?
+    nouns = noun_lexicon().nouns
+    singular_style = repeats_plural = False
+    for referenced in referencing:
+        table_words = _words(referenced)
+        if not table_words or singularize(table_words[-1]).lower() == table_words[-1]:
+            continue
+        for word, _ in _named_after(referenced):
+            if word != table_words[-1]:
+                singular_style = True
+            elif word not in nouns:
+                repeats_plural = True
+    repeats_are_evidence = singular_style and not repeats_plural
+
+    entity_maps = [
+        cm for cm in config.collections.values() if cm.collection_type != "edge" and not cm.is_join_table
+    ]
+    sharing = Counter(cm.target_collection for cm in entity_maps)
+    names: Dict[str, str] = {}
+    evidence: List[Dict[str, Any]] = []
+    for cm in entity_maps:
+        generated = owl_entity_name(cm.target_collection)
+        names[cm.target_collection] = generated
+        if sharing[cm.target_collection] > 1:
+            continue
+        table_words = _words(cm.source_table)
+        if not table_words or _words(cm.target_collection) != table_words:
+            continue
+        head, last = table_words[:-1], table_words[-1]
+        said: Dict[str, List[str]] = {}
+        for word, where in _named_after(cm.source_table):
+            if word == last and not repeats_are_evidence:
+                continue
+            said.setdefault(word, []).append(where)
         if len(said) != 1:
             continue
         ((word, columns),) = said.items()
