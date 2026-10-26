@@ -24,7 +24,8 @@ Every entry may also carry ``description``, ``altLabels`` (synonyms),
 ``decidedBy`` and ``decidedAt``.
 
 **Keys are the names r2g generates.** ``name`` (and ``entity``) are r2g's own
-conceptual names before any renaming: ``owl_entity_name(target_collection)``,
+conceptual names before any renaming: the class name
+``entity_names_for_mapping`` gives each collection (P12.13),
 ``owl_property_name(stored field)``, ``owl_property_name(edge collection)``. A
 CSI document exported with ``--label-policy warn`` (or ``off``) carries exactly
 these names, so an ontology imported from it into AOE exports keys that match.

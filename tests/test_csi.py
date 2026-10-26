@@ -1140,3 +1140,19 @@ class TestDeclaredUniqueness:
         for key_set in (["region", "externalRef"], ["externalRef", "region"]):
             doc, _ = self._doc([key_set])
             validate_csi(doc)
+
+
+def test_export_csi_without_a_schema_says_its_names_can_differ(tmp_path):
+    """Class names read the schema's foreign keys (P12.13); export-r2rml always has them."""
+    from typer.testing import CliRunner
+
+    from r2g.main import app
+
+    config = tmp_path / "mapping.yaml"
+    config.write_text(
+        "source_schema: shop\ncollections:\n  goods:\n    source_table: goods\n    target_collection: goods\n",
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(app, ["export-csi", "--config", str(config), "-o", str(tmp_path / "out.json")])
+    assert result.exit_code == 0, result.output
+    assert "No --schema" in " ".join(result.output.split())

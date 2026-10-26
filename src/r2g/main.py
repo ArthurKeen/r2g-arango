@@ -625,6 +625,13 @@ def export_csi(
     try:
         mapping = ConfigManager.load_config(config_path)
         schema = Schema.load_from_file(schema_file) if schema_file else None
+        if schema is None:
+            # Class names read the schema's foreign keys (P12.13); export-r2rml
+            # always has them, so without --schema the two can name a class apart.
+            console.print(
+                "[yellow]No --schema: class names use the singularizer only, without the "
+                "schema's foreign-key evidence, and can differ from export-r2rml's.[/yellow]"
+            )
         curated = load_curated_labels(curated_labels_file) if curated_labels_file else None
         generated_at = datetime.now(timezone.utc).isoformat()
         # Forward the bitemporal stamps RSA >= 0.8.0 records on the physical schema

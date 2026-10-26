@@ -7,6 +7,24 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A foreign-key column that repeats a plural table name no longer makes the class
+  plural (PRD P12.13).** 0.8.0 read `orders.customers_id` -> `customers` as the schema
+  designer's word for one row, so a schema that names every key `<table>_id` got
+  `Customers` and `Orders` instead of `Customer` and `Order`. A column that only repeats
+  its table's name now counts only when the same schema names some other key with a
+  plural table's singular (`customer_id` -> `customers`) and no key repeats the name of a
+  table the dictionary does not list as a noun in its own right; `goods_id` -> `Goods`
+  still works there. A column that gives a different singular (`basis_id` -> `bases`
+  names `Basis`) is unaffected. **Output change only for schemas 0.8.0 got wrong**:
+  their classes return to the 0.7.0 names. Chinook, Northwind, Pagila and
+  contextual-data-fabric's committed schemas are unchanged.
+- **A collection two tables write to keeps the singularizer's class name**, instead of a
+  name that depended on the order of the mapping.
+- **`export-csi` without `--schema` warns** that its class names can differ from
+  `export-r2rml`'s, which always reads the schema's foreign keys.
+
 ## [0.8.0] — 2026-10-26
 
 ### Changed
