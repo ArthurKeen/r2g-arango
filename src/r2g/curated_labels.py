@@ -74,9 +74,12 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 CURATED_LABELS_VERSION = "1"
 
-_ENTRY_FIELDS = {"label", "description", "altLabels", "decidedBy", "decidedAt"}
+_ENTRY_FIELDS = {"label", "identifier", "description", "altLabels", "decidedBy", "decidedAt"}
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_]+")
+# CC-12 shapes a curator-given identifier must already have (r2g-arango#34).
+_ENTITY_IDENTIFIER = re.compile(r"[A-Z][A-Za-z0-9]*")
+_MEMBER_IDENTIFIER = re.compile(r"[a-z][A-Za-z0-9]*")
 
 
 def derive_identifier(label: str, kind: str) -> Tuple[Optional[str], Optional[str]]:
@@ -102,6 +105,25 @@ def derive_identifier(label: str, kind: str) -> Tuple[Optional[str], Optional[st
     if not _IDENTIFIER.fullmatch(identifier):
         return None, "label has no letters or digits to derive an identifier from"
     return identifier, None
+
+
+def explicit_identifier(identifier: str, kind: str) -> Tuple[Optional[str], Optional[str]]:
+    """``(identifier, None)`` for a curator's own identifier, or ``(None, why not)``.
+
+    The curator's last word on a name (r2g-arango#34): used exactly as written,
+    never singularized or re-cased, so ``Sales``, ``CustomerAnalytics`` or a name
+    for a label in a non-Latin script come out as intended. It must already be a
+    CC-12 identifier: PascalCase for an entity, lowerCamel for a property or
+    relationship, ASCII letters and digits only.
+    """
+    pattern = _ENTITY_IDENTIFIER if kind == "entity" else _MEMBER_IDENTIFIER
+    if pattern.fullmatch(identifier):
+        return identifier, None
+    shape = "PascalCase" if kind == "entity" else "lowerCamel"
+    return None, (
+        f"identifier {identifier!r} is not a CC-12 {shape} name "
+        "(ASCII letters and digits, starting with a letter)"
+    )
 
 
 class CuratedLabelsError(ValueError):
@@ -137,6 +159,9 @@ def validate_curated_labels(doc: Any) -> List[str]:
                 value = entry.get(key)
                 if not isinstance(value, str) or not value.strip():
                     problems.append(f"{where}.{key} must be a non-empty string")
+            identifier = entry.get("identifier")
+            if identifier is not None and (not isinstance(identifier, str) or not identifier.strip()):
+                problems.append(f"{where}.identifier must be a non-empty string")
             alt = entry.get("altLabels", [])
             if not isinstance(alt, list) or not all(isinstance(a, str) for a in alt):
                 problems.append(f"{where}.altLabels must be a list of strings")
@@ -217,6 +242,8 @@ def _record(kind: str, entry: Mapping[str, Any], **extra: Any) -> Dict[str, Any]
         rec["entity"] = entry["entity"]
     rec["name"] = entry["name"]
     rec["label"] = entry["label"]
+    if entry.get("identifier"):
+        rec["identifier"] = entry["identifier"]
     rec.update(extra)
     if entry.get("decidedBy"):
         rec["decidedBy"] = entry["decidedBy"]
@@ -267,7 +294,10 @@ def plan_curated_labels(
             if key in wanted:
                 wanted[key] = (wanted[key][0], key[-1])
             return
-        target, problem = derive_identifier(entry["label"], kind)
+        if entry.get("identifier"):
+            target, problem = explicit_identifier(entry["identifier"], kind)
+        else:
+            target, problem = derive_identifier(entry["label"], kind)
         if target is None:
             unusable.add(key)
             records[key] = _record(kind, entry, resolution="refused", reason=problem)

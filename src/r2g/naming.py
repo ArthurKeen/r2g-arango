@@ -64,7 +64,7 @@ def split_identifier(name: str) -> list[str]:
 #: Same word in both forms; neither :func:`pluralize` nor :func:`singularize`
 #: changes it.
 _INVARIANT = frozenset(
-    {"data", "metadata", "media", "news", "series", "species", "gps", "sms", "dns"}
+    {"data", "metadata", "media", "news", "series", "species", "gps", "sms", "dns", "analytics"}
 )
 
 #: Singular words that already end in ``s``. Their plural adds ``es``, except
@@ -92,6 +92,10 @@ _IRREGULAR = {
     "criteria": "criterion",
     "phenomena": "phenomenon",
     "matrices": "matrix",
+    "oxen": "ox",
+    # Data-modelling usage, not the dictionary's: a table of customer demographics
+    # holds rows that are each one demographic (Northwind models CustomerDemographic).
+    "demographics": "demographic",
     "vertices": "vertex",
 }
 #: Plural -> singular for :func:`singularize` only (``index`` pluralizes to ``indexes``).
@@ -129,7 +133,7 @@ def _split_tail(word: str) -> tuple[str, str]:
     return "", word
 
 
-def _singular_word(word: str) -> str:
+def _singular_by_rules(word: str) -> str:
     low = word.lower()
     if low in _INVARIANT or low in _SINGULAR_ENDING_IN_S:
         return word
@@ -154,7 +158,7 @@ def _singular_word(word: str) -> str:
     return word
 
 
-def _plural_word(word: str) -> str:
+def _plural_by_rules(word: str) -> str:
     low = word.lower()
     upper = word[-1].isupper()
     if low in _INVARIANT:
@@ -169,6 +173,49 @@ def _plural_word(word: str) -> str:
     if low.endswith(("s", "x", "z", "ch", "sh")):
         return word + ("ES" if upper else "es")
     return word + ("S" if upper else "s")
+
+
+def noun_lexicon():
+    """The dictionary layer: relational-schema-analyzer's vendored noun lexicon.
+
+    r2g depends on RSA, so it uses RSA's table rather than keeping a third copy;
+    ``tests/test_naming_known_answers.py`` checks that arangodb-schema-analyzer's
+    vendored copy has the same SHA-256.
+    """
+    from relational_schema_analyzer.naming import noun_lexicon as _rsa_noun_lexicon
+
+    return _rsa_noun_lexicon()
+
+
+def _singular_word(word: str) -> str:
+    """Named lists, then the dictionary, then the rules (r2g-arango#30)."""
+    low = word.lower()
+    if (
+        low in _INVARIANT
+        or low in _SINGULAR_ENDING_IN_S
+        or low in _IRREGULAR
+        or low in _SINGULARIZE_ONLY
+        or (low.endswith("ies") and low[:-1] in _IE_SINGULARS)
+    ):
+        return _singular_by_rules(word)
+    lexicon = noun_lexicon()
+    readings = lexicon.plural_to_singular.get(low)
+    if readings:
+        return _same_case(readings[0], word)
+    if low in lexicon.nouns:  # a noun in its own right: cactus, logistics
+        return word
+    return _singular_by_rules(word)
+
+
+def _plural_word(word: str) -> str:
+    """Named lists, then the dictionary, then the rules; the inverse of :func:`_singular_word`."""
+    low = word.lower()
+    if low in _INVARIANT or low in _IRREGULAR_PLURAL or low in _SINGULAR_ENDING_IN_S:
+        return _plural_by_rules(word)
+    plurals = noun_lexicon().singular_to_plural.get(low)
+    if plurals:
+        return _same_case(plurals[0], word)
+    return _plural_by_rules(word)
 
 
 def pluralize(word: str) -> str:

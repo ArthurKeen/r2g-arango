@@ -20,6 +20,7 @@ from relational_schema_analyzer.naming_known_answers import (
     INVARIANT_WORDS,
     PLURAL_SINGULAR_PAIRS,
     SINGULARIZE_ONLY,
+    SINGULARS,
 )
 
 from r2g import xsk
@@ -42,6 +43,8 @@ def _asa_singularizers() -> list:
         importlib.import_module("schema_analyzer.csi.naming_known_answers")
     except ImportError as exc:  # pragma: no cover - only on an old ASA
         pytest.fail(f"arangodb-schema-analyzer < 0.16.0 has no shared singularizer: {exc}")
+    if not hasattr(csi_naming, "noun_lexicon"):  # pragma: no cover - only on an old ASA
+        pytest.fail("arangodb-schema-analyzer < 0.17.0 has no dictionary layer")
     utils = importlib.import_module("schema_analyzer.utils")
     return [csi_naming.singularize, utils.singularize]
 
@@ -89,6 +92,13 @@ def test_a_singular_is_left_alone(fn, plural, singular):
         assert fn(spelling) == _respell(singular, case), spelling
 
 
+@pytest.mark.parametrize("fn", [singularize, rsa_singularize], ids=["r2g", "rsa"])
+@pytest.mark.parametrize("word", SINGULARS)
+def test_listed_singulars_are_left_alone(fn, word):
+    for spelling, _ in _spellings(word):
+        assert fn(spelling) == spelling
+
+
 @pytest.mark.parametrize("word", INVARIANT_WORDS)
 def test_invariant_words_do_not_change(word):
     for spelling, _ in _spellings(word):
@@ -103,12 +113,38 @@ def test_asa_agrees(plural, singular):
             assert fn(spelling) == _respell(singular, case), (fn.__module__, spelling)
 
 
+@pytest.mark.parametrize("word", SINGULARS)
+def test_asa_leaves_listed_singulars_alone(word):
+    for fn in _asa_singularizers():
+        for spelling, _ in _spellings(word):
+            assert fn(spelling) == spelling, (fn.__module__, spelling)
+
+
+def test_r2g_uses_rsas_lexicon():
+    # One table: r2g reads RSA's, so a dictionary update reaches both at once.
+    from relational_schema_analyzer.naming import noun_lexicon as rsa_lexicon
+
+    from r2g.naming import noun_lexicon
+
+    assert noun_lexicon() is rsa_lexicon()
+
+
+def test_asa_vendors_the_same_lexicon():
+    # ASA cannot depend on RSA, so it vendors the table; the bytes must match.
+    _asa_singularizers()
+    from relational_schema_analyzer.naming import noun_lexicon as rsa_lexicon
+
+    asa = importlib.import_module("schema_analyzer.csi.naming")
+    assert asa.noun_lexicon().sha256 == rsa_lexicon().sha256
+
+
 def test_asa_vendors_the_same_list():
     _asa_singularizers()
     asa = importlib.import_module("schema_analyzer.csi.naming_known_answers")
     assert asa.PLURAL_SINGULAR_PAIRS == PLURAL_SINGULAR_PAIRS
     assert asa.SINGULARIZE_ONLY == SINGULARIZE_ONLY
     assert asa.INVARIANT_WORDS == INVARIANT_WORDS
+    assert asa.SINGULARS == SINGULARS
 
 
 @pytest.mark.parametrize(("plural", "singular"), PLURAL_SINGULAR_PAIRS)

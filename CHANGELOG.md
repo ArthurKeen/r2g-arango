@@ -7,6 +7,32 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Class names consult a dictionary, then the schema's own foreign keys (r2g-arango#30,
+  PRD P12.13).** The 0.7.0 rules still failed wherever nobody had listed the word:
+  `cactus` -> `Cactu`, `knives` -> `Knive`, `analytics` -> `Analytic`, and `cacti`,
+  `criteria`, `mice` unchanged. r2g's singularizer now checks the named lists, then
+  relational-schema-analyzer's vendored noun dictionary, then the old rules for unknown
+  words; on a held-out set of 72 words it scores 68 (0.7.0: 44). On top of that, when a
+  schema's declared foreign-key columns name a table one way (`orders.goods_id` ->
+  `goods`) and the singularizer says another (`Good`), the schema wins (`Goods`) and
+  `provenance.entityNaming` records the columns. **This renames classes** for tables named
+  this way the next time CSI or R2RML is exported; exported files and loaded graphs do
+  not change, and ArangoDB collection names never do. Every class name in Chinook,
+  Northwind, Pagila and contextual-data-fabric's committed CSI is unchanged.
+- **relational-schema-analyzer 0.11.0 (band `>=0.11.0,<0.12.0`)**, which carries the
+  dictionary; the `test` and `dev` extras require arangodb-schema-analyzer 0.17.0, whose
+  vendored copy must match RSA's byte for byte.
+
+### Added
+
+- **Curated labels take an explicit `identifier` (r2g-arango#34, PRD P12.12).** An entry's
+  `identifier` is used exactly as written, never singularized or re-cased (`Sales` stays
+  `Sales`; without it the label `Sales` names `Sale`), and lets a label in a non-Latin
+  script keep its words while the identifier names the concept. It must already be CC-12
+  shaped and still goes through every collision and join-key refusal.
+
 ## [0.7.0] — 2026-10-21
 
 ### Added
