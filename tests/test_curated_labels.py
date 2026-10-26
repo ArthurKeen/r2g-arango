@@ -557,3 +557,71 @@ def test_plan_is_pure_over_names():
     )
     assert plan.prop("A", "x") == "why"
     assert plan.prop("A", "untouched") == "untouched"
+
+
+# ── A curator's explicit identifier (r2g-arango#34) ─────────────────────────
+
+
+def _decision(doc: dict, kind: str, name: str) -> dict:
+    return next(
+        r for r in doc["provenance"]["curatedLabels"] if r["kind"] == kind and r["name"] == name
+    )
+
+
+def test_an_explicit_identifier_is_used_as_written():
+    # "Sales" would singularize to Sale; the curator's identifier is the last word.
+    doc = mapping_to_csi(
+        _config(), _schema(), label_policy="warn",
+        curated_labels=_labels(entities=[{"name": "Account", "label": "Sales", "identifier": "Sales"}]),
+    )
+    sales = _entity(doc, "Sales")
+    assert sales["prefLabel"] == "Sales"
+    assert _decision(doc, "entity", "Account")["identifier"] == "Sales"
+
+
+def test_without_an_identifier_the_label_is_still_singularized():
+    doc = mapping_to_csi(
+        _config(), _schema(), label_policy="warn",
+        curated_labels=_labels(entities=[{"name": "Account", "label": "Customers"}]),
+    )
+    assert _entity(doc, "Customer")["prefLabel"] == "Customers"
+
+
+def test_an_identifier_lets_a_non_latin_label_name_a_concept():
+    doc = mapping_to_csi(
+        _config(), _schema(), label_policy="warn",
+        curated_labels=_labels(entities=[{"name": "Account", "label": "顧客", "identifier": "Customer"}]),
+    )
+    assert _entity(doc, "Customer")["prefLabel"] == "顧客"
+
+
+def test_an_identifier_in_the_wrong_shape_is_refused():
+    doc = mapping_to_csi(
+        _config(), _schema(), label_policy="warn",
+        curated_labels=_labels(
+            entities=[{"name": "Account", "label": "Sales", "identifier": "sales"}],
+            properties=[{"entity": "Account", "name": "accountId", "label": "Id", "identifier": "AccountId"}],
+        ),
+    )
+    assert _decision(doc, "entity", "Account")["resolution"] == "refused"
+    assert "PascalCase" in _decision(doc, "entity", "Account")["reason"]
+    prop = _decision(doc, "property", "accountId")
+    assert prop["resolution"] == "refused" and "lowerCamel" in prop["reason"]
+
+
+def test_an_identifier_still_goes_through_the_collision_checks():
+    # Giving Account the name of the other entity is refused, identifier or not.
+    doc = mapping_to_csi(
+        _config(), _schema(), label_policy="warn",
+        curated_labels=_labels(entities=[{"name": "Account", "label": "Contract", "identifier": "Contract"}]),
+    )
+    assert _decision(doc, "entity", "Account")["resolution"] == "refused"
+
+
+def test_an_empty_identifier_is_a_shape_problem():
+    from r2g.curated_labels import validate_curated_labels
+
+    problems = validate_curated_labels(
+        _labels(entities=[{"name": "Account", "label": "Sales", "identifier": " "}])
+    )
+    assert any("identifier must be a non-empty string" in p for p in problems)

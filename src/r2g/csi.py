@@ -22,8 +22,9 @@ timestamps, no I/O) so its output is trivially testable; the CLI layer stamps
 from __future__ import annotations
 
 import json
+import re
 from importlib import resources
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .types import (
     CollectionMapping,
@@ -494,6 +495,86 @@ def _join_key_labels(config: MappingConfig) -> set:
     return labels
 
 
+_KEY_SUFFIX = re.compile(r"(?i)(?:_id|id)$")
+
+
+def entity_names_for_mapping(
+    config: MappingConfig, schema: Optional[Schema]
+) -> Tuple[Dict[str, str], List[Dict[str, Any]]]:
+    """Conceptual class name per collection, and the foreign-key evidence used (P12.13).
+
+    The name is :func:`owl_entity_name` of the target collection, unless the
+    schema's own foreign keys say otherwise. A column named after the table it
+    references (``orders.goods_id`` -> ``goods``) is the schema designer's own
+    word for one row of that table, so when every such column agrees on a
+    singular that differs from the singularizer's, that singular is used
+    (``goods`` -> ``Goods``, where the dictionary would give ``Good``).
+
+    Only declared or curated single-column keys count: keys r2g inferred were
+    matched *using* the singularizer, so they are not independent evidence. A
+    column whose other words differ from the table's (``ship_via``,
+    ``reports_to``, ``manager_id``) names a role, not the table, and is ignored,
+    as is any table whose collection the mapping renamed. Returns
+    ``(names, evidence)``: ``names`` maps every entity collection to its class
+    name; ``evidence`` records each name the foreign keys decided.
+    """
+    from relational_schema_analyzer.overlay import INFERRED_CONSTRAINT_PREFIX
+
+    from .naming import convert_identifier, pluralize, singularize, split_identifier
+
+    def _words(name: str) -> List[str]:
+        return [w.lower() for w in split_identifier(name)]
+
+    referencing: Dict[str, List[Tuple[str, str]]] = {}
+    if schema is not None:
+        for table_name, table in schema.tables.items():
+            for fk in table.foreign_keys:
+                if len(fk.columns) != 1:
+                    continue
+                if (fk.constraint_name or "").startswith(INFERRED_CONSTRAINT_PREFIX):
+                    continue
+                referencing.setdefault(fk.foreign_table, []).append((table_name, fk.columns[0]))
+
+    names: Dict[str, str] = {}
+    evidence: List[Dict[str, Any]] = []
+    for cm in config.collections.values():
+        if cm.collection_type == "edge" or cm.is_join_table:
+            continue
+        generated = owl_entity_name(cm.target_collection)
+        names[cm.target_collection] = generated
+        table_words = _words(cm.source_table)
+        if not table_words or _words(cm.target_collection) != table_words:
+            continue
+        head, last = table_words[:-1], table_words[-1]
+        said: Dict[str, List[str]] = {}
+        for ref_table, column in referencing.get(cm.source_table, []):
+            match = _KEY_SUFFIX.search(column)
+            if match is None or match.start() == 0:
+                continue
+            prefix_words = _words(column[: match.start()].rstrip("_"))
+            if not prefix_words or prefix_words[:-1] != head:
+                continue
+            word = prefix_words[-1]
+            if word == last or singularize(last).lower() == word or pluralize(word).lower() == last:
+                said.setdefault(word, []).append(f"{ref_table}.{column}")
+        if len(said) != 1:
+            continue
+        ((word, columns),) = said.items()
+        named = convert_identifier("_".join(head + [word]), "pascal") or generated
+        if named != generated:
+            names[cm.target_collection] = named
+            evidence.append(
+                {
+                    "collection": cm.target_collection,
+                    "name": named,
+                    "singularizerName": generated,
+                    "rule": "foreign-key",
+                    "foreignKeys": sorted(columns),
+                }
+            )
+    return names, evidence
+
+
 def curated_plan_for_mapping(
     config: MappingConfig,
     schema: Optional[Schema],
@@ -508,11 +589,12 @@ def curated_plan_for_mapping(
     from .curated_labels import plan_curated_labels
 
     tables = schema.tables if schema is not None else {}
+    names, _ = entity_names_for_mapping(config, schema)
     entities: Dict[str, List[str]] = {}
     for cm in config.collections.values():
         if cm.collection_type == "edge" or cm.is_join_table:
             continue
-        entities[owl_entity_name(cm.target_collection)] = [
+        entities[names[cm.target_collection]] = [
             owl_property_name(p)
             for p in _entity_property_names(cm, tables.get(cm.source_table))
         ]
@@ -590,6 +672,7 @@ def mapping_to_csi(
     conceptual_entities: List[Dict[str, Any]] = []
     physical_entities: Dict[str, Dict[str, Any]] = {}
     entity_name_by_collection: Dict[str, str] = {}
+    generated_names, entity_naming = entity_names_for_mapping(config, schema)
     # {(entity, label): "pk"|"fk"|"plain"} — the structural role of the column
     # behind each conceptual property, used by the "roles" label policy.
     pk_columns, fk_columns = _structural_columns(config, schema)
@@ -598,9 +681,10 @@ def mapping_to_csi(
         if cm.collection_type == "edge" or cm.is_join_table:
             # Join tables / edge collections are relationships, not entities.
             continue
-        # Conceptual name follows CC-12 (singular PascalCase); the physical
-        # collection name is preserved in the physical mapping.
-        name = owl_entity_name(cm.target_collection)
+        # Conceptual name follows CC-12 (singular PascalCase), or the schema's own
+        # foreign keys (P12.13); the physical collection name is preserved in the
+        # physical mapping.
+        name = generated_names[cm.target_collection]
         entity_name_by_collection[cm.target_collection] = name
         prop_names = _entity_property_names(cm, tables.get(cm.source_table))
         property_roles.update(_property_roles(cm, name, prop_names, pk_columns, fk_columns))
@@ -796,6 +880,9 @@ def mapping_to_csi(
         provenance["labelCollisions"] = label_collisions
     # Every entry of a supplied curated-labels document, applied or not: a
     # refused or unmatched decision must be as visible as an applied one.
+    if entity_naming:
+        # Class names the schema's own foreign keys decided (P12.13).
+        provenance["entityNaming"] = entity_naming
     if plan is not None:
         provenance["curatedLabels"] = plan.records
         if plan.source:
