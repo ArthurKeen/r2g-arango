@@ -7,6 +7,8 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-10-26
+
 ### Fixed
 
 - **A foreign-key column that only repeats its table's name no longer names the class
@@ -865,7 +867,8 @@ Initial phased implementation (not yet published to PyPI):
   pipeline, `r2g source dump` CLI, pure-Python FK inference with
   optional value-overlap sampler.
 
-[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/ArthurKeen/r2g-arango/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/ArthurKeen/r2g-arango/compare/v0.6.0...v0.6.1
