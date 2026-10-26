@@ -1145,6 +1145,32 @@ shared pair is dropped once per run rather than once per table.
 
 ---
 
+### Phase 14: Running under a context-and-governance control plane -- P14.1–P14.7 in review; P14.8–P14.9 planned
+
+A context-and-governance control plane can serve several tools behind one web
+address, sign the user in once, and hand each tool a short-lived **signed
+context**: who the user is, their roles, the tenant, the project, the project's
+ontology. It also holds a policy saying who may change which parts of that
+ontology, and one history of changes across tools. Running the Studio as one of
+those tools means the control plane, not r2g, decides who is working and in
+which project, and that mapping edits answer to the same policy as edits made
+in the ontology tool.
+
+Everything here applies only when `CONTROL_PLANE_URL` is set. With it unset the
+Studio is unchanged.
+
+| ID | Requirement | Notes |
+|---|---|---|
+| P14.1 | `CONTROL_PLANE_URL` switches the mode on; with it unset the Studio, CLI and MCP server behave as before. | In review |
+| P14.2 | Every API call carries the control plane's signed context token, verified offline with the control plane's SDK, and nothing else authenticates: `R2G_API_TOKEN` is not used. The load-progress stream takes the token as a query parameter, because an `EventSource` cannot send a header. | In review |
+| P14.3 | The Studio shows only the transformation project the control-plane project names for r2g; any other answers "not found". | In review |
+| P14.4 | The Studio shows the project ontology, read from the ontology tool (AOE) with the same context. | In review |
+| P14.5 | The page keeps the token for its own browser tab only (never a cookie or `localStorage`, which every tab shares), removes it from the address bar, renews it before it expires, and works under any path prefix the control plane mounts it at. | In review |
+| P14.6 | Storage is per tenant (`R2G_CATALOG_DIR`), and a context for another tenant (`R2G_TENANT`) is refused. | In review |
+| P14.7 | The MCP server is not run in such a deployment; the CLI is an administrator's tool outside the control plane's policy. | In review |
+| P14.8 | A mapping element (a table mapped to a collection, a column to a property, a relationship to an edge) may name the ontology term it maps to, an IRI chosen from the project ontology. | Planned |
+| P14.9 | Under a control plane, saving a mapping, loading data and migrating are checked against the project's policy (over the term an element names; project-wide where it names none) and recorded in the project's history; other changes are refused until governed. | Planned |
+
 ## 6. Future considerations (Phase 7+) -- Exploratory
 
 These ideas are exploratory and represent potential directions, not committed work. Each would require significant design effort.
@@ -1222,5 +1248,6 @@ These ideas are exploratory and represent potential directions, not committed wo
 | **Phase 13 index correction: label arrays must not be indexed on edges** | **September 2026** | Two P13 statements were falsified by measurement across ArangoDB 3.12.9 and 3.12.11. (1) The edge vertex-centric indexes dropped their array-expansion field: a persistent index over `toLabels[*]` stores one entry per element and a traversal scans every entry under the `_from`/`type` prefix, so each edge was returned **once per label on its target** — 1/2/3/4 rows for targets carrying 1/2/3/4 labels, versus exactly one from the built-in edge index and from the flat `[_from, type]` spec. The multiplier is introduced by the very multi-label support the arrays exist for, the symptom is inflated counts rather than an error, and there is no query-side repair (`uniqueEdges: 'global'` is ERR 10; `RETURN DISTINCT` hides it while the work is still done). It went unnoticed because the multi-label tests ended in `RETURN DISTINCT` — the defect was in the assertion's convenience, not the query. (2) The claim that no correct pushed-down all-hops label test exists was version-bound: **v3.12.11** added inline-`FILTER` pushdown, so the inverted form `p.edges[* FILTER @l NOT IN CURRENT.toLabels]._key NONE != null` is now pushed into the traverser. Its positive `ALL` counterpart is a vacuous-truth trap that accepts what it should reject. Applied from prd_patches `r2g_P13.3-P13.10_20260902b`. |
 | **Multi-label node production (P13.13)** | **September 2026** | r2g can now emit more than one label per node: a collection declares `extra_labels` and its nodes carry `target_collection` plus those. The primary label stays the sole basis for the `_key` namespace and the CSI physical `typeValue`, so adding a label widens what a node answers to **without relocating it**. The load-bearing part is the edge copies — `fromLabels`/`toLabels` carry the endpoints' full label sets from **both** writers (streaming and CDC), because those copies are what traversals filter against: an edge carrying only the primary label while its endpoint carries three would make every filter on the other two silently miss, and updating only one writer would leave bulk-loaded and CDC-written edges disagreeing about the same graph. **Deliberately deferred until three prerequisites were resolved** — the `[*]` nesting bug (list-valued path filters returning empty with no error), the absence of a pushed-down all-hops label test (closed by inline-`FILTER` pushdown in v3.12.11), and the array-index duplication (indexing `toLabels[*]` on edges returned each edge once per label). Building multi-label before those were understood would have rested it on three silent bugs. Applied from prd_patches `r2g_P13.13_20260902`. |
 | **Expression semantics corrections (P5c.1.4, P5c.1.6)** | **October 2026** | Three corrections from the transformation-language research (`docs/research/transformation-language-evaluation.md`, PR #10), reviewed as proposed patches. (1) P5c.1.4 no longer calls the evaluator AQL-semantic: it lists where it differs from ArangoDB 3.12.9 (null handling, `\|\|`/`&&`, `+` on text, cross-type comparison, empty-array truthiness, `COALESCE`/`??`), measured through r2g's own delegation query. (2) P5c.1.4 now requires engines with no backend (`ksql`, `python`) to be rejected when a load builds its transformers, and by `validate_config`, instead of loading the raw source value with a warning; P5c.2.5, the engines table and the out-of-scope note no longer promise KSQL. (3) P5c.1.6 now requires bulk and CDC loads to evaluate or refuse delegated expressions, never to omit or erase the field silently. P5c.1.4, P5c.1.6 and P5c.2.5 move from Done to Partial until the code follows. |
+| **Control-plane mode** | **October 2026** | Phase 14 added: the Studio as a tool of a context-and-governance control plane (signed context per tab, the project's transformation project and ontology, storage per tenant), P14.1–P14.7; ontology terms on mapping elements and governed mapping changes planned, P14.8–P14.9. |
 
 The source files `PRD-gemini.md` and `PRD-notebooklm.md` remain in the repository for reference and are superseded by this file.
