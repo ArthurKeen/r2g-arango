@@ -35,7 +35,34 @@ from .types import (
 )
 
 CSI_VERSION = "1"
+# CSI 1.1 adds ``path`` to a property mapping: a value inside a nested object,
+# one name per level (arango-sparql-py#72). A document says "1.1" only when it
+# uses ``path``, so a reader that accepts only "1" refuses just those documents
+# and keeps reading every flat one. r2g writes flat documents today, so it
+# writes "1"; ``csi_version_for`` makes that a rule, not a constant.
+CSI_VERSION_NESTED = "1.1"
 PRODUCER = "r2g"
+
+# What a CSI property mapping (``arangoPhysicalMapping.entities.<E>.properties.
+# <p>``) may hold under CSI 1.1: where the value is (``field`` — one literal
+# name, a dot included — or ``path``), the descriptive extras producers write,
+# or a key starting with ``x-``. Readers refuse anything else, because an
+# ignored location key is how a reader answers from the wrong field.
+CSI_PROPERTY_MAPPING_KEYS = frozenset(
+    {
+        "field",
+        "path",
+        "type",
+        "indexed",
+        "unique",
+        "required",
+        "role",
+        "sentinelValues",
+        "numericLike",
+        "sampleValues",
+    }
+)
+CSI_PROPERTY_EXTENSION_PREFIX = "x-"
 
 # ArangoDB physical styles r2g emits, one pair per target layout (P13).
 #
@@ -618,6 +645,21 @@ def curated_plan_for_mapping(
     )
 
 
+def csi_version_for(physical_entities: Dict[str, Any]) -> str:
+    """The ``csiVersion`` a document with these physical entities must declare.
+
+    ``"1.1"`` when some property mapping uses ``path``, ``"1"`` otherwise — so
+    a later change that emits ``path`` (embedding a table's columns as a nested
+    object) cannot keep the old version by accident.
+    """
+    for spec in physical_entities.values():
+        properties = spec.get("properties") if isinstance(spec, dict) else None
+        for prop in (properties or {}).values():
+            if isinstance(prop, dict) and "path" in prop:
+                return CSI_VERSION_NESTED
+    return CSI_VERSION
+
+
 def mapping_to_csi(
     config: MappingConfig,
     schema: Optional[Schema] = None,
@@ -910,7 +952,7 @@ def mapping_to_csi(
         conceptual_model["joinKeys"] = join_keys
 
     return {
-        "csiVersion": CSI_VERSION,
+        "csiVersion": csi_version_for(physical_entities),
         "conceptualModel": conceptual_model,
         "arangoPhysicalMapping": {
             "entities": physical_entities,
