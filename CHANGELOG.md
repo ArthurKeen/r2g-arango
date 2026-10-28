@@ -7,6 +7,22 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`csiVersion` follows the mappings (r2g-arango#39, PRD P12.14).** CSI 1.1
+  (arangodb-schema-analyzer 0.18.0, arango-sparql-py 0.5.0) adds `path` to a property
+  mapping, for a value inside a nested object. `export-csi` now derives the version with
+  `csi_version_for`: `"1.1"` only when some property mapping uses `path`, `"1"` otherwise.
+  r2g writes `field` only, so its output is unchanged and still says `"1"`; a later change
+  that emits `path` cannot keep the old version by accident.
+- **CSI property mappings hold only CSI 1.1's strict keys.** `field`, `path`, `type`,
+  `indexed`, `unique`, `required`, `role`, `sentinelValues`, `numericLike`,
+  `sampleValues`, or an `x-` key (`CSI_PROPERTY_MAPPING_KEYS`). A test generates CSI six
+  ways and fails if any property mapping holds another key.
+- **The vendored CSI schema follows the analyzer's 0.18.0 copy**, and the
+  `arangodb-schema-analyzer` floor in `[test]` and `[dev]` is `>=0.18.0`, so the drift
+  test compares against a release that has the 1.1 schema.
+
 ## [0.8.1] — 2026-10-26
 
 ### Fixed
