@@ -46,3 +46,5 @@ forge-out/
 # whatever this machine was doing, including unrelated repositories. `.claude/` and
 # `.prd-drift-queue/` are ignored for the same reason.
 .pattern-capture-queue/
+.cursor/rules/*.mdc.pre-update.*
+.cursor/hooks/*.pre-update.*
