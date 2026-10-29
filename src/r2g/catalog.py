@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -240,7 +241,10 @@ def _now() -> datetime:
 class CatalogManager:
     def __init__(self, catalog_dir: str | Path | None = None):
         if catalog_dir is None:
-            self._dir = Path.home() / ".r2g"
+            # R2G_CATALOG_DIR, as the MCP server already honours, else ~/.r2g. A deployment
+            # serving several tenants gives each its own directory.
+            env_dir = os.environ.get("R2G_CATALOG_DIR", "").strip()
+            self._dir = Path(env_dir).expanduser() if env_dir else Path.home() / ".r2g"
         else:
             self._dir = Path(catalog_dir)
         self._dir.mkdir(parents=True, exist_ok=True)

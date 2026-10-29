@@ -1146,7 +1146,7 @@ shared pair is dropped once per run rather than once per table.
 
 ---
 
-### Phase 14: Running under a context-and-governance control plane -- Planned (P14.1–P14.9)
+### Phase 14: Running under a context-and-governance control plane -- P14.1–P14.7 done; P14.8–P14.9 planned
 
 A context-and-governance control plane can serve several tools behind one web
 address, sign the user in once, and hand each tool a short-lived **signed
@@ -1164,13 +1164,13 @@ governs changes.
 
 | ID | Requirement | Notes |
 |---|---|---|
-| P14.1 | `CONTROL_PLANE_URL` switches the mode on; with it unset the Studio, CLI and MCP server behave as before, apart from `R2G_CATALOG_DIR` (P14.6), which every entry point honours in any mode. | Planned |
-| P14.2 | Every API call carries the control plane's signed context token, verified offline with the control plane's SDK, and nothing else authenticates: `R2G_API_TOKEN` is not used. The load-progress stream takes the token as a query parameter, because an `EventSource` cannot send a header. | Planned |
-| P14.3 | Every API call about a transformation project — listing, reading, changing, loading, and creating one, including from a demo preset — is limited to the transformation project the control-plane project names for r2g; any other name answers "not found". | Planned |
-| P14.4 | The Studio shows the project ontology, read from the ontology service at `AOE_URL` with the same context. | Planned |
-| P14.5 | The page keeps the token for its own browser tab only (never a cookie or `localStorage`, which every tab shares), removes it from the address bar, renews it before it expires, and works under any path prefix the control plane mounts it at. | Planned |
-| P14.6 | Storage is per tenant: the Studio, CLI and MCP server keep their catalog in `R2G_CATALOG_DIR` when it is set. In this mode `R2G_TENANT` is required — the Studio refuses to start without it — and a context for any other tenant is refused. | Planned |
-| P14.7 | The MCP server refuses to start when `CONTROL_PLANE_URL` is set, since it checks no context; the CLI is an administrator's tool outside the control plane's policy. | Planned |
+| P14.1 | `CONTROL_PLANE_URL` switches the mode on; with it unset the Studio, CLI and MCP server behave as before, apart from `R2G_CATALOG_DIR` (P14.6), which every entry point honours in any mode. | Done — `src/r2g/control_plane.py:72` (`mode`), `src/r2g/ui/server.py:156`; `src/r2g/catalog.py:246` |
+| P14.2 | Every API call carries the control plane's signed context token, verified offline with the control plane's SDK, and nothing else authenticates: `R2G_API_TOKEN` is not used. The load-progress stream takes the token as a query parameter, because an `EventSource` cannot send a header. | Done — `src/r2g/ui/server.py:104` (Bearer), `:106` (`?token=` on `/stream`), `:164` (`R2G_API_TOKEN` off) |
+| P14.3 | Every API call about a transformation project — listing, reading, changing, loading, and creating one, including from a demo preset — is limited to the transformation project the control-plane project names for r2g; any other name answers "not found". | Done — `src/r2g/ui/server.py:121` (project routes), `:906` (list), `:227` (`_only_the_one_it_opens`: create `:918`, demo preset `:295`) |
+| P14.4 | The Studio shows the project ontology, read from the ontology service at `AOE_URL` with the same context. | Done — `src/r2g/control_plane.py:153` (`ontology_classes`), `src/r2g/ui/server.py:240` |
+| P14.5 | The page keeps the token for its own browser tab only (never a cookie or `localStorage`, which every tab shares), removes it from the address bar, renews it before it expires, and works under any path prefix the control plane mounts it at. | Done — `src/r2g/ui/static/index.html:1343` (`sessionStorage`), `:1345` (address bar), `:1350` (renewal), `:1290` (`_basePath`) |
+| P14.6 | Storage is per tenant: the Studio, CLI and MCP server keep their catalog in `R2G_CATALOG_DIR` when it is set. In this mode `R2G_TENANT` is required — the Studio refuses to start without it — and a context for any other tenant is refused. | Done — `src/r2g/catalog.py:246`; `src/r2g/ui/server.py:95` (refuses to start), `:112` (other tenant 403) |
+| P14.7 | The MCP server refuses to start when `CONTROL_PLANE_URL` is set, since it checks no context; the CLI is an administrator's tool outside the control plane's policy. | Done — `src/r2g/main.py:2127` (`r2g mcp`), `src/r2g/mcp_server.py:24` (any import) |
 | P14.8 | A mapping element (a table mapped to a collection, a column to a property, a relationship to an edge) may name the ontology term it maps to, an IRI chosen from the project ontology. | Planned |
 | P14.9 | Under a control plane, saving a mapping, loading data and migrating are checked against the project's policy (over the term an element names; project-wide where it names none) and recorded in the project's history; other changes are refused until governed. | Planned |
 
