@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_serializer, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 from relational_schema_analyzer.types import Column as _RsaColumn
 from relational_schema_analyzer.types import ForeignKey as ForeignKey  # noqa: F401  (re-export)
 from relational_schema_analyzer.types import PhysicalSchema as _RsaSchema
@@ -156,6 +157,22 @@ class Schema(_RsaSchema):
             return cls.model_validate_json(f.read())
 
 
+#: An absolute IRI: a scheme, a colon, and no whitespace or characters RFC 3987 excludes.
+_IRI = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:[^\s<>\"{}|\\^`]+$")
+
+
+def _ontology_term(value: Optional[str]) -> Optional[str]:
+    """An ontology term a mapping element names (P14.8): an absolute IRI, or none."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if not _IRI.match(value):
+        raise ValueError(f"an ontology term must be an absolute IRI, not {value!r}")
+    return value
+
+
 class EdgeDefinition(BaseModel):
     """Defines how a foreign key becomes an edge collection.
 
@@ -167,6 +184,15 @@ class EdgeDefinition(BaseModel):
     to_collection: str
     from_fields: List[str]
     to_fields: List[str]
+    #: The ontology property this relationship stands for, an IRI from the project
+    #: ontology (P14.8). Optional and omitted while unset; nothing reads it outside a
+    #: control plane.
+    term: Optional[str] = None
+
+    @field_validator("term")
+    @classmethod
+    def _check_term(cls, value: Optional[str]) -> Optional[str]:
+        return _ontology_term(value)
 
     @model_validator(mode="before")
     @classmethod
@@ -235,6 +261,8 @@ class EdgeDefinition(BaseModel):
         else:
             d["from_fields"] = self.from_fields
             d["to_fields"] = self.to_fields
+        if self.term:
+            d["term"] = self.term
         return d
 
 
@@ -279,12 +307,37 @@ class CollectionMapping(BaseModel):
     #: Declared last and omitted while empty, so mappings written before P13.13
     #: serialize byte-identically.
     extra_labels: List[str] = Field(default_factory=list)
+    #: The ontology class this table stands for, and per source column the property it
+    #: stands for: IRIs from the project ontology (P14.8). Optional, declared last and
+    #: omitted while empty, so mappings written before P14.8 serialize byte-identically.
+    #: Nothing reads them outside a control plane.
+    term: Optional[str] = None
+    field_terms: Dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("term")
+    @classmethod
+    def _check_term(cls, value: Optional[str]) -> Optional[str]:
+        return _ontology_term(value)
+
+    @field_validator("field_terms")
+    @classmethod
+    def _check_field_terms(cls, value: Dict[str, str]) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for column, term in value.items():
+            checked = _ontology_term(term)
+            if checked:
+                out[column] = checked
+        return out
 
     @model_serializer(mode="wrap")
     def _serialize_collection(self, handler: Any) -> dict[str, Any]:
         full = handler(self)
         if not full.get("extra_labels"):
             full.pop("extra_labels", None)
+        if not full.get("term"):
+            full.pop("term", None)
+        if not full.get("field_terms"):
+            full.pop("field_terms", None)
         return full
 
     @property

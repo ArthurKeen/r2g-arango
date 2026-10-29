@@ -9,6 +9,20 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mapping elements name the ontology term they stand for (PRD P14.8).** A table may
+  name a class (`term`), each source column a property (`field_terms`), and a
+  relationship a property (`term`), as absolute IRIs kept in the mapping file. They are
+  optional and omitted while unset, so existing mappings are written byte-identically.
+  Under a control plane the Studio offers the project ontology's classes and properties,
+  read from AOE (every page of classes, then the properties), and a save that names a new
+  or changed term is refused (400) unless the term is in the project ontology, of the
+  right kind; when the ontology cannot be read, such a save is refused (503) rather than
+  written unchecked. A term already saved is not checked again. The page carries every
+  term in any mode, including in the copy of the mapping it opens a project with
+  (`/graph-data`), so a save never drops them. `control_plane.ontology_classes` is
+  replaced by `ontology_terms`, and `/api/control-plane/context` lists properties too.
+  Without `CONTROL_PLANE_URL` nothing reads the terms.
+
 - **The Studio can run as a tool of a context-and-governance control plane (r2g-arango#44, PRD
   P14.1–P14.7).** With `CONTROL_PLANE_URL` set, every call except the page, its
   assets, `/api/health`, `/api/mode` and (with `R2G_CORS_ORIGINS` set) a CORS preflight

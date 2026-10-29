@@ -298,12 +298,13 @@ def create_app(
     @app.get("/api/control-plane/context")
     async def control_plane_context(request: Request):
         """The context this tab is in: who, the control-plane project, the transformation
-        project it opens here, and the project ontology's classes (read from AOE)."""
+        project it opens here, and the project ontology's classes and properties (read
+        from AOE), which mapping elements may name (P14.8)."""
         if not governed:
             raise HTTPException(status_code=404, detail="Not running under a control plane")
         identity: control_plane.Identity = request.state.cp_identity
         project: control_plane.Project = request.state.cp_project
-        ontology = await run_in_threadpool(control_plane.ontology_classes, identity)
+        ontology = await run_in_threadpool(control_plane.ontology_terms, identity)
         return {
             "principal": identity.principal,
             "roles": list(identity.roles),
@@ -1041,13 +1042,38 @@ def create_app(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    async def _check_ontology_terms(request: Request, project: Any, config: MappingConfig) -> None:
+        """P14.8: every ontology term the new mapping names, where the saved mapping did not
+        name the same one, must be in the project ontology. When the ontology cannot be read,
+        a save that names a new term is refused rather than saved unchecked."""
+        saved_path = Path(project.mapping_config_path)
+        try:
+            saved = ConfigManager.load_config(saved_path) if saved_path.is_file() else None
+        except Exception:
+            saved = None  # unreadable: every term in the new mapping is checked
+        if not control_plane.new_terms(saved, config):
+            return
+        identity: control_plane.Identity = request.state.cp_identity
+        ontology = await run_in_threadpool(control_plane.ontology_terms, identity)
+        if ontology.get("problem"):
+            raise HTTPException(status_code=503,
+                                detail=f"cannot check the ontology terms: {ontology['problem']}")
+        unknown = control_plane.unknown_terms(saved, config, ontology)
+        if unknown:
+            raise HTTPException(status_code=400, detail="; ".join(unknown))
+
     @app.put("/api/projects/{name}/mapping")
-    async def save_mapping(name: str, body: dict[str, Any]):
+    async def save_mapping(name: str, body: dict[str, Any], request: Request):
         project = catalog.get_project(name)
         if project is None:
             raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
         try:
             config = MappingConfig.model_validate(body)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if governed:
+            await _check_ontology_terms(request, project, config)
+        try:
             ConfigManager.save_config(config, project.mapping_config_path)
             catalog.touch_project(name)
             return {"saved": True, "collections": len(config.collections), "edges": len(config.edges)}

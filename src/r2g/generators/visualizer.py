@@ -192,6 +192,10 @@ class MappingVisualizer:
                     }
                     for fx in cm.field_expressions
                 ],
+                # The Studio builds its editor from this, and rebuilds the mapping from
+                # the editor on save: a field left out here is dropped by the next save.
+                "term": cm.term,
+                "fieldTerms": dict(cm.field_terms),
             }
         edges = [
             {
@@ -200,6 +204,7 @@ class MappingVisualizer:
                 "toCollection": e.to_collection,
                 "fromField": ", ".join(e.from_fields),
                 "toField": ", ".join(e.to_fields),
+                "term": e.term,
                 **self._edge_provenance(e),
             }
             for e in self.config.edges
