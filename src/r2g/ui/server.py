@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import queue
 import re
@@ -15,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette._utils import get_route_path  # what the router matches on (Starlette 0.35+)
 from starlette.concurrency import run_in_threadpool
 
 from r2g import control_plane
@@ -80,8 +82,25 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", ""}
 
 #: A route about one transformation project: ``/api/projects/<name>[/...]``.
 _PROJECT_ROUTE = re.compile(r"^/api/projects/([^/]+)")
-#: Under a control plane these need no context: the page itself, and how to start.
-_OPEN_PATHS = frozenset({"/api/health", "/api/mode"})
+#: Under a control plane these need no context: the page and its assets, and how to
+#: start. Everything else needs one, so a route added later is closed until opened here.
+_OPEN_PATHS = frozenset({"", "/", "/api/health", "/api/mode"})
+_OPEN_PREFIXES = ("/static/",)
+#: The load-progress stream's ``?token=``, as an access log would otherwise record it.
+_TOKEN_IN_QUERY = re.compile(r"([?&]token=)[^&\s]*")
+
+
+class _RedactTokenInQuery(logging.Filter):
+    """Keep the stream's context token out of the access log: it is a credential."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(_TOKEN_IN_QUERY.sub(r"\1<redacted>", a) if isinstance(a, str) else a
+                                for a in record.args)
+        return True
+
+
+_REDACT_TOKEN_IN_QUERY = _RedactTokenInQuery()
 
 
 def _add_control_plane_auth(app: FastAPI) -> None:
@@ -95,10 +114,15 @@ def _add_control_plane_auth(app: FastAPI) -> None:
             "CONTROL_PLANE_URL is set but R2G_TENANT is not: name the tenant this r2g serves"
         )
 
+    # uvicorn's access logger, once per process however many apps are created.
+    logging.getLogger("uvicorn.access").addFilter(_REDACT_TOKEN_IN_QUERY)
+
     @app.middleware("http")
     async def _require_context(request: Request, call_next):
-        path = request.url.path
-        if not path.startswith("/api/") or path in _OPEN_PATHS or request.method == "OPTIONS":
+        # The path the router will match, not request.url.path: mounted with a root_path,
+        # uvicorn puts the prefix in front of the path, and the router strips it again.
+        path = get_route_path(request.scope)
+        if path in _OPEN_PATHS or path.startswith(_OPEN_PREFIXES) or request.method == "OPTIONS":
             return await call_next(request)
         auth = request.headers.get("authorization", "")
         token = auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else ""

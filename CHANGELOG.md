@@ -10,9 +10,13 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **The Studio can run as a tool of a context-and-governance control plane (r2g-arango#44, PRD
-  P14.1–P14.7).** With `CONTROL_PLANE_URL` set, every `/api` call needs the control
-  plane's signed context token, verified offline by its SDK (imported only in this
-  mode); `R2G_API_TOKEN` is not used. Only the transformation project the control-plane
+  P14.1–P14.7).** With `CONTROL_PLANE_URL` set, every call except the page, its
+  assets, `/api/health` and `/api/mode` needs the control plane's signed context token,
+  verified offline by its SDK (imported only in this mode); `R2G_API_TOKEN` is not used.
+  The check reads the path the router matches, so it holds when the app is mounted with
+  a `root_path`. A context the control plane refuses when asked for its project is a
+  401, not a 503, and the access log records the load-progress stream's `?token=` as
+  `<redacted>`. Only the transformation project the control-plane
   project names for r2g can be listed, read, changed, loaded or created; any other
   answers 404. `GET /api/control-plane/context` returns who, which project, and the
   project ontology's classes read from `AOE_URL`. The page keeps the token per tab,

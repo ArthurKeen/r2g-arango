@@ -8,10 +8,12 @@ tenant is refused. Each refusal has a positive control. The control plane is a f
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
 import sys
+import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -104,6 +106,71 @@ class TestTheContextIsTheOnlyCredential:
     def test_the_open_paths_need_nothing(self, governed):
         assert governed.get("/api/health").status_code == 200
         assert governed.get("/").status_code == 200
+
+
+class TestTheCheckSeesTheRoutersPath:
+    """The check decides on the path the router matches, so a prefix cannot step past it."""
+
+    def test_a_root_path_does_not_open_the_api(self, governed):
+        # Mounted with a root_path, uvicorn puts the prefix in front of the path and the
+        # router strips it; the check must strip it the same way.
+        mounted = TestClient(governed.app, root_path="/r2g")
+        assert mounted.get("/r2g/api/projects/someone-elses").status_code == 401
+        assert mounted.get("/r2g/api/projects/someone-elses", headers=bearer()).status_code == 404
+        assert mounted.get("/r2g/api/projects/customer-360", headers=bearer()).status_code == 200
+        assert mounted.get("/r2g/").status_code == 200
+        assert mounted.get("/r2g/static/r2g-icon.png").status_code == 200
+
+    def test_routes_outside_the_api_are_closed_too(self, governed):
+        # Only the page, its assets and the two start-up calls are open; the rest needs a
+        # context, so a route added later is closed until someone opens it on purpose.
+        assert governed.get("/openapi.json").status_code == 401
+        assert governed.get("/openapi.json", headers=bearer()).status_code == 200
+        assert governed.get("/static/r2g-icon.png").status_code == 200
+
+
+def test_the_access_log_does_not_keep_the_stream_token(governed, caplog):
+    # uvicorn logs the request line with its query; ?token= is a credential.
+    with caplog.at_level(logging.INFO, logger="uvicorn.access"):
+        logging.getLogger("uvicorn.access").info(
+            '%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET",
+            f"/api/projects/customer-360/load/x/stream?token={TOKEN}&n=1", "1.1", 200)
+    line = caplog.records[-1].getMessage()
+    assert TOKEN not in line and "token=<redacted>&n=1" in line
+
+
+class TestTheControlPlanesRefusalIsARefusal:
+    """A context the control plane refuses when asked for its project is a 401, as a bad
+    signature is, not a 503 the page would wait out."""
+
+    @pytest.fixture
+    def sdk(self, monkeypatch):
+        mod = types.ModuleType("control_plane_sdk")
+
+        class ControlPlaneError(Exception):
+            pass
+
+        for name in ("TokenRejected", "ProjectNotFound", "ContextError", "Unavailable"):
+            setattr(mod, name, type(name, (ControlPlaneError,), {}))
+        mod.ControlPlaneError = ControlPlaneError
+        mod.ControlPlane = MagicMock()
+        monkeypatch.setitem(sys.modules, "control_plane_sdk", mod)
+        return mod
+
+    def _identity(self):
+        return control_plane.Identity("pj", (), "local", "equity", None,
+                                      verified=MagicMock(token_id="jti-1"))
+
+    @pytest.mark.parametrize("raised, expected", [
+        ("TokenRejected", control_plane.ContextRejected),
+        ("ProjectNotFound", control_plane.ContextRejected),
+        ("ControlPlaneError", control_plane.ContextUnavailable),
+    ])
+    def test_each_failure_maps_to_its_answer(self, sdk, raised, expected):
+        gateway = control_plane._Sdk("http://cp.test/api")
+        gateway.client.project.side_effect = getattr(sdk, raised)("no")
+        with pytest.raises(expected):
+            gateway.project(self._identity())
 
 
 class TestOnlyTheProjectsTransformationProject:
