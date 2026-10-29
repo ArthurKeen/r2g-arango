@@ -7,6 +7,30 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The Studio can run as a tool of a context-and-governance control plane (r2g-arango#44, PRD
+  P14.1–P14.7).** With `CONTROL_PLANE_URL` set, every `/api` call needs the control
+  plane's signed context token, verified offline by its SDK (imported only in this
+  mode); `R2G_API_TOKEN` is not used. Only the transformation project the control-plane
+  project names for r2g can be listed, read, changed, loaded or created; any other
+  answers 404. `GET /api/control-plane/context` returns who, which project, and the
+  project ontology's classes read from `AOE_URL`. The page keeps the token per tab,
+  renews it, and works under any path prefix. Fail-closed: the Studio refuses to start
+  without `R2G_TENANT`, and the MCP server refuses to start in this mode. Sources,
+  targets and catalogs stay tenant-wide. `control-plane.Dockerfile` builds the image.
+  With `CONTROL_PLANE_URL` unset nothing changes.
+
+### Changed
+
+- **The CLI honours `R2G_CATALOG_DIR`**, as the MCP server already did, so storage can
+  be per tenant (PRD P14.6).
+
+### Fixed
+
+- **`apiFetch` keeps the auth header when a caller passes its own headers**, and the
+  expression editor's three direct `fetch` calls now send it.
+
 ## [0.8.2] — 2026-10-29
 
 ### Changed

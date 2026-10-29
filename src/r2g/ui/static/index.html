@@ -1354,6 +1354,7 @@ function _cpScheduleRenewal() {
   const delay = Math.max(0, (claims.exp - 120) * 1000 - Date.now());
   CP.renewal = setTimeout(async () => {
     try {
+      // Root-absolute on purpose: renewal is the control plane's endpoint, not r2g's.
       const res = await fetch('/api/context', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'content-type': 'application/json', 'X-Control-Plane': '1' },

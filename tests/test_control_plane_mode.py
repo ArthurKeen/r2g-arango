@@ -8,7 +8,10 @@ tenant is refused. Each refusal has a positive control. The control plane is a f
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -181,3 +184,69 @@ def test_api_fetch_keeps_the_auth_header_when_a_caller_passes_headers():
     assert "{ headers: _authHeaders(opts.headers), ...opts }" not in html
 
 
+
+
+def test_r2g_tenant_is_required_in_this_mode(tmp_path, monkeypatch):
+    """Without it every tenant's context would get in, sharing one catalog (P14.6)."""
+    monkeypatch.setenv("CONTROL_PLANE_URL", "http://cp.test/api")
+    monkeypatch.delenv("R2G_TENANT", raising=False)
+    with pytest.raises(RuntimeError, match="R2G_TENANT"):
+        create_app(catalog_dir=str(tmp_path))
+    monkeypatch.setenv("R2G_TENANT", "local")             # positive control
+    create_app(catalog_dir=str(tmp_path))
+
+
+class TestCreatingIsScopedToo:
+    """POST /api/projects and the demo preset have no name in the path, so the
+    middleware's route check cannot see them (P14.3)."""
+
+    def test_creating_another_project_is_not_found(self, governed, tmp_path):
+        r = governed.post("/api/projects", headers=bearer(),
+                          json={"name": "not-named-here", "source_name": "src"})
+        assert r.status_code == 404
+        assert CatalogManager(tmp_path).get_project("not-named-here") is None
+        # Positive control: the one it opens can be created.
+        assert governed.delete("/api/projects/customer-360", headers=bearer()).status_code == 200
+        r = governed.post("/api/projects", headers=bearer(),
+                          json={"name": "customer-360", "source_name": "src"})
+        assert r.status_code == 201
+
+    def test_a_demo_preset_for_another_project_is_not_found(self, governed, monkeypatch):
+        path = "/api/demo-presets/snowflake-customer-360/install"
+        assert governed.post(path, headers=bearer(), json={}).status_code == 404
+
+        # Positive control: when the preset's project is the one opened, the route runs
+        # (and stops at the Snowflake settings this test does not have).
+        class OpensThePreset(FakeControlPlane):
+            def project(self, identity):
+                return control_plane.Project("equity", "Equity research",
+                                             "snowflake_customer_360")
+
+        for name in ("SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER"):
+            monkeypatch.delenv(name, raising=False)
+        control_plane.set_instance(OpensThePreset())
+        r = governed.post(path, headers=bearer(), json={})
+        assert r.status_code == 400 and "snowflake_environment_incomplete" in r.text
+
+
+class TestTheMcpServerDoesNotRunHere:
+    """It checks no context, so it would reach the catalog around the control plane (P14.7)."""
+
+    def test_r2g_mcp_refuses(self, monkeypatch):
+        from typer.testing import CliRunner
+
+        from r2g.main import app
+
+        monkeypatch.setenv("CONTROL_PLANE_URL", "http://cp.test/api")
+        result = CliRunner().invoke(app, ["mcp"])
+        assert result.exit_code == 1 and "CONTROL_PLANE_URL" in result.output
+
+    @pytest.mark.parametrize("url, refused", [("http://cp.test/api", True), ("", False)])
+    def test_importing_the_server_refuses_too(self, url, refused):
+        """`mcp run` and the like import the module rather than calling `r2g mcp`."""
+        pytest.importorskip("mcp")
+        env = {**os.environ, "CONTROL_PLANE_URL": url}
+        p = subprocess.run([sys.executable, "-c", "import r2g.mcp_server"],
+                           env=env, capture_output=True, text=True)
+        assert (p.returncode != 0) is refused
+        assert ("CONTROL_PLANE_URL is set" in p.stderr) is refused

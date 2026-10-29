@@ -74,6 +74,13 @@ def mode() -> bool:
     return bool(os.environ.get("CONTROL_PLANE_URL", "").strip())
 
 
+#: Why the MCP server does not run under a control plane: it checks no context.
+MCP_REFUSED = (
+    "CONTROL_PLANE_URL is set: the MCP server checks no context token, so it would "
+    "reach this deployment's catalog around the control plane. It does not run here."
+)
+
+
 class _Sdk:
     """The real implementation: the control plane's SDK, created once per process."""
 

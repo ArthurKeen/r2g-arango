@@ -18,6 +18,11 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from r2g import control_plane
+
+if control_plane.mode():
+    raise RuntimeError(control_plane.MCP_REFUSED)
+
 mcp = FastMCP(
     "r2g",
     instructions=(

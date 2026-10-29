@@ -2119,7 +2119,14 @@ def mcp_cmd(
     SSE is network-exposed, so it requires a Bearer token: set R2G_API_TOKEN,
     or one is generated and printed at startup when binding to a non-loopback
     address. stdio is local-only and needs no token.
+
+    It does not run under a control plane (CONTROL_PLANE_URL set).
     """
+    from r2g import control_plane
+
+    if control_plane.mode():
+        console.print(f"[red]{control_plane.MCP_REFUSED}[/red]")
+        raise typer.Exit(code=1)
     try:
         from r2g.mcp_server import mcp as mcp_app
     except ImportError:

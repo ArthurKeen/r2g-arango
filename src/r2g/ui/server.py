@@ -9,7 +9,6 @@ import secrets
 import threading
 from pathlib import Path
 from typing import Any, List, Literal, Optional
-from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -90,6 +89,11 @@ def _add_control_plane_auth(app: FastAPI) -> None:
     load-progress stream, which cannot carry a header), from this deployment's tenant,
     and only the transformation project the control-plane project opens here."""
     tenant = os.environ.get("R2G_TENANT", "").strip()
+    if not tenant:
+        # Without it every tenant's context would get in, sharing one catalog.
+        raise RuntimeError(
+            "CONTROL_PLANE_URL is set but R2G_TENANT is not: name the tenant this r2g serves"
+        )
 
     @app.middleware("http")
     async def _require_context(request: Request, call_next):
@@ -105,7 +109,7 @@ def _add_control_plane_auth(app: FastAPI) -> None:
         gateway = control_plane.get()
         try:
             identity = await run_in_threadpool(gateway.verify, token)
-            if tenant and identity.tenant != tenant:
+            if identity.tenant != tenant:
                 return JSONResponse({"detail": f"This r2g serves tenant {tenant!r}"},
                                     status_code=403)
             project = await run_in_threadpool(gateway.project, identity)
@@ -114,7 +118,7 @@ def _add_control_plane_auth(app: FastAPI) -> None:
         except control_plane.ContextUnavailable as exc:
             return JSONResponse({"detail": f"Cannot check the context: {exc}"}, status_code=503)
         m = _PROJECT_ROUTE.match(path)
-        if m and unquote(m.group(1)) != project.opens:
+        if m and m.group(1) != project.opens:  # scope['path'] is already decoded
             # Another project is not visible here, the way a foreign one is not found.
             return JSONResponse({"detail": "Project not found"}, status_code=404)
         request.state.cp_identity = identity
@@ -220,6 +224,12 @@ def create_app(
     async def health():
         return {"status": "ok"}
 
+    def _only_the_one_it_opens(request: Request, name: str) -> None:
+        """Under a control plane, a project other than the one the control-plane project
+        opens here is not found, whether read or created (routes with no name segment)."""
+        if governed and name != request.state.cp_project.opens:
+            raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
+
     @app.get("/api/mode")
     async def run_mode():
         """Whether r2g runs under a control plane, and where its home is: the page needs
@@ -264,6 +274,7 @@ def create_app(
     @app.post("/api/demo-presets/snowflake-customer-360/install")
     async def install_snowflake_customer_360(
         body: DemoPresetInstallRequest,
+        request: Request,
     ):
         """Idempotently install the bundled Customer 360 source and project.
 
@@ -281,6 +292,7 @@ def create_app(
         )
         from r2g.snapshot import capture_source_snapshot, overlay_fingerprint
 
+        _only_the_one_it_opens(request, PROJECT_NAME)
         required = (
             "SNOWFLAKE_ACCOUNT",
             "SNOWFLAKE_USER",
@@ -902,7 +914,8 @@ def create_app(
         return project.model_dump()
 
     @app.post("/api/projects", status_code=201)
-    async def create_project(body: ProjectCreateRequest):
+    async def create_project(body: ProjectCreateRequest, request: Request):
+        _only_the_one_it_opens(request, body.name)
         try:
             validate_project_name(body.name)
         except ValueError as e:
