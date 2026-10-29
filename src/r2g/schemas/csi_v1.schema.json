@@ -6,8 +6,29 @@
   "type": "object",
   "additionalProperties": true,
   "required": ["csiVersion", "conceptualModel", "arangoPhysicalMapping", "provenance"],
+  "allOf": [
+    {
+      "description": "`path` needs csiVersion 1.1: a reader of version 1 would ignore it and read the wrong field, so a \"1\" document must not carry the key at all (not even null).",
+      "if": { "required": ["csiVersion"], "properties": { "csiVersion": { "const": "1" } } },
+      "then": {
+        "properties": {
+          "arangoPhysicalMapping": {
+            "properties": {
+              "entities": {
+                "additionalProperties": {
+                  "properties": {
+                    "properties": { "additionalProperties": { "not": { "required": ["path"] } } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "properties": {
-    "csiVersion": { "const": "1" },
+    "csiVersion": { "type": "string", "enum": ["1", "1.1"] },
 
     "conceptualModel": {
       "type": "object",
@@ -57,10 +78,17 @@
             "additionalProperties": true,
             "required": ["style"],
             "properties": {
-              "style": { "type": "string", "enum": ["COLLECTION", "LABEL"] },
+              "style": { "type": "string", "enum": ["COLLECTION", "LABEL", "LABELS"] },
               "collectionName": { "type": "string" },
               "typeField": { "type": "string" },
-              "typeValue": { "type": "string" }
+              "typeValue": { "type": "string" },
+              "labelsField": { "type": "string" },
+              "labelValue": { "type": "string" },
+              "properties": {
+                "type": "object",
+                "description": "Conceptual property name -> where its value is stored.",
+                "additionalProperties": { "$ref": "#/$defs/PropertyMapping" }
+              }
             }
           }
         },
@@ -111,6 +139,36 @@
         "validTimeSource": { "type": "string", "enum": ["catalog", "event", "file", "fingerprint-continuity", "observed"] },
         "predecessorFingerprint": { "type": ["string", "null"] }
       }
+    }
+  },
+
+  "$defs": {
+    "PropertyMapping": {
+      "description": "Where one entity property is stored. `field` is one literal attribute name, dots included (\"address.city\" is a single top-level attribute). `path` names a value inside a nested object, one name per level ([\"address\", \"city\"]) and needs csiVersion 1.1. At most one of the two; with neither, the property name is the attribute. Besides them, only the descriptive keys below or an ignorable `x-` key are allowed: a reader refuses anything else rather than ignore a key that might say where the value lives. Relationship property mappings keep the additive rule.",
+      "type": "object",
+      "not": { "required": ["field", "path"] },
+      "properties": {
+        "field": { "type": "string", "minLength": 1 },
+        "path": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\x00-\\x1f`\\\\]{1,256}$",
+            "description": "One attribute name: 1-256 characters, no control character, backtick or backslash. It may contain a dot; it is still one level."
+          }
+        },
+        "type": { "type": "string" },
+        "indexed": { "type": "boolean" },
+        "unique": { "type": "boolean" },
+        "required": { "type": "boolean" },
+        "role": { "type": "string" },
+        "sentinelValues": { "type": "array" },
+        "numericLike": { "type": "boolean" },
+        "sampleValues": { "type": "array" }
+      },
+      "patternProperties": { "^x-": {} },
+      "additionalProperties": false
     }
   }
 }

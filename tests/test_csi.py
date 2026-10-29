@@ -6,7 +6,16 @@ import sys
 
 import pytest
 
-from r2g.csi import CSI_VERSION, csi_schema, mapping_to_csi, validate_csi
+from r2g.csi import (
+    CSI_PROPERTY_EXTENSION_PREFIX,
+    CSI_PROPERTY_MAPPING_KEYS,
+    CSI_VERSION,
+    CSI_VERSION_NESTED,
+    csi_schema,
+    csi_version_for,
+    mapping_to_csi,
+    validate_csi,
+)
 from r2g.types import (
     CollectionMapping,
     Column,
@@ -108,6 +117,92 @@ def test_emits_valid_csi_without_schema():
 
 def test_emits_valid_csi_with_schema():
     doc = mapping_to_csi(_sample_config(), _sample_schema(), source_type="postgresql")
+    validate_csi(doc)
+
+
+# ── CSI 1.1: version by rule, strict property-mapping keys ─────────────
+#
+# CSI 1.1 adds ``path`` (a value inside a nested object) and makes a property
+# mapping strict (arango-sparql-py#72, r2g-arango#39). r2g writes only flat
+# documents, so it must keep writing "1" and only the keys strict readers allow.
+
+
+def test_csi_version_for_flat_mappings_is_1():
+    entities = {"Account": {"properties": {"name": {"field": "name"}, "dotted": {"field": "a.b"}}}}
+    assert csi_version_for(entities) == CSI_VERSION == "1"
+
+
+def test_csi_version_for_a_path_is_1_1():
+    entities = {
+        "Account": {"properties": {"name": {"field": "name"}}},
+        "Person": {"properties": {"city": {"path": ["address", "city"]}}},
+    }
+    assert csi_version_for(entities) == CSI_VERSION_NESTED == "1.1"
+
+
+@pytest.mark.parametrize(
+    "entities",
+    [{}, {"Account": {}}, {"Account": {"properties": None}}, {"Account": {"properties": {"x": "junk"}}}],
+    ids=["no-entities", "no-properties", "null-properties", "non-object-property"],
+)
+def test_csi_version_for_without_a_path_is_1(entities):
+    assert csi_version_for(entities) == "1"
+
+
+def _csi_from_every_emission_path():
+    """One CSI document per way r2g fills a property mapping."""
+    lpg = _sample_config()
+    lpg.graph_layout = "lpg"
+    curated = {
+        "curatedLabelsVersion": "1",
+        "entities": [{"name": "Contract", "label": "Agreement"}],
+    }
+    return {
+        "pg-without-schema": mapping_to_csi(_sample_config()),
+        "pg-with-schema": mapping_to_csi(_sample_config(), _sample_schema()),
+        "lpg": mapping_to_csi(lpg, _sample_schema()),
+        "collisions-qualified": mapping_to_csi(_colliding_config(), _colliding_schema()),
+        "collisions-roles": mapping_to_csi(_colliding_config(), _colliding_schema(), label_policy="roles"),
+        "curated-labels": mapping_to_csi(
+            _colliding_config(), _colliding_schema(), label_policy="warn", curated_labels=curated
+        ),
+    }
+
+
+_EMISSION_PATHS = [
+    "pg-without-schema",
+    "pg-with-schema",
+    "lpg",
+    "collisions-qualified",
+    "collisions-roles",
+    "curated-labels",
+]
+
+
+def test_emission_path_list_is_complete():
+    assert list(_csi_from_every_emission_path()) == _EMISSION_PATHS
+
+
+@pytest.mark.parametrize("path_name", _EMISSION_PATHS)
+def test_emitted_property_mappings_hold_only_strict_keys(path_name):
+    doc = _csi_from_every_emission_path()[path_name]
+    entities = doc["arangoPhysicalMapping"]["entities"]
+    assert entities, "fixture emitted no entities, so the check below proves nothing"
+    seen = 0
+    for entity, spec in entities.items():
+        for prop, mapping in spec["properties"].items():
+            seen += 1
+            unknown = {
+                key
+                for key in mapping
+                if key not in CSI_PROPERTY_MAPPING_KEYS and not key.startswith(CSI_PROPERTY_EXTENSION_PREFIX)
+            }
+            assert not unknown, f"{entity}.{prop} writes {sorted(unknown)}, which strict CSI readers refuse"
+            # r2g never nests, so never ``path``, and a field is a real name.
+            assert set(mapping) & {"field", "path"} == {"field"}, f"{entity}.{prop}: {mapping}"
+            assert isinstance(mapping["field"], str) and mapping["field"], f"{entity}.{prop}: {mapping}"
+    assert seen, "fixture emitted no property mappings, so the check above proves nothing"
+    assert doc["csiVersion"] == "1"
     validate_csi(doc)
 
 

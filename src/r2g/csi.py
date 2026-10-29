@@ -35,7 +35,34 @@ from .types import (
 )
 
 CSI_VERSION = "1"
+# CSI 1.1 adds ``path`` to a property mapping: a value inside a nested object,
+# one name per level (arango-sparql-py#72). A document says "1.1" only when it
+# uses ``path``, so a reader that accepts only "1" refuses just those documents
+# and keeps reading every flat one. r2g writes flat documents today, so it
+# writes "1"; ``csi_version_for`` makes that a rule, not a constant.
+CSI_VERSION_NESTED = "1.1"
 PRODUCER = "r2g"
+
+# What a CSI property mapping (``arangoPhysicalMapping.entities.<E>.properties.
+# <p>``) may hold under CSI 1.1: where the value is (``field`` — one literal
+# name, a dot included — or ``path``), the descriptive extras producers write,
+# or a key starting with ``x-``. Readers refuse anything else, because an
+# ignored location key is how a reader answers from the wrong field.
+CSI_PROPERTY_MAPPING_KEYS = frozenset(
+    {
+        "field",
+        "path",
+        "type",
+        "indexed",
+        "unique",
+        "required",
+        "role",
+        "sentinelValues",
+        "numericLike",
+        "sampleValues",
+    }
+)
+CSI_PROPERTY_EXTENSION_PREFIX = "x-"
 
 # ArangoDB physical styles r2g emits, one pair per target layout (P13).
 #
@@ -505,11 +532,12 @@ def entity_names_for_mapping(
     """Conceptual class name per collection, and the foreign-key evidence used (P12.13).
 
     The name is :func:`owl_entity_name` of the target collection, unless the
-    schema's own foreign keys say otherwise. A column named after the table it
-    references (``orders.goods_id`` -> ``goods``) is the schema designer's own
-    word for one row of that table, so when every such column agrees on a
-    singular that differs from the singularizer's, that singular is used
-    (``goods`` -> ``Goods``, where the dictionary would give ``Good``).
+    schema's own foreign keys say otherwise. A column that names one row of the
+    table it references with a singular of its own (``plans.basis_id`` ->
+    ``bases``) is the schema designer's word for that row, so when every such
+    column agrees on a singular that differs from the singularizer's, that
+    singular is used (``bases`` -> ``Basis``, where the singularizer gives
+    ``Base``).
 
     Only declared or curated single-column keys count: keys r2g inferred were
     matched *using* the singularizer, so they are not independent evidence. A
@@ -518,19 +546,16 @@ def entity_names_for_mapping(
     as is any table whose collection the mapping renamed or that shares its
     collection with another table.
 
-    A column that only repeats its table's name (``goods_id`` -> ``goods``) is
-    weaker evidence, because many schemas name every key ``<table>_id``
-    (``customers_id`` -> ``customers``). It counts only when the dictionary lists
-    the name as a noun in its own right, the schema elsewhere names a key with a
-    plural table's singular (``customer_id`` -> ``customers``), and no key
-    repeats the name of a table that is not such a noun. A column that gives a
-    *different* singular (``basis_id`` -> ``bases``) needs none of that. Returns
+    A column that only repeats its table's name (``goods_id`` -> ``goods``,
+    ``customers_id`` -> ``customers``) is not evidence: many schemas name every
+    key ``<table>_id``, and nothing in one table tells the two apart. Name such a
+    table with a curated ``identifier`` instead (P12.12). Returns
     ``(names, evidence)``: ``names`` maps every entity collection to its class
     name; ``evidence`` records each name the foreign keys decided.
     """
     from relational_schema_analyzer.overlay import INFERRED_CONSTRAINT_PREFIX
 
-    from .naming import convert_identifier, noun_lexicon, pluralize, singularize, split_identifier
+    from .naming import convert_identifier, pluralize, singularize, split_identifier
 
     def _words(name: str) -> List[str]:
         return [w.lower() for w in split_identifier(name)]
@@ -544,40 +569,6 @@ def entity_names_for_mapping(
                 if (fk.constraint_name or "").startswith(INFERRED_CONSTRAINT_PREFIX):
                     continue
                 referencing.setdefault(fk.foreign_table, []).append((table_name, fk.columns[0]))
-
-    def _named_after(table: str) -> List[Tuple[str, str]]:
-        """``(word for one row, "table.column")`` per column named after ``table``."""
-        table_words = _words(table)
-        if not table_words:
-            return []
-        head, last = table_words[:-1], table_words[-1]
-        found: List[Tuple[str, str]] = []
-        for ref_table, column in referencing.get(table, []):
-            match = _KEY_SUFFIX.search(column)
-            if match is None or match.start() == 0:
-                continue
-            prefix_words = _words(column[: match.start()].rstrip("_"))
-            if not prefix_words or prefix_words[:-1] != head:
-                continue
-            word = prefix_words[-1]
-            if word == last or singularize(last).lower() == word or pluralize(word).lower() == last:
-                found.append((word, f"{ref_table}.{column}"))
-        return found
-
-    # The schema's own convention for plural tables: does it name their keys with
-    # a singular (``customer_id``), or by repeating the table name (``customers_id``)?
-    nouns = noun_lexicon().nouns
-    singular_style = repeats_plural = False
-    for referenced in referencing:
-        table_words = _words(referenced)
-        if not table_words or singularize(table_words[-1]).lower() == table_words[-1]:
-            continue
-        for word, _ in _named_after(referenced):
-            if word != table_words[-1]:
-                singular_style = True
-            elif word not in nouns:
-                repeats_plural = True
-    repeats_are_evidence = singular_style and not repeats_plural
 
     entity_maps = [
         cm for cm in config.collections.values() if cm.collection_type != "edge" and not cm.is_join_table
@@ -595,10 +586,16 @@ def entity_names_for_mapping(
             continue
         head, last = table_words[:-1], table_words[-1]
         said: Dict[str, List[str]] = {}
-        for word, where in _named_after(cm.source_table):
-            if word == last and not repeats_are_evidence:
+        for ref_table, column in referencing.get(cm.source_table, []):
+            match = _KEY_SUFFIX.search(column)
+            if match is None or match.start() == 0:
                 continue
-            said.setdefault(word, []).append(where)
+            prefix_words = _words(column[: match.start()].rstrip("_"))
+            if not prefix_words or prefix_words[:-1] != head:
+                continue
+            word = prefix_words[-1]
+            if word != last and (singularize(last).lower() == word or pluralize(word).lower() == last):
+                said.setdefault(word, []).append(f"{ref_table}.{column}")
         if len(said) != 1:
             continue
         ((word, columns),) = said.items()
@@ -646,6 +643,21 @@ def curated_plan_for_mapping(
         relationships=[owl_property_name(e.edge_collection) for e in config.edges],
         join_key_labels=_join_key_labels(config),
     )
+
+
+def csi_version_for(physical_entities: Dict[str, Any]) -> str:
+    """The ``csiVersion`` a document with these physical entities must declare.
+
+    ``"1.1"`` when some property mapping uses ``path``, ``"1"`` otherwise — so
+    a later change that emits ``path`` (embedding a table's columns as a nested
+    object) cannot keep the old version by accident.
+    """
+    for spec in physical_entities.values():
+        properties = spec.get("properties") if isinstance(spec, dict) else None
+        for prop in (properties or {}).values():
+            if isinstance(prop, dict) and "path" in prop:
+                return CSI_VERSION_NESTED
+    return CSI_VERSION
 
 
 def mapping_to_csi(
@@ -940,7 +952,7 @@ def mapping_to_csi(
         conceptual_model["joinKeys"] = join_keys
 
     return {
-        "csiVersion": CSI_VERSION,
+        "csiVersion": csi_version_for(physical_entities),
         "conceptualModel": conceptual_model,
         "arangoPhysicalMapping": {
             "entities": physical_entities,
