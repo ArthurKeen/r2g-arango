@@ -113,7 +113,7 @@ class _Sdk:
         )
 
     def project(self, identity: Identity) -> Project:
-        from control_plane_sdk import ControlPlaneError
+        from control_plane_sdk import ControlPlaneError, ProjectNotFound, TokenRejected
 
         key = identity.verified.token_id
         now = time.monotonic()
@@ -123,6 +123,10 @@ class _Sdk:
                 return hit[1]
         try:
             details = self.client.project(identity.verified)
+        except (TokenRejected, ProjectNotFound) as exc:
+            # The control plane refused this context, or its project is gone: a refusal
+            # (401), not a temporary failure the page should wait out.
+            raise ContextRejected(str(exc)) from exc
         except ControlPlaneError as exc:
             raise ContextUnavailable(f"cannot read the project: {exc}") from exc
         project = Project(details.id, details.name, details.opened_by(TOOL_ID))
@@ -175,6 +179,9 @@ def ontology_classes(identity: Identity, *, http: Any = None) -> dict[str, Any]:
     except Exception as exc:  # the panel is informative; r2g works without it
         return {"ontology_id": ontology_id, "version": version, "classes": [],
                 "problem": f"cannot reach AOE: {exc}"}
+    finally:
+        if http is None:
+            client.close()
     classes = sorted(({"uri": c.get("uri"), "label": c.get("label") or c.get("uri")}
                       for c in rows if c.get("uri")), key=lambda c: str(c["label"]).lower())
     return {"ontology_id": ontology_id, "version": version, "classes": classes, "problem": None}
