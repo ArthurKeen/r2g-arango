@@ -328,7 +328,7 @@ leak rate (the target is zero) and manifest completeness for each release.
 - CDF found a CSI defect (P12.1, conceptual label uniqueness) and reported it to r2g with
   benchmark evidence. r2g resolved it with `export-csi --label-policy`.
 - One part of the output has no consumer yet. r2g emits accepted shared join keys as
-  `conceptualModel.joinKeys` (`src/r2g/csi.py:696`), but CDF does not read them (open drift
+  `conceptualModel.joinKeys` (`src/r2g/csi.py:952`), but CDF does not read them (open drift
   alert P6.7-E1-ROUTING). The gap is on CDF's side, so it does not cap this dimension.
 
 **Why it is not level 3:**
