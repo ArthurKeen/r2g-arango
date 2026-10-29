@@ -108,6 +108,16 @@ class TestTheOntologyFromAoe:
         assert all(call.kwargs["headers"] == {"Authorization": f"Bearer {TOKEN}"}
                    for call in http.get.call_args_list)
 
+    def test_an_endless_class_list_is_reported_with_no_partial_list(self, monkeypatch):
+        monkeypatch.setenv("AOE_URL", "http://aoe:8000/aoe")
+        monkeypatch.setattr(control_plane, "_MAX_PAGES", 3)
+        http = MagicMock()
+        http.get.return_value = self.answer(200, {"data": [{"uri": BOOK}], "next_cursor": "again"})
+        out = control_plane.ontology_terms(self.IDENTITY, http=http)
+        assert out["classes"] == [] and out["properties"] == []
+        assert "more than 3 pages" in out["problem"]
+        assert http.get.call_count == 3
+
     def test_a_refused_property_read_is_reported_with_no_partial_list(self, monkeypatch):
         monkeypatch.setenv("AOE_URL", "http://aoe:8000/aoe")
         http = MagicMock()
@@ -134,13 +144,34 @@ class TestWhichTermsAreChecked:
         assert unknown == [
             f"collections/books: {TITLE} is not a class of lending",
             f"collections/books/title: {BOOK} is not a property of lending",
-            f"edges/wrote: {AUTHOR} is not a property of lending",
+            f"edges/wrote(books.author_id -> authors.id): {AUTHOR} is not a property of lending",
         ]
         # Positive control: the right kinds are accepted.
         body = mapping(term=BOOK, field_terms={"title": TITLE})
         body["edges"][0]["term"] = WROTE
         assert control_plane.unknown_terms(None, MappingConfig.model_validate(body),
                                            ONTOLOGY) == []
+
+
+    def test_a_term_on_one_of_two_same_named_relationships_is_still_checked(self):
+        """Two foreign keys can share an edge collection; each keeps its own term."""
+        def wrote(from_field: str, term: str) -> dict[str, Any]:
+            return {"edge_collection": "wrote", "from_collection": "books",
+                    "to_collection": "authors", "from_field": from_field, "to_field": "id",
+                    "term": term}
+
+        saved = MappingConfig.model_validate({**mapping(), "edges": [wrote("author_id", WROTE)]})
+        unknown = "https://ex.org/x#unknown"
+        new = MappingConfig.model_validate(
+            {**mapping(), "edges": [wrote("co_author_id", unknown), wrote("author_id", WROTE)]})
+        assert [e.edge_collection for e in new.edges] == ["wrote", "wrote"]
+        assert control_plane.unknown_terms(saved, new, ONTOLOGY) == [
+            f"edges/wrote(books.co_author_id -> authors.id): {unknown} is not a property of lending"]
+        # Even the same foreign key twice: the unknown term is new there, so it is checked.
+        twice = MappingConfig.model_validate(
+            {**mapping(), "edges": [wrote("author_id", unknown), wrote("author_id", WROTE)]})
+        assert control_plane.unknown_terms(saved, twice, ONTOLOGY) == [
+            f"edges/wrote(books.author_id -> authors.id): {unknown} is not a property of lending"]
 
 
 class FakeControlPlane:
@@ -218,6 +249,15 @@ class TestSavingUnderAControlPlane:
         r = save(client, mapping(field_mappings={"title": "name"}))
         assert r.status_code == 200, r.text
         assert saved_books(catalog_dir)["field_mappings"] == {"title": "name"}
+
+    def test_an_unreadable_saved_mapping_means_every_term_is_checked(self, governed, catalog_dir):
+        client, _, reads = governed
+        (catalog_dir / "library-catalog.yaml").write_text("collections: [not, a, mapping]\n")
+        r = save(client, mapping(term="https://ex.org/other#Invoice"))
+        assert r.status_code == 400 and "is not a class of lending" in r.text
+        # Positive control: a term in the ontology is saved over the unreadable file.
+        assert save(client, mapping(term=BOOK)).status_code == 200
+        assert saved_books(catalog_dir)["term"] == BOOK and len(reads) == 2
 
     def test_a_save_that_names_no_new_term_does_not_read_the_ontology(self, governed):
         client, _, reads = governed

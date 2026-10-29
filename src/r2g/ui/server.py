@@ -1047,10 +1047,11 @@ def create_app(
         name the same one, must be in the project ontology. When the ontology cannot be read,
         a save that names a new term is refused rather than saved unchecked."""
         saved_path = Path(project.mapping_config_path)
-        saved = ConfigManager.load_config(saved_path) if saved_path.is_file() else None
-        before = control_plane.named_terms(saved)
-        if all(before.get(where) == named
-               for where, named in control_plane.named_terms(config).items()):
+        try:
+            saved = ConfigManager.load_config(saved_path) if saved_path.is_file() else None
+        except Exception:
+            saved = None  # unreadable: every term in the new mapping is checked
+        if not control_plane.new_terms(saved, config):
             return
         identity: control_plane.Identity = request.state.cp_identity
         ontology = await run_in_threadpool(control_plane.ontology_terms, identity)

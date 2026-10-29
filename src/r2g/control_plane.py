@@ -211,36 +211,39 @@ def _terms(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                    for row in rows if row.get("uri")), key=lambda t: str(t["label"]).lower())
 
 
-def named_terms(mapping: Any) -> dict[str, tuple[str, str]]:
-    """Every ontology term a mapping names (P14.8), by where it names it, as ``(kind,
-    term)``: a table's class under ``collections/<key>``, a column's property under
-    ``collections/<key>/<column>``, a relationship's property under ``edges/<edge>``."""
-    out: dict[str, tuple[str, str]] = {}
+def named_terms(mapping: Any) -> set[tuple[str, str, str]]:
+    """Every ontology term a mapping names (P14.8), as ``(where, kind, term)``: a table's
+    class at ``collections/<key>``, a column's property at ``collections/<key>/<column>``,
+    and a relationship's property at ``edges/<edge>(<from>.<fields> -> <to>.<fields>)``. A
+    set, so two elements that share a name each keep their own term."""
+    out: set[tuple[str, str, str]] = set()
     if mapping is None:
         return out
     for key, coll in mapping.collections.items():
         if coll.term:
-            out[f"collections/{key}"] = ("class", coll.term)
+            out.add((f"collections/{key}", "class", coll.term))
         for column, term in coll.field_terms.items():
-            out[f"collections/{key}/{column}"] = ("property", term)
+            out.add((f"collections/{key}/{column}", "property", term))
     for edge in mapping.edges:
         if edge.term:
-            out[f"edges/{edge.edge_collection}"] = ("property", edge.term)
+            where = (f"edges/{edge.edge_collection}({edge.from_collection}."
+                     f"{','.join(edge.from_fields)} -> {edge.to_collection}."
+                     f"{','.join(edge.to_fields)})")
+            out.add((where, "property", edge.term))
     return out
 
 
+def new_terms(saved: Any, new: Any) -> list[tuple[str, str, str]]:
+    """The terms ``new`` names that ``saved`` did not name at the same place: only these
+    are checked, so a class later removed from the ontology does not block unrelated
+    edits."""
+    return sorted(named_terms(new) - named_terms(saved))
+
+
 def unknown_terms(saved: Any, new: Any, ontology: dict[str, Any]) -> list[str]:
-    """The terms ``new`` names, where ``saved`` did not name the same one, that are not in
-    the project ontology: a table needs a class, a column or relationship a property. A
-    term already saved is not checked again, so a class later removed from the ontology
-    does not block unrelated edits."""
-    before = named_terms(saved)
+    """The new terms (see :func:`new_terms`) that are not in the project ontology: a table
+    needs a class, a column or relationship a property."""
     known = {"class": {t["uri"] for t in ontology.get("classes", [])},
              "property": {t["uri"] for t in ontology.get("properties", [])}}
-    unknown = []
-    for where, (kind, term) in sorted(named_terms(new).items()):
-        if before.get(where) == (kind, term):
-            continue
-        if term not in known[kind]:
-            unknown.append(f"{where}: {term} is not a {kind} of {ontology.get('ontology_id')}")
-    return unknown
+    return [f"{where}: {term} is not a {kind} of {ontology.get('ontology_id')}"
+            for where, kind, term in new_terms(saved, new) if term not in known[kind]]
