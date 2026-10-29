@@ -2693,6 +2693,10 @@ async function selectProject(name) {
       sharedKeys: data.config?.sharedKeys ? [...data.config.sharedKeys] : [],
       typeOverrides: { ...data.config?.typeOverrides } || {},
       keySeparator: data.config?.keySeparator || '_',
+      // Mapping-wide settings with no editor of their own: kept so a save hands them back.
+      graphLayout: data.config?.graphLayout || 'pg',
+      lpg: data.config?.lpg || null,
+      namingConvention: data.config?.namingConvention || null,
       defaultWorkers: editState.defaultWorkers || 1,
       defaultBatchSize: editState.defaultBatchSize || 10000
     };
@@ -4509,6 +4513,8 @@ function buildMappingPayload() {
     payload.graph_layout = 'lpg';
     if (editState.lpg) payload.lpg = editState.lpg;
   }
+  // The last naming convention applied (P5f), a record the mapping keeps.
+  if (editState.namingConvention) payload.naming_convention = editState.namingConvention;
 
   // Accepted cross-source join keys (P6.7). Omitted when empty so mappings
   // that never used the feature keep their historical on-disk shape.
@@ -4873,6 +4879,7 @@ function applyConfigToEditState(config) {
   // with a type property. Absent in every mapping written before P13.
   editState.graphLayout = config.graph_layout || config.graphLayout || 'pg';
   editState.lpg = config.lpg || null;
+  editState.namingConvention = config.naming_convention || config.namingConvention || null;
   renderGraphModelChip();
 }
 
