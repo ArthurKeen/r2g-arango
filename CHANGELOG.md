@@ -7,6 +7,8 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-10-29
+
 ### Changed
 
 - **`csiVersion` follows the mappings (r2g-arango#39, PRD P12.14).** CSI 1.1
@@ -883,7 +885,8 @@ Initial phased implementation (not yet published to PyPI):
   pipeline, `r2g source dump` CLI, pure-Python FK inference with
   optional value-overlap sampler.
 
-[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/ArthurKeen/r2g-arango/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/ArthurKeen/r2g-arango/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.6.1...v0.7.0
