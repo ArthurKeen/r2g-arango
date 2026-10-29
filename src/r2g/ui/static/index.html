@@ -1322,7 +1322,7 @@ function _apiToken() {
 // one project. It is kept for THIS TAB only (sessionStorage), removed from the address bar,
 // sent on every call, and renewed before it expires. Never localStorage or a cookie: every
 // tab shares those, so a second tab on another project would move this one into it.
-const CP = { on: false, home: '/', renewal: null };
+const CP = { on: false, home: '/', renewal: null, classes: [], properties: [] };
 const CP_KEY = 'r2g.context';
 
 function _cpToken() {
@@ -1412,7 +1412,60 @@ async function _cpShowContext() {
         : '<span>No project ontology</span>')
     + (ctx.opens ? '' : '<span>This project names no transformation project for r2g.</span>');
   banner.hidden = false;
+  CP.classes = onto.classes || [];
+  CP.properties = onto.properties || [];
+  _cpTermLists();
   if (ctx.opens) await selectProject(ctx.opens);
+}
+
+// The project ontology's classes and properties, offered where a mapping element names
+// the term it stands for (P14.8). The value is the IRI; the label is what a person reads.
+function _cpTermLists() {
+  for (const [id, terms] of [['cp-classes', CP.classes], ['cp-properties', CP.properties]]) {
+    let list = document.getElementById(id);
+    if (!list) { list = document.createElement('datalist'); list.id = id; document.body.appendChild(list); }
+    list.innerHTML = terms.map((t) => `<option value="${escHtml(t.uri)}">${escHtml(t.label)}</option>`).join('');
+  }
+}
+
+function _termLabel(uri, terms) {
+  const found = (terms || []).find((t) => t.uri === uri);
+  return found ? found.label : '';
+}
+
+function _termRow(label, value, list, onchange, column) {
+  const known = _termLabel(value, list === 'cp-classes' ? CP.classes : CP.properties);
+  const columnAttr = column === undefined ? '' : ` data-column="${escHtml(column)}"`;
+  return `<div class="prop-row">
+        <span class="prop-label">${escHtml(label)}</span>
+        <input class="prop-input"${columnAttr} list="${list}" value="${escHtml(value || '')}"
+          placeholder="${list === 'cp-classes' ? 'Ontology class' : 'Ontology property'}"
+          title="${escHtml(known || value || '')}" onchange="${onchange}">
+      </div>`;
+}
+
+function setCollectionTerm(collKey, value) {
+  const coll = editState.collections[collKey];
+  if (!coll) return;
+  coll.term = String(value || '').trim() || null;
+  markDirty();
+}
+
+function setFieldTerm(collKey, column, value) {
+  const coll = editState.collections[collKey];
+  if (!coll) return;
+  const terms = { ...(coll.fieldTerms || {}) };
+  const term = String(value || '').trim();
+  if (term) terms[column] = term; else delete terms[column];
+  coll.fieldTerms = terms;
+  markDirty();
+}
+
+function setEdgeTerm(idx, value) {
+  const edge = editState.edges[idx];
+  if (!edge) return;
+  edge.term = String(value || '').trim() || null;
+  markDirty();
 }
 
 function _authHeaders(extra) {
@@ -3638,6 +3691,21 @@ function showTargetProps(collKey) {
     </div>`;
   }
 
+  // What this table and its columns stand for in the project ontology (P14.8). Offered
+  // under a control plane, where the ontology is known; carried in every mode.
+  if (CP.on) {
+    html += `<div class="prop-group" data-coll="${escHtml(collKey)}">
+      <div class="prop-group-title">Ontology</div>`;
+    html += _termRow('Class', coll.term, 'cp-classes',
+      "setCollectionTerm(this.closest('[data-coll]').dataset.coll, this.value)");
+    for (const column of (coll.allFields || [])) {
+      html += _termRow(column, (coll.fieldTerms || {})[column], 'cp-properties',
+        "setFieldTerm(this.closest('[data-coll]').dataset.coll, this.dataset.column, this.value)",
+        column);
+    }
+    html += '</div>';
+  }
+
   if (fmEntries.length) {
     html += `<div class="prop-group"><div class="prop-group-title">Field Renames</div>`;
     fmEntries.forEach(([src, tgt]) => {
@@ -3684,6 +3752,7 @@ function showEdgeProps(edgeColl) {
         <input class="prop-input" data-edge="${escHtml(edge.edgeCollection)}" value="${escHtml(edge.edgeCollection)}"
           onchange="editEdgeName(${edgeIdx}, this.value, this.dataset.edge); renderMapper();">
       </div>
+      ${CP.on ? _termRow('Ontology property', edge.term, 'cp-properties', `setEdgeTerm(${edgeIdx}, this.value)`) : ''}
     </div>
     <div class="prop-group">
       <div class="prop-group-title">Relationship</div>
@@ -4381,6 +4450,9 @@ function buildMappingPayload() {
       is_join_table: !!c.isJoinTable,
     };
     if (c.extraLabels && c.extraLabels.length) entry.extra_labels = c.extraLabels;
+    // Ontology terms (P14.8) are carried in every mode, so a save never drops them.
+    if (c.term) entry.term = c.term;
+    if (c.fieldTerms && Object.keys(c.fieldTerms).length) entry.field_terms = c.fieldTerms;
     if (c.fieldMappings && Object.keys(c.fieldMappings).length) entry.field_mappings = c.fieldMappings;
     if (c.excludeFields && c.excludeFields.length) entry.exclude_fields = c.excludeFields;
     if (c.includeFields) entry.include_fields = c.includeFields;
@@ -4418,6 +4490,7 @@ function buildMappingPayload() {
       base.from_field = fromFields[0] || '';
       base.to_field = toFields[0] || '';
     }
+    if (e.term) base.term = e.term;
     return base;
   });
 
@@ -4754,6 +4827,8 @@ function applyConfigToEditState(config) {
       excludeFields: c.exclude_fields || c.excludeFields || [],
       includeFields: c.include_fields || c.includeFields || null,
       extraLabels: c.extra_labels || c.extraLabels || [],
+      term: c.term || null,
+      fieldTerms: c.field_terms || c.fieldTerms || {},
       fieldExpressions: rawFx.map(fx => ({
         target: fx.target,
         sources: fx.sources || [],
@@ -4777,6 +4852,7 @@ function applyConfigToEditState(config) {
     toCollection: e.to_collection || e.toCollection || '',
     fromField: e.from_field || (e.from_fields ? e.from_fields.join(', ') : (e.fromField || '')),
     toField: e.to_field || (e.to_fields ? e.to_fields.join(', ') : (e.toField || '')),
+    term: e.term || null,
   }));
   editState.sharedKeys = (config.shared_keys || config.sharedKeys || []).map(sk => ({
     key: sk.key,

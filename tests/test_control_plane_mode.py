@@ -306,10 +306,10 @@ class TestTheOntologyFromAoe:
             {"uri": "https://ex.org/Income", "label": "Income"},
             {"uri": "https://ex.org/Equity", "label": "equity"},
             {"label": "no uri, skipped"}]}
-        out = control_plane.ontology_classes(self.IDENTITY, http=http)
+        out = control_plane.ontology_terms(self.IDENTITY, http=http)
         assert [c["label"] for c in out["classes"]] == ["equity", "Income"]
         assert out["problem"] is None
-        url = http.get.call_args.args[0]
+        url = http.get.call_args_list[0].args[0]
         assert url == "http://aoe:8000/aoe/api/v1/ontology/fibo-equity/classes"
         assert http.get.call_args.kwargs["headers"] == {"Authorization": f"Bearer {TOKEN}"}
 
@@ -317,7 +317,7 @@ class TestTheOntologyFromAoe:
         monkeypatch.setenv("AOE_URL", "http://aoe:8000/aoe")
         http = MagicMock()
         http.get.return_value.status_code = 404
-        out = control_plane.ontology_classes(self.IDENTITY, http=http)
+        out = control_plane.ontology_terms(self.IDENTITY, http=http)
         assert out["classes"] == [] and "404" in out["problem"]
 
 
