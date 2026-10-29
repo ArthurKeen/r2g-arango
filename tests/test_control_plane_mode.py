@@ -30,6 +30,24 @@ UNAVAILABLE = "context-while-down"
 STATIC = Path(__file__).resolve().parents[1] / "src" / "r2g" / "ui" / "static"
 
 
+@pytest.fixture(autouse=True)
+def _reset_structlog():
+    """Restore structlog to real stderr after a CliRunner invocation.
+
+    CliRunner redirects stdout/stderr; structlog caches the (now-closed) stream,
+    which poisons logging in every later test. Mirrors the fixture in
+    tests/test_cli.py; `r2g mcp` below runs through CliRunner.
+    """
+    yield
+    import structlog
+
+    structlog.reset_defaults()
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(0),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
+
+
 class FakeControlPlane:
     def verify(self, token: str) -> control_plane.Identity:
         if token == UNAVAILABLE:
@@ -129,14 +147,78 @@ class TestTheCheckSeesTheRoutersPath:
         assert governed.get("/static/r2g-icon.png").status_code == 200
 
 
-def test_the_access_log_does_not_keep_the_stream_token(governed, caplog):
+@pytest.mark.parametrize("query, kept", [
+    (f"?token={TOKEN}&n=1", "token=<redacted>&n=1"),
+    (f"?n=1&%74oken={TOKEN}", "%74oken=<redacted>"),     # the key, percent-encoded
+    (f"?x=1;token={TOKEN}", "token=<redacted>"),          # after a semicolon
+])
+def test_the_access_log_does_not_keep_the_stream_token(governed, caplog, query, kept):
     # uvicorn logs the request line with its query; ?token= is a credential.
     with caplog.at_level(logging.INFO, logger="uvicorn.access"):
         logging.getLogger("uvicorn.access").info(
             '%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET",
-            f"/api/projects/customer-360/load/x/stream?token={TOKEN}&n=1", "1.1", 200)
+            f"/api/projects/customer-360/load/x/stream{query}", "1.1", 200)
     line = caplog.records[-1].getMessage()
-    assert TOKEN not in line and "token=<redacted>&n=1" in line
+    assert TOKEN not in line and kept in line
+
+
+def test_only_the_progress_stream_takes_the_token_in_its_address(governed):
+    # A route whose last segment merely reads "stream" is not the progress stream.
+    assert governed.get(f"/api/sources/src/preview/stream?token={TOKEN}").status_code == 401
+    assert governed.get(f"/api/targets/stream?token={TOKEN}").status_code == 401
+
+
+def test_options_is_checked_unless_it_is_a_cors_preflight(governed):
+    assert governed.options("/api/projects").status_code == 401
+    preflight = {"Origin": "http://x.test", "Access-Control-Request-Method": "GET"}
+    # No CORS configured here: the preflight reaches the router, which takes no OPTIONS.
+    assert governed.options("/api/projects", headers=preflight).status_code == 405
+
+
+class TestALoadBelongsToItsProject:
+    """A load is reached only through the project that started it (P14.3), and its
+    rejected rows are kept with the tenant's catalog (P14.6)."""
+
+    def _load(self, project: str):
+        q = MagicMock(empty=MagicMock(return_value=True))
+        return {"thread": MagicMock(is_alive=MagicMock(return_value=True)), "queue": q,
+                "pipeline": None, "project": project}
+
+    def test_another_projects_load_is_not_found(self, governed, monkeypatch):
+        from r2g.ui import server
+
+        monkeypatch.setitem(server._running_loads, "theirs", self._load("someone-elses"))
+        monkeypatch.setitem(server._running_loads, "ours", self._load("customer-360"))
+        base = "/api/projects/customer-360/load"
+        assert governed.get(f"{base}/theirs/status", headers=bearer()).json()["status"] == "unknown"
+        assert governed.get(f"{base}/theirs/stream", headers=bearer()).status_code == 404
+        assert governed.get(f"{base}/ours/status", headers=bearer()).json()["status"] == "running"
+
+    def test_rejected_rows_are_kept_per_project_with_the_catalog(self, governed, tmp_path):
+        from r2g.dlq import DeadLetterQueue
+
+        DeadLetterQueue("theirs", dlq_dir=tmp_path / "dlq" / "someone-elses").record_failure(
+            "c", {"email": "x@y"}, "bad")
+        DeadLetterQueue("theirs", dlq_dir=tmp_path / "dlq").record_failure(  # the older flat path
+            "c", {"email": "x@y"}, "bad")
+        DeadLetterQueue("ours", dlq_dir=tmp_path / "dlq" / "customer-360").record_failure(
+            "c", {"email": "x@y"}, "bad")
+        base = "/api/projects/customer-360/load"
+        assert governed.get(f"{base}/theirs/errors", headers=bearer()).json()["count"] == 0
+        assert governed.get(f"{base}/ours/errors", headers=bearer()).json()["count"] == 1
+
+    def test_without_a_control_plane_older_rejected_rows_still_show(self, tmp_path, monkeypatch):
+        from r2g.dlq import DeadLetterQueue
+
+        monkeypatch.delenv("CONTROL_PLANE_URL", raising=False)
+        catalog = CatalogManager(tmp_path)
+        catalog.add_source("src", "csv", str(tmp_path))
+        (tmp_path / "p.yaml").write_text("collections: {}\nedges: []\n")
+        catalog.create_project("p", "src", str(tmp_path / "p.yaml"))
+        DeadLetterQueue("old", dlq_dir=tmp_path / "dlq").record_failure("c", {"a": 1}, "bad")
+        client = TestClient(create_app(catalog_dir=str(tmp_path)))
+        assert client.get("/api/projects/p/load/old/errors").json()["count"] == 1
+        assert client.get("/api/projects/nope/load/old/errors").status_code == 404
 
 
 class TestTheControlPlanesRefusalIsARefusal:

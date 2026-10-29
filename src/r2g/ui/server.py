@@ -10,6 +10,7 @@ import secrets
 import threading
 from pathlib import Path
 from typing import Any, List, Literal, Optional
+from urllib.parse import unquote_plus
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -82,12 +83,26 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", ""}
 
 #: A route about one transformation project: ``/api/projects/<name>[/...]``.
 _PROJECT_ROUTE = re.compile(r"^/api/projects/([^/]+)")
+#: The load-progress stream, the one route that takes its context as ``?token=``.
+_STREAM_ROUTE = re.compile(r"^/api/projects/[^/]+/load/[^/]+/stream$")
 #: Under a control plane these need no context: the page and its assets, and how to
 #: start. Everything else needs one, so a route added later is closed until opened here.
 _OPEN_PATHS = frozenset({"", "/", "/api/health", "/api/mode"})
 _OPEN_PREFIXES = ("/static/",)
-#: The load-progress stream's ``?token=``, as an access log would otherwise record it.
-_TOKEN_IN_QUERY = re.compile(r"([?&]token=)[^&\s]*")
+
+
+def _redact_token_in_query(target: str) -> str:
+    """``target`` with the value of every query parameter whose key reads ``token`` once
+    decoded (``token``, ``%74oken``, after ``&`` or ``;``) replaced by ``<redacted>``."""
+    head, sep, query = target.partition("?")
+    if not sep:
+        return target
+    parts = re.split(r"([&;])", query)
+    for i in range(0, len(parts), 2):
+        key, eq, _ = parts[i].partition("=")
+        if eq and unquote_plus(key).strip().lower() == "token":
+            parts[i] = f"{key}=<redacted>"
+    return head + sep + "".join(parts)
 
 
 class _RedactTokenInQuery(logging.Filter):
@@ -95,7 +110,7 @@ class _RedactTokenInQuery(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.args, tuple):
-            record.args = tuple(_TOKEN_IN_QUERY.sub(r"\1<redacted>", a) if isinstance(a, str) else a
+            record.args = tuple(_redact_token_in_query(a) if isinstance(a, str) else a
                                 for a in record.args)
         return True
 
@@ -122,11 +137,15 @@ def _add_control_plane_auth(app: FastAPI) -> None:
         # The path the router will match, not request.url.path: mounted with a root_path,
         # uvicorn puts the prefix in front of the path, and the router strips it again.
         path = get_route_path(request.scope)
-        if path in _OPEN_PATHS or path.startswith(_OPEN_PREFIXES) or request.method == "OPTIONS":
+        # A CORS preflight carries no credentials by design; the CORS middleware answers
+        # it without reaching a route. Any other OPTIONS request is checked like the rest.
+        preflight = (request.method == "OPTIONS"
+                     and "access-control-request-method" in request.headers)
+        if path in _OPEN_PATHS or path.startswith(_OPEN_PREFIXES) or preflight:
             return await call_next(request)
         auth = request.headers.get("authorization", "")
         token = auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else ""
-        if not token and path.endswith("/stream"):
+        if not token and _STREAM_ROUTE.match(path):
             token = request.query_params.get("token", "").strip()
         if not token:
             return JSONResponse({"detail": "A context token is required"}, status_code=401)
@@ -209,6 +228,14 @@ def create_app(
     # Mapping files for API-created projects are confined here, never to a
     # client-supplied path (prevents path traversal / arbitrary file writes).
     _projects_root = catalog.dir.expanduser() / "projects"
+    # A load's rejected rows, kept with the catalog (so per tenant under a control plane)
+    # and per project, so one project's errors are never read through another's route.
+    _dlq_root = catalog.dir.expanduser() / "dlq"
+
+    def _running_load(name: str, load_id: str) -> dict[str, Any] | None:
+        """The running load ``load_id`` if it belongs to project ``name``."""
+        entry = _running_loads.get(load_id)
+        return entry if entry is not None and entry.get("project") == name else None
 
     def _resolve_target(project: Any) -> tuple[str, str, str, str]:
         """Resolve (endpoint, database, username, password) for a project's target.
@@ -1769,7 +1796,7 @@ def create_app(
             workers=body.workers,
             include_tables=set(body.include_tables) if body.include_tables else None,
             exclude_tables=set(body.exclude_tables) if body.exclude_tables else None,
-            dlq=DeadLetterQueue(load_id),
+            dlq=DeadLetterQueue(load_id, dlq_dir=_dlq_root / name),
         )
 
         progress_queue: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -1825,7 +1852,8 @@ def create_app(
                 )
 
         thread = threading.Thread(target=run_pipeline, daemon=True)
-        _running_loads[load_id] = {"thread": thread, "queue": progress_queue, "pipeline": pipeline}
+        _running_loads[load_id] = {"thread": thread, "queue": progress_queue, "pipeline": pipeline,
+                                   "project": name}
         thread.start()
 
         return {
@@ -1845,14 +1873,15 @@ def create_app(
     @app.get("/api/projects/{name}/load/{load_id}/status")
     async def get_load_status(name: str, load_id: str):
         events: list[dict[str, Any]] = []
-        if load_id in _running_loads:
-            q = _running_loads[load_id]["queue"]
+        load = _running_load(name, load_id)
+        if load is not None:
+            q = load["queue"]
             while not q.empty():
                 try:
                     events.append(q.get_nowait())
                 except queue.Empty:
                     break
-            thread_alive = _running_loads[load_id]["thread"].is_alive()
+            thread_alive = load["thread"].is_alive()
             status = "running" if thread_alive else "completed"
             if events and events[-1].get("event") == "error":
                 status = "failed"
@@ -1863,11 +1892,12 @@ def create_app(
 
     @app.get("/api/projects/{name}/load/{load_id}/stream")
     async def stream_load_progress(name: str, load_id: str):
-        if load_id not in _running_loads:
+        load = _running_load(name, load_id)
+        if load is None:
             raise HTTPException(status_code=404, detail="Load not found")
 
         async def event_generator():
-            q = _running_loads[load_id]["queue"]
+            q = load["queue"]
             while True:
                 try:
                     event = q.get_nowait()
@@ -1875,7 +1905,7 @@ def create_app(
                     if event.get("event") in ("complete", "error"):
                         break
                 except queue.Empty:
-                    if not _running_loads[load_id]["thread"].is_alive():
+                    if not load["thread"].is_alive():
                         yield f"data: {json.dumps({'event': 'complete'})}\n\n"
                         break
                     await asyncio.sleep(0.5)
@@ -1887,7 +1917,13 @@ def create_app(
     async def get_load_errors(name: str, load_id: str, limit: int = 50, offset: int = 0):
         from r2g.dlq import DeadLetterQueue
 
-        dlq = DeadLetterQueue(load_id)
+        if catalog.get_project(name) is None:
+            raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
+        dlq = DeadLetterQueue(load_id, dlq_dir=_dlq_root / name)
+        if not dlq.path.exists() and not governed:
+            # Loads from before rejected rows were kept per project: ~/.r2g/dlq/<id>.jsonl.
+            # Not under a control plane, where every project's rows must stay its own.
+            dlq = DeadLetterQueue(load_id, dlq_dir=_dlq_root)
         errors = [_redact_dlq_entry(e) for e in dlq.read_errors(limit=limit, offset=offset)]
         return {"load_id": load_id, "errors": errors, "count": len(errors)}
 
