@@ -118,7 +118,7 @@ class _RedactTokenInQuery(logging.Filter):
 _REDACT_TOKEN_IN_QUERY = _RedactTokenInQuery()
 
 
-def _add_control_plane_auth(app: FastAPI) -> None:
+def _add_control_plane_auth(app: FastAPI, *, cors: bool) -> None:
     """Under a control plane: a context token on every ``/api`` call (``?token=`` on the
     load-progress stream, which cannot carry a header), from this deployment's tenant,
     and only the transformation project the control-plane project opens here."""
@@ -137,9 +137,9 @@ def _add_control_plane_auth(app: FastAPI) -> None:
         # The path the router will match, not request.url.path: mounted with a root_path,
         # uvicorn puts the prefix in front of the path, and the router strips it again.
         path = get_route_path(request.scope)
-        # A CORS preflight carries no credentials by design; the CORS middleware answers
-        # it without reaching a route. Any other OPTIONS request is checked like the rest.
-        preflight = (request.method == "OPTIONS"
+        # A CORS preflight carries no credentials by design; with CORS configured, the CORS
+        # middleware answers it without reaching a route. Any other OPTIONS is checked.
+        preflight = (cors and request.method == "OPTIONS" and "origin" in request.headers
                      and "access-control-request-method" in request.headers)
         if path in _OPEN_PATHS or path.startswith(_OPEN_PREFIXES) or preflight:
             return await call_next(request)
@@ -199,7 +199,7 @@ def create_app(
     governed = control_plane.mode()
     app.state.control_plane = governed
     if governed:
-        _add_control_plane_auth(app)
+        _add_control_plane_auth(app, cors=bool(cors_origins))
 
     # ── Otherwise, optional Bearer-token auth. ──
     token = (api_token or os.environ.get("R2G_API_TOKEN") or "").strip()
@@ -231,6 +231,13 @@ def create_app(
     # A load's rejected rows, kept with the catalog (so per tenant under a control plane)
     # and per project, so one project's errors are never read through another's route.
     _dlq_root = catalog.dir.expanduser() / "dlq"
+
+    def _dead_letters(name: str, load_id: str) -> Any:
+        """The rejected rows of project ``name``'s load ``load_id``: the one place both the
+        load (writing) and the errors route (reading) find them."""
+        from r2g.dlq import DeadLetterQueue
+
+        return DeadLetterQueue(load_id, dlq_dir=_dlq_root / name)
 
     def _running_load(name: str, load_id: str) -> dict[str, Any] | None:
         """The running load ``load_id`` if it belongs to project ``name``."""
@@ -1781,8 +1788,6 @@ def create_app(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=_safe_detail(e))
 
-        from r2g.dlq import DeadLetterQueue
-
         pipeline = StreamingPipeline(
             source_connector=source_connector,
             arango_writer=writer,
@@ -1796,7 +1801,7 @@ def create_app(
             workers=body.workers,
             include_tables=set(body.include_tables) if body.include_tables else None,
             exclude_tables=set(body.exclude_tables) if body.exclude_tables else None,
-            dlq=DeadLetterQueue(load_id, dlq_dir=_dlq_root / name),
+            dlq=_dead_letters(name, load_id),
         )
 
         progress_queue: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -1919,11 +1924,14 @@ def create_app(
 
         if catalog.get_project(name) is None:
             raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
-        dlq = DeadLetterQueue(load_id, dlq_dir=_dlq_root / name)
+        dlq = _dead_letters(name, load_id)
         if not dlq.path.exists() and not governed:
-            # Loads from before rejected rows were kept per project: ~/.r2g/dlq/<id>.jsonl.
-            # Not under a control plane, where every project's rows must stay its own.
-            dlq = DeadLetterQueue(load_id, dlq_dir=_dlq_root)
+            # A load from before rejected rows were kept per project wrote them to
+            # ~/.r2g/dlq/<id>.jsonl, whatever the catalog directory. Not under a control
+            # plane, where every project's rows must stay its own.
+            legacy = Path.home() / ".r2g" / "dlq" / f"{load_id}.jsonl"
+            if legacy.exists():
+                dlq = DeadLetterQueue(load_id, dlq_dir=legacy.parent)
         errors = [_redact_dlq_entry(e) for e in dlq.read_errors(limit=limit, offset=offset)]
         return {"load_id": load_id, "errors": errors, "count": len(errors)}
 

@@ -11,7 +11,8 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The Studio can run as a tool of a context-and-governance control plane (r2g-arango#44, PRD
   P14.1–P14.7).** With `CONTROL_PLANE_URL` set, every call except the page, its
-  assets, `/api/health`, `/api/mode` and a CORS preflight needs the control plane's
+  assets, `/api/health`, `/api/mode` and (with `R2G_CORS_ORIGINS` set) a CORS preflight
+  needs the control plane's
   signed context token, verified offline by its SDK (imported only in this mode);
   `R2G_API_TOKEN` is not used. The check reads the path the router matches, so it holds
   when the app is mounted with a `root_path`. Only the load-progress stream takes the

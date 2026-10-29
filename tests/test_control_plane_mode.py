@@ -168,11 +168,16 @@ def test_only_the_progress_stream_takes_the_token_in_its_address(governed):
     assert governed.get(f"/api/targets/stream?token={TOKEN}").status_code == 401
 
 
-def test_options_is_checked_unless_it_is_a_cors_preflight(governed):
-    assert governed.options("/api/projects").status_code == 401
+def test_options_is_checked_unless_it_is_a_cors_preflight(governed, tmp_path, monkeypatch):
     preflight = {"Origin": "http://x.test", "Access-Control-Request-Method": "GET"}
-    # No CORS configured here: the preflight reaches the router, which takes no OPTIONS.
-    assert governed.options("/api/projects", headers=preflight).status_code == 405
+    assert governed.options("/api/projects").status_code == 401
+    # Without CORS configured there is no preflight to answer: checked like the rest.
+    assert governed.options("/api/projects", headers=preflight).status_code == 401
+    monkeypatch.setenv("R2G_CORS_ORIGINS", "http://x.test")
+    with_cors = TestClient(create_app(catalog_dir=str(tmp_path), host="0.0.0.0"))
+    assert with_cors.options("/api/projects", headers=preflight).status_code == 200
+    no_origin = {"Access-Control-Request-Method": "GET"}
+    assert with_cors.options("/api/projects", headers=no_origin).status_code == 401
 
 
 class TestALoadBelongsToItsProject:
@@ -215,7 +220,9 @@ class TestALoadBelongsToItsProject:
         catalog.add_source("src", "csv", str(tmp_path))
         (tmp_path / "p.yaml").write_text("collections: {}\nedges: []\n")
         catalog.create_project("p", "src", str(tmp_path / "p.yaml"))
-        DeadLetterQueue("old", dlq_dir=tmp_path / "dlq").record_failure("c", {"a": 1}, "bad")
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))  # older loads wrote ~/.r2g/dlq, whatever the catalog
+        DeadLetterQueue("old", dlq_dir=home / ".r2g" / "dlq").record_failure("c", {"a": 1}, "bad")
         client = TestClient(create_app(catalog_dir=str(tmp_path)))
         assert client.get("/api/projects/p/load/old/errors").json()["count"] == 1
         assert client.get("/api/projects/nope/load/old/errors").status_code == 404
@@ -253,6 +260,15 @@ class TestTheControlPlanesRefusalIsARefusal:
         gateway.client.project.side_effect = getattr(sdk, raised)("no")
         with pytest.raises(expected):
             gateway.project(self._identity())
+
+
+def test_a_load_writes_its_rejected_rows_where_the_errors_route_reads_them():
+    # Starting a real load needs a source, a snapshot and ArangoDB; instead, the load and
+    # the errors route must both get their queue from the one helper that decides where.
+    source = (STATIC.parent / "server.py").read_text()
+    start = source[source.index("async def start_load"):source.index("async def get_load_status")]
+    assert "dlq=_dead_letters(name, load_id)" in start
+    assert "DeadLetterQueue(" not in start
 
 
 class TestOnlyTheProjectsTransformationProject:
