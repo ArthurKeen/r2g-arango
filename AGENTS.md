@@ -101,3 +101,71 @@ refactor, before switching tasks, and before ending a session. One logical chang
 per commit — if you can't describe it in one line it's too big. Use scoped,
 descriptive messages (`fix(curation): atomic reparent endpoint`), not "updates" or
 "wip".
+
+## Arango UI design rules
+
+All interfaces must match the ArangoDB web platform (Agentic AI Suite, chat,
+GraphRAG). Do not introduce shades outside these groups.
+
+### Brand and hierarchy
+Clean and professional with generous white space. Arango Green is the action
+colour (primary buttons, links, checkmarks, active/selected states). Dark gray
+text on white in content areas. The side menu is solid black with white icons and
+labels. Red is for errors and deletions only, used sparingly.
+
+### Typography
+**Inter** globally — no decorative fonts. Headings semi-bold and clearly larger
+than body text; body text regular. A simple monospace (e.g. Courier) for code,
+technical blocks and inline variables.
+
+### Colour
+
+Greens — primary and actions:
+
+| Name | Value | Usage |
+| --- | --- | --- |
+| Light green background | `#f4fef2` | Selected tabs, chips, pills |
+| Arango green (main) | `#006532` | Primary buttons, checkmarks, links, active states |
+| Dark green hover | `#005329` | Hover on primary green buttons |
+| Brand green | `#007339` | Logo representations and charts |
+
+Grays — text and layout:
+
+| Name | Value | Usage |
+| --- | --- | --- |
+| Page background | `#ffffff` | Main content background |
+| Light gray background | `#f8f8f8` | Panels, tables, code blocks |
+| Borders | `#e5e5e5` | Subtle separators |
+| Body text | `#282828` | Paragraphs, labels, standard text |
+| Muted text | `#9a9a9a` | Helper text, hints, secondary info |
+
+Interface specifics:
+
+| Name | Value | Usage |
+| --- | --- | --- |
+| Error / delete | `#da1a20` | Error messages, destructive buttons |
+| Left menu | `#000000` | Narrow sidebar background |
+| Menu hover | white @ 15–20% opacity | Side-menu hover highlight |
+
+### Brand assets
+**Avocado icon** — the square mark only, used in the narrow left side menu or as
+the app icon. **Full logo** — Avocado plus the "ArangoDB" wordmark in dark text,
+only on white or pale pages.
+
+### Screen patterns
+
+**Home / AI Suite landing** — white or soft background image; title must read
+exactly `"Arango Agentic AI Suite"`; clean cards with short feature descriptions
+and prominent Arango Green `"Run"` buttons.
+
+**Chat interfaces (GraphRAG, Ada, …)** — white chat canvas; text input bounded by
+thin gray borders; Arango Green for send and success elements; responses rendered
+as clean markdown with headings, bullets and light-gray code boxes.
+
+**Forms and settings** — clean white background; readable dark-gray descriptive
+labels above or beside inputs; a primary Arango Green confirm button alongside a
+secondary gray cancel.
+
+**Data visualisations and graphs** — light gray workspace canvas; Arango Green
+accents for selected nodes and paths; nodes and text labels must stay legible
+against the canvas.

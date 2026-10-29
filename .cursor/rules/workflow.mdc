@@ -10,9 +10,14 @@ alwaysApply: true
 - When the PRD file itself is modified, requirements may have changed — recommend `/prd-sync`.
 - Never claim a requirement is implemented without a `file:line` reference.
 - A test is not an implementation.
-- If the implementation legitimately diverges from the PRD (obsolete or imprecise
-  requirement), propose a PRD patch (`prd_patches`, review_state `proposed`) — never
-  silently absorb the divergence, and never edit the PRD without user acceptance.
+- How a requirement gets written down depends on whether anything is in dispute
+  (`CLAUDE.md`, "PRD location"):
+  - **Shipping alongside the code:** edit the PRD row in the same change (or close
+    behind it) and name the PRD edit in the commit subject.
+  - **Everything else** (code that drifted from a requirement, a guarantee nobody
+    decided to make, an obsolete or imprecise requirement): propose a PRD patch
+    (`prd_patches`, review_state `proposed`) for the user to accept.
+  - Never edit the PRD silently, and never absorb a divergence without saying so.
 
 ## Before solving any non-trivial problem
 1. Search shared memory first via the `pattern-search` MCP tool (server-side hybrid
