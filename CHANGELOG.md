@@ -7,19 +7,41 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-10-29
+
+### Changed
+
+- **`csiVersion` follows the mappings (r2g-arango#39, PRD P12.14).** CSI 1.1
+  (arangodb-schema-analyzer 0.18.0, arango-sparql-py 0.5.0) adds `path` to a property
+  mapping, for a value inside a nested object. `export-csi` now derives the version with
+  `csi_version_for`: `"1.1"` only when some property mapping uses `path`, `"1"` otherwise.
+  r2g writes `field` only, so its output is unchanged and still says `"1"`; a later change
+  that emits `path` cannot keep the old version by accident.
+- **CSI property mappings hold only CSI 1.1's strict keys.** `field`, `path`, `type`,
+  `indexed`, `unique`, `required`, `role`, `sentinelValues`, `numericLike`,
+  `sampleValues`, or an `x-` key (`CSI_PROPERTY_MAPPING_KEYS`). A test generates CSI six
+  ways and fails if any property mapping holds another key.
+- **The vendored CSI schema follows the analyzer's 0.18.0 copy**, and the
+  `arangodb-schema-analyzer` floor in `[test]` and `[dev]` is `>=0.18.0`, so the drift
+  test compares against a release that has the 1.1 schema.
+
+## [0.8.1] — 2026-10-26
+
 ### Fixed
 
-- **A foreign-key column that repeats a plural table name no longer makes the class
-  plural (PRD P12.13).** 0.8.0 read `orders.customers_id` -> `customers` as the schema
+- **A foreign-key column that only repeats its table's name no longer names the class
+  (PRD P12.13).** 0.8.0 read `orders.customers_id` -> `customers` as the schema
   designer's word for one row, so a schema that names every key `<table>_id` got
-  `Customers` and `Orders` instead of `Customer` and `Order`. A column that only repeats
-  its table's name now counts only when the same schema names some other key with a
-  plural table's singular (`customer_id` -> `customers`) and no key repeats the name of a
-  table the dictionary does not list as a noun in its own right; `goods_id` -> `Goods`
-  still works there. A column that gives a different singular (`basis_id` -> `bases`
-  names `Basis`) is unaffected. **Output change only for schemas 0.8.0 got wrong**:
-  their classes return to the 0.7.0 names. Chinook, Northwind, Pagila and
-  contextual-data-fabric's committed schemas are unchanged.
+  `Customers` and `Orders` instead of `Customer` and `Order`. Nothing in one table tells
+  that habit from a designer calling one row "goods", so such a column is no longer
+  evidence at all, and a table's class name depends only on that table and the keys that
+  reference it. Evidence is now a column that names one row with a singular of its own
+  (`plans.basis_id` -> `bases` names `Basis`, where the singularizer gives `Base`).
+  **Output change**: classes 0.8.0 named from a repeated table name return to the
+  singularizer's name — `customers` -> `Customer` again, and also `goods` -> `Good`;
+  name such a table with a curated `identifier` (`"identifier": "Goods"`, P12.12).
+  Chinook, Northwind, Pagila and contextual-data-fabric's committed schemas are
+  unchanged.
 - **A collection two tables write to keeps the singularizer's class name**, instead of a
   name that depended on the order of the mapping.
 - **`export-csi` without `--schema` warns** that its class names can differ from
@@ -863,7 +885,9 @@ Initial phased implementation (not yet published to PyPI):
   pipeline, `r2g source dump` CLI, pure-Python FK inference with
   optional value-overlap sampler.
 
-[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/ArthurKeen/r2g-arango/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/ArthurKeen/r2g-arango/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/ArthurKeen/r2g-arango/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ArthurKeen/r2g-arango/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/ArthurKeen/r2g-arango/compare/v0.6.0...v0.6.1

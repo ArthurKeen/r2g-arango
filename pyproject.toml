@@ -1,6 +1,6 @@
 [project]
 name = "r2g-arango"
-version = "0.8.0"
+version = "0.8.2"
 description = "Project relational and structured data sources as a graph in ArangoDB."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -123,7 +123,7 @@ test = [
   "fakesnow>=0.11",
   # The singularizer cross-check (tests/test_naming_known_answers.py) tests ASA's copy
   # too; without ASA here it would skip in CI's test job (r2g-arango#30).
-  "arangodb-schema-analyzer>=0.17.0",
+  "arangodb-schema-analyzer>=0.18.0",
 ]
 dev = [
   "ruff>=0.4",
@@ -131,7 +131,7 @@ dev = [
   # Present so tests/test_csi.py::test_vendored_csi_schema_matches_installed_analyzer
   # runs in CI: the vendored CSI schema must not drift from the analyzer's
   # authoritative copy (contextual-data-fabric unified-architecture paper, step 2).
-  "arangodb-schema-analyzer>=0.17.0",
+  "arangodb-schema-analyzer>=0.18.0",
   # In-process Snowflake emulator, so tests/test_cli_suggest_keys.py runs the
   # suggest -> review -> snapshot loop end to end in CI without an account.
   "fakesnow>=0.11",
