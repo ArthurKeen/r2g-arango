@@ -17,7 +17,8 @@ expressions, extra labels, collection type, join tables, shared keys, the naming
 or the graph layout.
 
 Loads and migrations are checked on what they write: each table whose rows they write, on its
-class, and each relationship, on its start table's class.
+class, and each relationship, on its start table's class; a load that drops its collections,
+on everything each dropped collection holds.
 """
 
 from __future__ import annotations
@@ -123,19 +124,31 @@ def save_changes(saved: MappingConfig | None, new: MappingConfig) -> list[Item]:
 
 
 def load_items(config: MappingConfig, include: Iterable[str] | None = None,
-               exclude: Iterable[str] | None = None) -> list[Item]:
+               exclude: Iterable[str] | None = None, *, drop: bool = False) -> list[Item]:
     """What a load writes: each table it loads, and each relationship starting from one,
-    filtered as the load filters them (by source table)."""
+    filtered as the load filters them (by source table). A load that drops its collections
+    first also removes what every other table wrote there, so with ``drop`` each collection
+    it drops is checked on everything that collection holds (in the labelled-property-graph
+    layout, the shared collections: every class)."""
     inc = None if include is None else set(include)
     exc = set(exclude or ())
 
     def loads(table: str) -> bool:
         return (inc is None or table in inc) and table not in exc
 
-    items = [Item(f"collections/{key}", (c.term,), ("load",))
-             for key, c in sorted(config.collections.items()) if loads(c.source_table)]
+    tables = [(key, c) for key, c in sorted(config.collections.items()) if loads(c.source_table)]
+    edges = [e for e in config.edges if loads(e.from_collection)]
+    items = [Item(f"collections/{key}", (c.term,), ("load",)) for key, c in tables]
     items += [Item(edge_where(e), start_classes(config, e.from_collection), ("load",))
-              for e in config.edges if loads(e.from_collection)]
+              for e in edges]
+    if drop:
+        if config.graph_layout == "lpg":  # dropped whatever the load includes
+            dropped = {config.lpg.node_collection, config.lpg.edge_collection}
+        else:
+            dropped = {c.target_collection for _, c in tables} | {e.edge_collection
+                                                                  for e in edges}
+        items += [Item(f"collections/{name}", written_by(name, config), ("drop",))
+                  for name in sorted(dropped)]
     return items
 
 

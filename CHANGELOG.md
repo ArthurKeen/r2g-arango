@@ -22,8 +22,14 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every saved mapping version is kept under `projects/<name>/versions/`, named by its
   hash. Of the 30 change routes, 5 are governed, 14 store nothing and are served, and 11
   are refused saying why (sources, targets and catalogs, deleting the project, demo
-  presets, governance files); any other is refused by default. Creating a project no
-  longer reads a mapping file outside the tenant's catalog folder. r2g declares
+  presets, governance files); any other is refused by default. A load that drops its
+  collections is checked on everything those collections hold, so in the graph layout with
+  shared collections, on every class. Creating a project no longer reads a mapping file
+  outside the tenant's catalog folder or inside another project's folder, and a project
+  that starts from a folder left by a deleted one is checked on that folder's mapping.
+  Suggesting an ontology no longer reads the server's environment for a request: a
+  `$VAR` API key is refused, and so is a `base_url` without the request's own key, which
+  would otherwise receive the server's key. r2g declares
   `mapping.update`, `data.load` and `data.migrate` (each taking a class optionally) and
   `transformation.update`, which need the control plane's SDK with optional terms.
   Without `CONTROL_PLANE_URL` nothing changes.

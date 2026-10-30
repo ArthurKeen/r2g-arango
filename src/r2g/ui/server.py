@@ -1011,9 +1011,20 @@ def create_app(
                 p = Path(body.mapping_config_path).expanduser()
                 # Under a control plane only the tenant's own files are read: the server
                 # holds every tenant's catalog.
-                inside = p.resolve().is_relative_to(catalog.dir.expanduser().resolve())
+                # Nor another transformation project's files, which P14.3 does not show.
+                r = p.resolve()
+                inside = (r.is_relative_to(catalog.dir.expanduser().resolve())
+                          and (not r.is_relative_to(_projects_root.resolve())
+                               or r.is_relative_to((_projects_root / body.name).resolve())))
                 if p.is_file() and (inside or not governed):
                     seed = ConfigManager.load_config(p)
+            except Exception:
+                seed = MappingConfig()
+        if governed and safe_path.is_file():
+            # A folder left by a project deleted outside the Studio: its mapping, not the
+            # seed, is what the project starts with, so that is what is checked.
+            try:
+                seed = ConfigManager.load_config(safe_path)
             except Exception:
                 seed = MappingConfig()
         details = governing.Item("project", (None,), ("added",))
@@ -1587,6 +1598,24 @@ def create_app(
             "summary": report.summary(),
         }
 
+    def _suggestion_key(body: Any) -> str | None:
+        """The API key a suggestion is made with. A ``$VAR`` key names one of the server's
+        environment variables. Under a control plane, where the caller is any user with a
+        context, the server's environment is not read on a request's behalf: no ``$VAR``,
+        and no ``base_url`` without the request's own key, since the provider would send
+        the server's key there (P14.12)."""
+        if not governed:
+            return _resolve_env_ref(body.api_key) if body.api_key else None
+        if body.api_key and body.api_key.startswith("$"):
+            raise HTTPException(status_code=403, detail=(
+                "Not available under the control plane: an API key may not name the "
+                "server's environment; pass the key itself"))
+        if body.base_url and not body.api_key:
+            raise HTTPException(status_code=403, detail=(
+                "Not available under the control plane: an address of the request's "
+                "choosing needs the request's own API key"))
+        return body.api_key or None
+
     @app.post("/api/projects/{name}/suggest-ontology")
     async def suggest_ontology(name: str, body: SuggestOntologyRequest):
         """Ask an LLM to propose a richer ontology (Phase 10b). Read-only.
@@ -1620,7 +1649,7 @@ def create_app(
         if engine_norm == "rsa":
             from r2g.rsa_ontology import propose_ontology_from_schema
 
-            resolved_key = _resolve_env_ref(body.api_key) if body.api_key else None
+            resolved_key = _suggestion_key(body)
             rsa_provider = body.provider if body.refine else None
             try:
                 proposal, rsa_meta = propose_ontology_from_schema(
@@ -1707,7 +1736,7 @@ def create_app(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        resolved_key = _resolve_env_ref(body.api_key) if body.api_key else None
+        resolved_key = _suggestion_key(body)
         params = {"base_url": body.base_url} if body.base_url else None
         try:
             llm = create_llm_provider(
@@ -1833,7 +1862,8 @@ def create_app(
             if body.emit_governance:
                 raise HTTPException(status_code=403, detail=governing.classify(
                     "POST", f"/api/projects/{name}/governance/emit")[1])
-            written = load_items(config, body.include_tables, body.exclude_tables)
+            written = load_items(config, body.include_tables, body.exclude_tables,
+                                 drop=body.drop_collections)
             g = await _govern(request, name, "data.load", written)
 
         # Phase 9b governance gate: exclude above-threshold, unmasked fields by

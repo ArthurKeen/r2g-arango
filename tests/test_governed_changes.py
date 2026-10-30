@@ -629,3 +629,88 @@ def test_only_declared_actions_are_asked(studio, cp, no_database):
     assert {a for _, a, _ in cp.asked} <= set(control_plane.ACTIONS)
     assert {a for _, a, _ in cp.asked} == {"mapping.update", "data.load",
                                            "transformation.update"}
+
+
+# --- found in review: what a load drops, seeds from another project, the server's keys ------
+
+
+def test_a_load_that_drops_its_collections_is_checked_on_everything_they_hold():
+    lpg = mapping({**library(), "graph_layout": "lpg"})
+    dropped = [i for i in load_items(lpg, include=["authors"], drop=True) if "drop" in i.what]
+    assert {i.where for i in dropped} == {f"collections/{lpg.lpg.node_collection}",
+                                          f"collections/{lpg.lpg.edge_collection}"}
+    assert BOOK in dropped[0].terms + dropped[1].terms
+    # Positive control: in its own collection a table's drop is checked on its class only.
+    own = [i for i in load_items(mapping(), include=["authors"], drop=True) if "drop" in i.what]
+    assert [(i.where, i.terms) for i in own] == [("collections/authors", (AUTHOR,))]
+    assert not [i for i in load_items(lpg, include=["authors"]) if "drop" in i.what]
+
+
+def test_an_analyst_may_not_drop_what_other_classes_wrote(studio, cp, no_database, tmp_path):
+    path = tmp_path / "projects" / "library-catalog" / "mapping.yaml"
+    path.write_text(yaml.safe_dump({**library(), "graph_layout": "lpg"}))
+    body = {"include_tables": ["authors"], "drop_collections": True}
+    r = studio.post("/api/projects/library-catalog/load", headers=as_(ANALYST), json=body)
+    assert r.status_code == 403, r.text
+    assert BOOK in {x["term"] for x in r.json()["detail"]["refused"]}
+    # Positive control: the same load that drops nothing is permitted.
+    r = studio.post("/api/projects/library-catalog/load", headers=as_(ANALYST),
+                    json={"include_tables": ["authors"]})
+    assert r.status_code == 202, r.text
+
+
+def test_creating_reads_no_mapping_from_another_projects_folder(cp, tmp_path):
+    catalog_dir = tmp_path / "local"
+    catalog = CatalogManager(catalog_dir)
+    catalog.add_source("library-csv", "csv", str(tmp_path))
+    other = catalog_dir / "projects" / "payroll" / "mapping.yaml"
+    other.parent.mkdir(parents=True)
+    other.write_text(yaml.safe_dump(library()))
+    catalog.create_project("payroll", "library-csv", str(other))
+    client = TestClient(create_app(catalog_dir=str(catalog_dir), host="0.0.0.0"))
+    body = {"name": "library-catalog", "source_name": "library-csv",
+            "mapping_config_path": str(other), "arango_database": "library"}
+    assert client.post("/api/projects", headers=as_(OWNER), json=body).status_code == 201
+    r = client.get("/api/projects/library-catalog/mapping", headers=as_(OWNER))
+    assert r.json()["collections"] == {}
+
+
+@pytest.mark.parametrize("extra", [
+    {"api_key": "$R2G_REVIEW_SECRET", "base_url": "http://collector.test/v1"},
+    {"api_key": "$R2G_REVIEW_SECRET"},
+    {"base_url": "http://collector.test/v1"},  # the server's own key would go there
+])
+def test_a_suggestion_does_not_read_the_servers_environment(studio, monkeypatch, extra):
+    import r2g.llm
+
+    monkeypatch.setenv("R2G_REVIEW_SECRET", "s3cret")
+    monkeypatch.setenv("OPENAI_API_KEY", "server-key")
+    sent: list[Any] = []
+
+    def provider(kind: str, **kw: Any) -> Any:
+        sent.append(kw)
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(r2g.llm, "create_llm_provider", provider)
+    r = studio.post("/api/projects/library-catalog/suggest-ontology", headers=as_(ANALYST),
+                    json={"provider": "openai", **extra})
+    assert r.status_code == 403 and sent == [], r.text
+    # Positive control: the request's own key, to the address it names, is passed on.
+    r = studio.post("/api/projects/library-catalog/suggest-ontology", headers=as_(ANALYST),
+                    json={"provider": "openai", "api_key": "own-key",
+                          "base_url": "http://collector.test/v1"})
+    assert r.status_code == 400 and sent[-1]["api_key"] == "own-key"
+
+
+def test_a_project_starting_from_a_left_over_mapping_is_checked_on_it(cp, tmp_path):
+    catalog_dir = tmp_path / "local"
+    CatalogManager(catalog_dir).add_source("library-csv", "csv", str(tmp_path))
+    left = catalog_dir / "projects" / "library-catalog" / "mapping.yaml"
+    left.parent.mkdir(parents=True)
+    left.write_text(yaml.safe_dump(library()))  # a project deleted outside the Studio
+    client = TestClient(create_app(catalog_dir=str(catalog_dir), host="0.0.0.0"))
+    body = {"name": "library-catalog", "source_name": "library-csv",
+            "arango_database": "library"}
+    assert client.post("/api/projects", headers=as_(OWNER), json=body).status_code == 201
+    assert "library-catalog/collections/books" in {
+        e.entity for _, e in cp.recorded if e.action == "mapping.update"}
