@@ -38,6 +38,31 @@ class TestSchemaSerializationRoundTrip:
         assert id_col.is_primary_key is True
         assert id_col.is_nullable is False
 
+    def test_round_trip_keeps_a_non_default_sql_schema(self, tmp_path):
+        path = str(tmp_path / "schema.json")
+        Schema(tables={"orders": Table(name="orders", columns=[], schema_name="sales")}
+               ).save_to_file(path)
+        assert Schema.load_from_file(path).tables["orders"].schema_name == "sales"
+
+    @pytest.mark.parametrize("schema_name", [None, "public"])
+    def test_default_sql_schema_is_not_written(self, schema_name):
+        table = Table(name="orders", columns=[], schema_name=schema_name)
+        assert "schema_name" not in table.model_dump()
+
+
+class TestQualifiedName:
+    @pytest.mark.parametrize("schema_name", [None, "public"])
+    def test_default_schema_keeps_the_bare_name(self, schema_name):
+        assert Table(name="orders", columns=[], schema_name=schema_name).qualified_name() == "orders"
+
+    def test_other_schema_is_delimited_and_qualified(self):
+        table = Table(name="StockItems", columns=[], schema_name="Warehouse")
+        assert table.qualified_name() == '"Warehouse"."StockItems"'
+
+    def test_embedded_double_quote_is_doubled(self):
+        table = Table(name='odd"name', columns=[], schema_name='s"x')
+        assert table.qualified_name() == '"s""x"."odd""name"'
+
 
 class TestMappingConfigSerializationRoundTrip:
     def test_save_and_load_preserves_config(self, tmp_path):

@@ -63,6 +63,12 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`apiFetch` keeps the auth header when a caller passes its own headers**, and the
   expression editor's three direct `fetch` calls now send it.
 
+- **R2RML names a Postgres table's schema outside `public`.** `rr:tableName` was written
+  bare, and Ontop resolves a bare name in the connection's first schema only, so a
+  mapping over tables in two or more schemas failed at start-up. A Postgres source read
+  with `--pg-schema X` (not `public`) now writes `schema_name` in its snapshot and
+  `"X"."table"` in its R2RML. `public`-only snapshots and mappings are unchanged.
+
 ## [0.8.2] — 2026-10-29
 
 ### Changed

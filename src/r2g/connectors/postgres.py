@@ -262,6 +262,7 @@ class PostgresConnector:
             columns=columns,
             primary_key=pks,
             foreign_keys=fks,
+            schema_name=self.schema_name,
         )
 
 

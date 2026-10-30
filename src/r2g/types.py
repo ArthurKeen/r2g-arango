@@ -14,6 +14,10 @@ from relational_schema_analyzer.types import Table as _RsaTable
 # built from FK data) and must never be renamed or used as a mapping target.
 RESERVED_ATTRIBUTES: frozenset[str] = frozenset({"_id", "_key", "_rev", "_from", "_to"})
 
+# PostgreSQL's default schema: on every connection's default search path, so a
+# table there is named bare and its snapshot does not record it.
+DEFAULT_SQL_SCHEMA = "public"
+
 
 # ``ForeignKey`` is re-exported from ``relational_schema_analyzer.types`` (imported
 # above). RSA's ForeignKey is a superset of r2g's original — identical fields,
@@ -87,9 +91,10 @@ class Column(_RsaColumn):
 class Table(_RsaTable):
     """Physical table: the shared RSA table narrowed to r2g's :class:`Column`.
 
-    Serializes to r2g's historical key set (dropping RSA's ``schema_name`` /
-    ``comment`` / ``is_view`` / constraint / index enrichment and the ``extra``
-    passthrough) for byte-stable snapshots.
+    Serializes to r2g's historical key set (dropping RSA's ``comment`` /
+    ``is_view`` / constraint / index enrichment and the ``extra`` passthrough)
+    for byte-stable snapshots. ``schema_name`` is kept only outside
+    :data:`DEFAULT_SQL_SCHEMA` (see :meth:`qualified_name`).
     """
 
     # Narrowing the inherited RSA field to r2g's Column subclass (safe: every
@@ -114,7 +119,27 @@ class Table(_RsaTable):
         # i.e. every snapshot persisted before this -- stays byte-identical.
         if full.get("unique_constraints"):
             out["unique_constraints"] = full["unique_constraints"]
+        # The SQL schema a table lives in, so a reloaded snapshot still names it
+        # (R2RML's rr:tableName needs it). Written last and only outside the
+        # default schema, so every snapshot of a `public`-only source -- and every
+        # snapshot persisted before this -- stays byte-identical.
+        if full.get("schema_name") not in (None, DEFAULT_SQL_SCHEMA):
+            out["schema_name"] = full["schema_name"]
         return out
+
+    def qualified_name(self) -> str:
+        """The table's SQL name, schema-qualified outside :data:`DEFAULT_SQL_SCHEMA`.
+
+        Each part is a delimited identifier (``"sales"."orders"``), so the name
+        resolves without depending on the connection's search path and keeps its
+        case. A table in the default schema, or with no recorded schema, keeps its
+        bare name, as before.
+        """
+        if self.schema_name in (None, DEFAULT_SQL_SCHEMA):
+            return self.name
+        return ".".join(
+            '"' + part.replace('"', '""') + '"' for part in (self.schema_name, self.name)
+        )
 
     @model_validator(mode="after")
     def _derive_column_uniqueness(self) -> "Table":

@@ -227,6 +227,26 @@ def test_no_primary_key_falls_back_to_all_columns():
     assert "no primary key" in ttl  # the explanatory note
 
 
+def test_table_outside_public_is_schema_qualified():
+    # Ontop resolves a bare rr:tableName in the connection's first schema only, so
+    # a mapping over tables in two schemas must name each one's schema.
+    schema = _schema()
+    schema.tables["users"].schema_name = "application"
+    schema.tables["orders"].schema_name = "sales"
+    g = _parse(mapping_to_r2rml(_config(), schema))
+    tms = _triples_maps(g)
+    names = {e: str(g.value(g.value(tms[e], RR.logicalTable), RR.tableName)) for e in ("User", "Order")}
+    assert names == {"User": '"application"."users"', "Order": '"sales"."orders"'}
+
+
+def test_table_in_public_keeps_its_bare_name():
+    schema = _schema()
+    schema.tables["users"].schema_name = "public"
+    g = _parse(mapping_to_r2rml(_config(), schema))
+    lt = g.value(_triples_maps(g)["User"], RR.logicalTable)
+    assert str(g.value(lt, RR.tableName)) == "users"
+
+
 def test_concept_base_default_matches_aql_leg():
     # The AQL leg (arango-sparql-py) synthesizes concepts under this namespace;
     # both legs must agree so a federated SPARQL query means the same thing.
