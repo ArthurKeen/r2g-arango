@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any, List, Literal, Optional
 from urllib.parse import unquote_plus
 
-from fastapi import FastAPI, HTTPException, Request
+import yaml
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,6 +22,7 @@ from starlette._utils import get_route_path  # what the router matches on (Starl
 from starlette.concurrency import run_in_threadpool
 
 from r2g import control_plane
+from r2g import governed as governing
 from r2g.catalog import CatalogManager, validate_project_name
 from r2g.config import ConfigManager, validate_config
 from r2g.connectors.arango_writer import ArangoWriter
@@ -164,6 +166,9 @@ def _add_control_plane_auth(app: FastAPI, *, cors: bool) -> None:
         if m and m.group(1) != project.opens:  # scope['path'] is already decoded
             # Another project is not visible here, the way a foreign one is not found.
             return JSONResponse({"detail": "Project not found"}, status_code=404)
+        kind, why = governing.classify(request.method, path)
+        if kind == "refused":  # P14.12: not governed, so not available here
+            return JSONResponse({"detail": why}, status_code=403)
         request.state.cp_identity = identity
         request.state.cp_project = project
         return await call_next(request)
@@ -231,6 +236,22 @@ def create_app(
     # A load's rejected rows, kept with the catalog (so per tenant under a control plane)
     # and per project, so one project's errors are never read through another's route.
     _dlq_root = catalog.dir.expanduser() / "dlq"
+    # Under a control plane, the project's history is sent through a queue kept with the
+    # catalog, so per tenant (P14.11), and resent by a worker until delivered.
+    outbox = governing.Outbox(catalog.dir.expanduser() / "control_plane_outbox")
+    if governed:
+        outbox.start_worker()
+    _save_locks: dict[str, threading.Lock] = {}
+
+    async def _govern(request: Request, name: str, action: str,
+                      items: list[Any]) -> governing.Governed:
+        """Ask the policy about every part a change touches; 403, saying which and why, if
+        any is refused (P14.9, P14.10)."""
+        try:
+            return await run_in_threadpool(governing.govern, outbox,
+                                           request.state.cp_identity, name, action, items)
+        except governing.Refused as exc:
+            raise HTTPException(status_code=403, detail=exc.detail())
 
     def _dead_letters(name: str, load_id: str) -> Any:
         """The rejected rows of project ``name``'s load ``load_id``: the one place both the
@@ -973,7 +994,8 @@ def create_app(
         return project.model_dump()
 
     @app.post("/api/projects", status_code=201)
-    async def create_project(body: ProjectCreateRequest, request: Request):
+    async def create_project(body: ProjectCreateRequest, request: Request,
+                             background: BackgroundTasks):
         _only_the_one_it_opens(request, body.name)
         try:
             validate_project_name(body.name)
@@ -987,10 +1009,34 @@ def create_app(
         if body.mapping_config_path:
             try:
                 p = Path(body.mapping_config_path).expanduser()
-                if p.is_file():
+                # Under a control plane only the tenant's own files are read: the server
+                # holds every tenant's catalog.
+                # Nor another transformation project's files, which P14.3 does not show.
+                r = p.resolve()
+                inside = (r.is_relative_to(catalog.dir.expanduser().resolve())
+                          and (not r.is_relative_to(_projects_root.resolve())
+                               or r.is_relative_to((_projects_root / body.name).resolve())))
+                if p.is_file() and (inside or not governed):
                     seed = ConfigManager.load_config(p)
             except Exception:
                 seed = MappingConfig()
+        if governed and safe_path.is_file():
+            # A folder left by a project deleted outside the Studio: its mapping, not the
+            # seed, is what the project starts with, so that is what is checked.
+            try:
+                seed = ConfigManager.load_config(safe_path)
+            except Exception:
+                seed = MappingConfig()
+        details = governing.Item("project", (None,), ("added",))
+        g = seeded = None
+        seed_items: list[Any] = []
+        if governed:  # the project, and the mapping it starts with as if saved (P14.9)
+            from r2g.mapping_changes import save_changes
+
+            g = await _govern(request, body.name, "transformation.update", [details])
+            seed_items = save_changes(None, seed)
+            if seed_items:
+                seeded = await _govern(request, body.name, "mapping.update", seed_items)
         try:
             project = catalog.create_project(
                 name=body.name,
@@ -1008,21 +1054,34 @@ def create_app(
                 ConfigManager.save_config(seed, str(safe_path))
             except Exception as e:
                 raise HTTPException(status_code=500, detail=_safe_detail(e))
+        if g is not None:
+            g.record(details, background=background)
+        if seeded is not None:
+            after = governing.keep_version(_projects_root / body.name,
+                                           safe_path.read_text(encoding="utf-8"))
+            for item in seed_items:
+                seeded.record(item, after=after, background=background)
         return project.model_dump()
 
     @app.patch("/api/projects/{name}")
-    async def update_project_metadata(name: str, body: ProjectUpdateRequest):
+    async def update_project_metadata(name: str, body: ProjectUpdateRequest, request: Request,
+                                      background: BackgroundTasks):
         """Update editable project metadata (mapping name / description)."""
         if catalog.get_project(name) is None:
             raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
         fields = {k: v for k, v in body.model_dump(exclude_none=True).items()}
         if not fields:
             raise HTTPException(status_code=400, detail="No updatable fields provided")
+        details = governing.Item("project", (None,), tuple(sorted(fields)))
+        g = await _govern(request, name, "transformation.update", [details]) \
+            if governed else None
         try:
             project = catalog.update_project(name, **fields)
-            return project.model_dump()
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
+        if g is not None:
+            g.record(details, background=background)
+        return project.model_dump()
 
     @app.delete("/api/projects/{name}")
     async def delete_project(name: str):
@@ -1062,8 +1121,40 @@ def create_app(
         if unknown:
             raise HTTPException(status_code=400, detail="; ".join(unknown))
 
+    def _governed_save(identity: control_plane.Identity, background: BackgroundTasks,
+                       name: str, project: Any, config: MappingConfig) -> dict[str, Any]:
+        """P14.9 and P14.11: compare the new mapping with the saved one in full, ask about
+        every difference before writing, then keep both versions and record each part
+        changed. One save per project at a time, so none overwrites changes it did not
+        check."""
+        from r2g.mapping_changes import save_changes
+
+        path = Path(project.mapping_config_path)
+        text = ConfigManager.dump_config(config)
+        written = MappingConfig.model_validate(yaml.safe_load(text) or {})  # as it will read
+        with _save_locks.setdefault(name, threading.Lock()):
+            saved_text = path.read_text(encoding="utf-8") if path.is_file() else None
+            try:
+                saved = None if saved_text is None else ConfigManager.load_config(path)
+            except Exception:
+                saved = None  # unreadable: every part of the new mapping is checked
+            items = save_changes(saved, written)
+            g = governing.govern(outbox, identity, name, "mapping.update", items) if items \
+                else None
+            versions = _projects_root / name
+            before = governing.keep_version(versions, saved_text) if saved_text else None
+            ConfigManager.save_config(config, path)
+            catalog.touch_project(name)
+            after = governing.keep_version(versions, text)
+            for item in items:
+                assert g is not None
+                g.record(item, before=before, after=after, background=background)
+        return {"saved": True, "collections": len(config.collections),
+                "edges": len(config.edges), "changes": [i.where for i in items]}
+
     @app.put("/api/projects/{name}/mapping")
-    async def save_mapping(name: str, body: dict[str, Any], request: Request):
+    async def save_mapping(name: str, body: dict[str, Any], request: Request,
+                           background: BackgroundTasks):
         project = catalog.get_project(name)
         if project is None:
             raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
@@ -1073,6 +1164,11 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(e))
         if governed:
             await _check_ontology_terms(request, project, config)
+            try:
+                return await run_in_threadpool(_governed_save, request.state.cp_identity,
+                                               background, name, project, config)
+            except governing.Refused as exc:
+                raise HTTPException(status_code=403, detail=exc.detail())
         try:
             ConfigManager.save_config(config, project.mapping_config_path)
             catalog.touch_project(name)
@@ -1290,7 +1386,8 @@ def create_app(
         return {"loaded": True, "loaded_at": str(getattr(project, "loaded_at", "")), "plan": plan.model_dump()}
 
     @app.post("/api/projects/{name}/migrate")
-    async def migrate(name: str, body: MigrateRequest):
+    async def migrate(name: str, body: MigrateRequest, request: Request,
+                      background: BackgroundTasks):
         """Apply mapping changes to an already-loaded database in place.
 
         Renames document/edge collections, reloads edges whose endpoints moved,
@@ -1318,6 +1415,12 @@ def create_app(
         plan = diff_mappings(old_config, new_config, snap.schema_data)
         if not plan.actions:
             return {"migrated": True, "report": {"actions_executed": [], "actions_skipped": [], "errors": []}}
+        g, written = None, []
+        if governed:  # P14.10: every collection it writes, on what that collection holds
+            from r2g.mapping_changes import migration_items
+
+            written = migration_items(plan.actions, old_config, new_config)
+            g = await _govern(request, name, "data.migrate", written)
 
         arango_endpoint, arango_database, arango_username, arango_password = _resolve_target(project)
         if (arango_database or "").strip().lower() == "_system":
@@ -1360,6 +1463,9 @@ def create_app(
         report = reloader.execute(dry_run=body.dry_run)
         if not body.dry_run and not report.errors:
             catalog.set_loaded_mapping(name, new_config.model_dump())
+        if g is not None and not body.dry_run:  # a dry run changes nothing to record
+            for item in written:
+                g.record(item, background=background)
         return {
             "migrated": not body.dry_run and not report.errors,
             "report": {
@@ -1492,6 +1598,24 @@ def create_app(
             "summary": report.summary(),
         }
 
+    def _suggestion_key(body: Any) -> str | None:
+        """The API key a suggestion is made with. A ``$VAR`` key names one of the server's
+        environment variables. Under a control plane, where the caller is any user with a
+        context, the server's environment is not read on a request's behalf: no ``$VAR``,
+        and no ``base_url`` without the request's own key, since the provider would send
+        the server's key there (P14.12)."""
+        if not governed:
+            return _resolve_env_ref(body.api_key) if body.api_key else None
+        if body.api_key and body.api_key.startswith("$"):
+            raise HTTPException(status_code=403, detail=(
+                "Not available under the control plane: an API key may not name the "
+                "server's environment; pass the key itself"))
+        if body.base_url and not body.api_key:
+            raise HTTPException(status_code=403, detail=(
+                "Not available under the control plane: an address of the request's "
+                "choosing needs the request's own API key"))
+        return body.api_key or None
+
     @app.post("/api/projects/{name}/suggest-ontology")
     async def suggest_ontology(name: str, body: SuggestOntologyRequest):
         """Ask an LLM to propose a richer ontology (Phase 10b). Read-only.
@@ -1525,7 +1649,7 @@ def create_app(
         if engine_norm == "rsa":
             from r2g.rsa_ontology import propose_ontology_from_schema
 
-            resolved_key = _resolve_env_ref(body.api_key) if body.api_key else None
+            resolved_key = _suggestion_key(body)
             rsa_provider = body.provider if body.refine else None
             try:
                 proposal, rsa_meta = propose_ontology_from_schema(
@@ -1612,7 +1736,7 @@ def create_app(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        resolved_key = _resolve_env_ref(body.api_key) if body.api_key else None
+        resolved_key = _suggestion_key(body)
         params = {"base_url": body.base_url} if body.base_url else None
         try:
             llm = create_llm_provider(
@@ -1708,7 +1832,8 @@ def create_app(
         }
 
     @app.post("/api/projects/{name}/load", status_code=202)
-    async def start_load(name: str, body: LoadRequest):
+    async def start_load(name: str, body: LoadRequest, request: Request,
+                         background: BackgroundTasks):
         project = catalog.get_project(name)
         if project is None:
             raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
@@ -1729,6 +1854,17 @@ def create_app(
         issues = validate_config(snap.schema_data, config)
         if issues:
             raise HTTPException(status_code=400, detail={"validation_errors": issues})
+
+        g, written = None, []
+        if governed:  # P14.10: every table and relationship it writes, on its class
+            from r2g.mapping_changes import load_items
+
+            if body.emit_governance:
+                raise HTTPException(status_code=403, detail=governing.classify(
+                    "POST", f"/api/projects/{name}/governance/emit")[1])
+            written = load_items(config, body.include_tables, body.exclude_tables,
+                                 drop=body.drop_collections)
+            g = await _govern(request, name, "data.load", written)
 
         # Phase 9b governance gate: exclude above-threshold, unmasked fields by
         # default (unless the caller opts in with allow_sensitive). Advisory — the
@@ -1886,6 +2022,11 @@ def create_app(
         _running_loads[load_id] = {"thread": thread, "queue": progress_queue, "pipeline": pipeline,
                                    "project": name}
         thread.start()
+        if g is not None and not body.dry_run:
+            # Recorded when it starts (P14.10): a load may outlast the user's context, so
+            # its outcome stays in r2g's load history.
+            for item in written:
+                g.record(item, after=f"{name}/loads/{load_id}", background=background)
 
         return {
             "load_id": load_id,

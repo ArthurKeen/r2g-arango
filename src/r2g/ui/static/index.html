@@ -1496,6 +1496,17 @@ async function apiFetch(path, opts = {}) {
   return res.json();
 }
 
+// What a failed call says: the API's detail, or under a control plane a refusal's message
+// (which part of the change was refused, and why).
+function errorDetail(e) {
+  try {
+    const d = JSON.parse(e.message).detail;
+    if (typeof d === 'string') return d;
+    if (d && d.message) return d.message;
+  } catch (_) {}
+  return e.message || 'Unknown error';
+}
+
 function toast(msg, type = 'info') {
   const el = document.createElement('div');
   el.className = `toast ${type}`;
@@ -7963,7 +7974,8 @@ async function executeLoad() {
         html += '<div class="prop-group"><div class="prop-group-title">Next steps</div><div style="color:var(--text-muted);font-size:12px">Fix the mapping or re-introspect the source schema, then try again.</div></div>';
         openModal('Cannot start load', html);
         return;
-      } else detail = JSON.stringify(parsed.detail);
+      } else if (parsed.detail.message) detail = parsed.detail.message;
+      else detail = JSON.stringify(parsed.detail);
     }
     let html = '<div class="prop-group"><div class="prop-group-title">The load did not start</div>';
     html += `<pre style="white-space:pre-wrap;word-break:break-word;color:var(--red);font-size:12px;margin:0">${escHtml(detail)}</pre></div>`;
@@ -7990,7 +8002,7 @@ async function saveMapping() {
     openFloatingCard({
       id: 'save-failed',
       title: 'Save failed',
-      body: `<div style="color:var(--red);font-size:12px"><strong>${escHtml(e.message || 'Unknown error')}</strong></div>
+      body: `<div style="color:var(--red);font-size:12px"><strong>${escHtml(errorDetail(e))}</strong></div>
              <div style="margin-top:8px;color:var(--text-muted);font-size:11px">Check the project name, schema snapshot, and server logs.</div>`,
       status: { kind: 'failed', label: 'Error' },
       position: { right: 20, bottom: 100 },
