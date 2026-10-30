@@ -53,6 +53,13 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Studio no longer drops mapping settings it has no editor for.** Opening a
+  project builds the editor from `/graph-data`, whose copy of the mapping left out the
+  graph layout and its LPG settings and each collection's `extra_labels`; the page also
+  never sent `naming_convention`. One reopen and save turned an LPG mapping back into the
+  default layout without its extra labels, and lost the naming convention. All of them
+  now go both ways.
+
 - **`apiFetch` keeps the auth header when a caller passes its own headers**, and the
   expression editor's three direct `fetch` calls now send it.
 
