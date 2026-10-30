@@ -9,6 +9,25 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Under a control plane, the Studio's changes are checked and recorded (PRD
+  P14.9–P14.13).** Saving a mapping compares it with the saved one in full (every field
+  of every table and relationship, and every mapping-wide setting) and asks the control
+  plane's policy about each difference before writing anything: a table on its class, a
+  column on its table's class, a relationship on its start table's class, a class change
+  on both classes, and anything naming no class on the project-wide rules. If any part is
+  refused the save is refused whole (403), saying which part and why. Loads and
+  migrations are checked on every table and relationship they write. Each change and
+  each refusal goes into the project's history through a queue in the tenant's catalog
+  folder, resent under the same id until delivered or until the user's context expires;
+  every saved mapping version is kept under `projects/<name>/versions/`, named by its
+  hash. Of the 30 change routes, 5 are governed, 14 store nothing and are served, and 11
+  are refused saying why (sources, targets and catalogs, deleting the project, demo
+  presets, governance files); any other is refused by default. Creating a project no
+  longer reads a mapping file outside the tenant's catalog folder. r2g declares
+  `mapping.update`, `data.load` and `data.migrate` (each taking a class optionally) and
+  `transformation.update`, which need the control plane's SDK with optional terms.
+  Without `CONTROL_PLANE_URL` nothing changes.
+
 - **Mapping elements name the ontology term they stand for (PRD P14.8).** A table may
   name a class (`term`), each source column a property (`field_terms`), and a
   relationship a property (`term`), as absolute IRIs kept in the mapping file. They are
