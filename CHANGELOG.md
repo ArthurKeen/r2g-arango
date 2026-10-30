@@ -9,10 +9,31 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mapping elements name the ontology term they stand for (PRD P14.8).** A table may
+  name a class (`term`), each source column a property (`field_terms`), and a
+  relationship a property (`term`), as absolute IRIs kept in the mapping file. They are
+  optional and omitted while unset, so existing mappings are written byte-identically.
+  Under a control plane the Studio offers the project ontology's classes and properties,
+  read from AOE (every page of classes, then the properties), and a save that names a new
+  or changed term is refused (400) unless the term is in the project ontology, of the
+  right kind; when the ontology cannot be read, such a save is refused (503) rather than
+  written unchecked. A term already saved is not checked again. The page carries every
+  term in any mode, including in the copy of the mapping it opens a project with
+  (`/graph-data`), so a save never drops them. `control_plane.ontology_classes` is
+  replaced by `ontology_terms`, and `/api/control-plane/context` lists properties too.
+  Without `CONTROL_PLANE_URL` nothing reads the terms.
+
 - **The Studio can run as a tool of a context-and-governance control plane (r2g-arango#44, PRD
-  P14.1–P14.7).** With `CONTROL_PLANE_URL` set, every `/api` call needs the control
-  plane's signed context token, verified offline by its SDK (imported only in this
-  mode); `R2G_API_TOKEN` is not used. Only the transformation project the control-plane
+  P14.1–P14.7).** With `CONTROL_PLANE_URL` set, every call except the page, its
+  assets, `/api/health`, `/api/mode` and (with `R2G_CORS_ORIGINS` set) a CORS preflight
+  needs the control plane's
+  signed context token, verified offline by its SDK (imported only in this mode);
+  `R2G_API_TOKEN` is not used. The check reads the path the router matches, so it holds
+  when the app is mounted with a `root_path`. Only the load-progress stream takes the
+  token as `?token=`, and the access log records it as `<redacted>`. A context the
+  control plane refuses when asked for its project is a 401, not a 503. A load's
+  status, progress and rejected rows are reached only through the project that started
+  it. Only the transformation project the control-plane
   project names for r2g can be listed, read, changed, loaded or created; any other
   answers 404. `GET /api/control-plane/context` returns who, which project, and the
   project ontology's classes read from `AOE_URL`. The page keeps the token per tab,
@@ -25,8 +46,19 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The CLI honours `R2G_CATALOG_DIR`**, as the MCP server already did, so storage can
   be per tenant (PRD P14.6).
+- **A load's rejected rows are kept with the catalog, per project**:
+  `<catalog dir>/dlq/<project>/<load_id>.jsonl` (`~/.r2g/dlq/<project>/` by default; was
+  `~/.r2g/dlq/<load_id>.jsonl`). Outside control-plane mode the Studio still shows rows
+  kept at the old path (PRD P5b.3.3, P14.6).
 
 ### Fixed
+
+- **The Studio no longer drops mapping settings it has no editor for.** Opening a
+  project builds the editor from `/graph-data`, whose copy of the mapping left out the
+  graph layout and its LPG settings and each collection's `extra_labels`; the page also
+  never sent `naming_convention`. One reopen and save turned an LPG mapping back into the
+  default layout without its extra labels, and lost the naming convention. All of them
+  now go both ways.
 
 - **`apiFetch` keeps the auth header when a caller passes its own headers**, and the
   expression editor's three direct `fetch` calls now send it.

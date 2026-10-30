@@ -46,3 +46,10 @@ forge-out/
 # whatever this machine was doing, including unrelated repositories. `.claude/` and
 # `.prd-drift-queue/` are ignored for the same reason.
 .pattern-capture-queue/
+.cursor/rules/*.mdc.pre-update.*
+
+# Cursor's shared-memory hooks are thin wrappers that run `.claude/hooks/*.py`, which
+# is ignored above, so in any other clone they would do nothing while looking like
+# enforcement. Editor-local, like `.claude/`; the `.cursor/rules/` files are tracked.
+.cursor/hooks/
+.cursor/hooks.json

@@ -192,6 +192,11 @@ class MappingVisualizer:
                     }
                     for fx in cm.field_expressions
                 ],
+                # The Studio builds its editor from this, and rebuilds the mapping from
+                # the editor on save: a field left out here is dropped by the next save.
+                "extraLabels": list(cm.extra_labels),
+                "term": cm.term,
+                "fieldTerms": dict(cm.field_terms),
             }
         edges = [
             {
@@ -200,6 +205,7 @@ class MappingVisualizer:
                 "toCollection": e.to_collection,
                 "fromField": ", ".join(e.from_fields),
                 "toField": ", ".join(e.to_fields),
+                "term": e.term,
                 **self._edge_provenance(e),
             }
             for e in self.config.edges
@@ -231,6 +237,11 @@ class MappingVisualizer:
             "sharedKeys": shared_keys,
             "typeOverrides": self.config.type_overrides,
             "keySeparator": self.config.key_separator,
+            # Mapping-wide settings the Studio must hand back on save (see above).
+            "graphLayout": self.config.graph_layout,
+            "lpg": self.config.lpg.model_dump(),
+            "namingConvention": (self.config.naming_convention.model_dump()
+                                 if self.config.naming_convention else None),
         }
 
     def generate(self, output_path: str) -> str:

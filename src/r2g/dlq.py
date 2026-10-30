@@ -46,6 +46,11 @@ class DeadLetterQueue:
     def count(self) -> int:
         return self._count
 
+    @property
+    def path(self) -> Path:
+        """The file this load's rejected rows are kept in."""
+        return self._path
+
     def read_errors(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         if not self._path.exists():
             return []
