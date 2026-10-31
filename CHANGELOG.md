@@ -75,6 +75,11 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<catalog dir>/dlq/<project>/<load_id>.jsonl` (`~/.r2g/dlq/<project>/` by default; was
   `~/.r2g/dlq/<load_id>.jsonl`). Outside control-plane mode the Studio still shows rows
   kept at the old path (PRD P5b.3.3, P14.6).
+- **The Studio's "Suggest model (AI)" sends the server's LLM key only to the provider's
+  own address** (PRD P10.1). A request that sets a base URL passes its own key; a keyless
+  local server (Ollama and the like) still works, and is sent no key. A gateway the
+  server's key should go to is set on the server, as `$OPENAI_BASE_URL`. A `$VAR` key may
+  name only `$OPENAI_API_KEY` or `$ANTHROPIC_API_KEY`. The CLI is unchanged.
 
 ### Fixed
 
