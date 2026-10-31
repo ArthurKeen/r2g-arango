@@ -262,6 +262,19 @@ class TestPostgresSessionSmoke:
         fake_conn.close.assert_called_once()
         assert s._conn is None
 
+    def test_process_table_records_the_schema_it_read(self):
+        # Columns, then primary keys, then foreign keys -- _process_table's query order.
+        cur = MagicMock()
+        cur.fetchall.side_effect = [
+            [{"column_name": "orderid", "data_type": "integer", "is_nullable": "NO"}],
+            [{"column_name": "orderid"}],
+            [],
+        ]
+        c = PostgresConnector("postgresql://localhost/x", schema_name="sales")
+        table = c._process_table(cur, "orders")
+        assert table.schema_name == "sales"
+        assert table.qualified_name() == '"sales"."orders"'
+
     def test_open_session_on_connector_returns_postgres_session(self):
         c = PostgresConnector("postgresql://localhost/x", schema_name="foo")
         s = c.open_session()

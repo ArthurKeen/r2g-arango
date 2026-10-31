@@ -211,7 +211,9 @@ def mapping_to_r2rml(
         # nodes, so inner statements can carry one uniformly.
         preds: List[str] = [
             "    a rr:TriplesMap",
-            f"    rr:logicalTable [ rr:tableName {_ttl_string(cm.source_table)} ]",
+            # Schema-qualified outside `public`: Ontop resolves a bare name in the
+            # connection's first schema only, so two schemas cannot share one mapping.
+            f"    rr:logicalTable [ rr:tableName {_ttl_string(table.qualified_name())} ]",
             (
                 "    rr:subjectMap [\n"
                 f"        rr:template {_ttl_string(template)} ;\n"
