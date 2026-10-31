@@ -45,6 +45,7 @@ class OpenAIProvider:
         provider_type: str = "openai",
         require_key: bool = True,
         require_base_url: bool = False,
+        key_from_env: bool = True,
     ) -> None:
         self.provider_type = provider_type
         self.require_key = require_key
@@ -63,7 +64,7 @@ class OpenAIProvider:
         self.temperature = float(self.params.get("temperature", 0.0))
         # Resolve the key lazily so constructing a provider never requires one
         # (e.g. listing supported types); calls without a key fail clearly.
-        self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self._api_key = api_key or (os.environ.get("OPENAI_API_KEY") if key_from_env else None)
 
     def propose_ontology(self, request: OntologyRequest) -> OntologyProposal:
         if self.require_key and not self._api_key:

@@ -153,18 +153,23 @@ def create_llm_provider(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
     params: Optional[dict[str, Any]] = None,
+    key_from_env: bool = True,
 ) -> LLMProvider:
     """Return an LLM provider matching ``provider_type``.
 
     Concrete classes are lazy-imported so optional dependencies load only when a
     provider of that type is used. Unknown types raise :class:`ValueError`;
     missing optional deps raise :class:`ImportError` with a pip-install hint.
+    ``key_from_env=False`` stops a provider without ``api_key`` from using the
+    environment's key (for an address the caller chose).
     """
     key = normalize_llm_type(provider_type)
     if key == "openai":
         from r2g.llm.openai_provider import OpenAIProvider
 
-        return OpenAIProvider(model=model, api_key=api_key, params=params or {})
+        return OpenAIProvider(
+            model=model, api_key=api_key, params=params or {}, key_from_env=key_from_env
+        )
     if key == "openai-compatible":
         from r2g.llm.openai_provider import OpenAIProvider
 
@@ -177,11 +182,14 @@ def create_llm_provider(
             provider_type="openai-compatible",
             require_key=False,
             require_base_url=True,
+            key_from_env=key_from_env,
         )
     if key == "anthropic":
         from r2g.llm.anthropic_provider import AnthropicProvider
 
-        return AnthropicProvider(model=model, api_key=api_key, params=params or {})
+        return AnthropicProvider(
+            model=model, api_key=api_key, params=params or {}, key_from_env=key_from_env
+        )
     raise ValueError(
         f"Unsupported LLM provider type '{provider_type}'. "
         f"Expected one of: {', '.join(SUPPORTED_LLM_TYPES)}."

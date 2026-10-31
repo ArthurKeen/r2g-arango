@@ -41,6 +41,7 @@ class AnthropicProvider:
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         params: Optional[dict[str, Any]] = None,
+        key_from_env: bool = True,
     ) -> None:
         self.params = params or {}
         self.model = model or self.params.get("model") or DEFAULT_MODEL
@@ -49,7 +50,7 @@ class AnthropicProvider:
         self.timeout = float(self.params.get("timeout", DEFAULT_TIMEOUT))
         self.max_tokens = int(self.params.get("max_tokens", DEFAULT_MAX_TOKENS))
         self.temperature = float(self.params.get("temperature", 0.0))
-        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        self._api_key = api_key or (os.environ.get("ANTHROPIC_API_KEY") if key_from_env else None)
 
     def propose_ontology(self, request: OntologyRequest) -> OntologyProposal:
         if not self._api_key:

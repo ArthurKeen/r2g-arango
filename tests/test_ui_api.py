@@ -1832,6 +1832,58 @@ class TestSuggestOntologyApi:
         self._patch(monkeypatch)
         assert client.post("/api/projects/nope/suggest-ontology", json={}).status_code == 404
 
+    def _built(self, monkeypatch):
+        """Build the real provider, keep it, and answer with the fake proposal."""
+        import r2g.llm
+        from r2g.llm.base import OntologyProposal
+
+        real, built = r2g.llm.create_llm_provider, []
+        proposal = OntologyProposal.model_validate(self._proposal())
+
+        def factory(*a, **k):
+            built.append(real(*a, **k))
+            return type("_Fake", (), {"provider_type": "fake",
+                                      "propose_ontology": lambda s, r: proposal})()
+
+        monkeypatch.setattr("r2g.llm.create_llm_provider", factory)
+        return built
+
+    @pytest.mark.parametrize("extra", [
+        {"api_key": "$R2G_REVIEW_SECRET"},
+        {"api_key": "$OPENAI_API_KEY", "base_url": "http://collector.test/v1"},
+        {"base_url": "http://collector.test/v1"},
+    ])
+    def test_suggest_sends_no_server_secret_to_a_requested_address(
+        self, client, tmp_path, catalog_dir, monkeypatch, extra
+    ):
+        self._setup(client, tmp_path, catalog_dir)
+        monkeypatch.setenv("R2G_REVIEW_SECRET", "s3cret")
+        monkeypatch.setenv("OPENAI_API_KEY", "server-key")
+        built = self._built(monkeypatch)
+        resp = client.post("/api/projects/oproj/suggest-ontology",
+                           json={"provider": "openai", **extra})
+        assert resp.status_code == 400 and built == [], resp.text
+
+    def test_suggest_server_keys_still_reach_the_provider(
+        self, client, tmp_path, catalog_dir, monkeypatch
+    ):
+        self._setup(client, tmp_path, catalog_dir)
+        monkeypatch.setenv("OPENAI_API_KEY", "server-key")
+        built = self._built(monkeypatch)
+        url = "/api/projects/oproj/suggest-ontology"
+        # A named key, to the provider's own address.
+        assert client.post(url, json={"api_key": "$OPENAI_API_KEY"}).status_code == 200
+        assert built[-1]._api_key == "server-key"
+        assert built[-1].base_url == "https://api.openai.com/v1"
+        # The request's own key, to its own address.
+        body = {"api_key": "own-key", "base_url": "http://collector.test/v1"}
+        assert client.post(url, json=body).status_code == 200
+        assert built[-1]._api_key == "own-key"
+        # A keyless local server: allowed, and the server's key does not go with it.
+        body = {"provider": "ollama", "base_url": "http://localhost:11434/v1"}
+        assert client.post(url, json=body).status_code == 200
+        assert built[-1]._api_key is None
+
     def test_suggest_unknown_provider_400(self, client, tmp_path, catalog_dir):
         self._setup(client, tmp_path, catalog_dir)
         resp = client.post(

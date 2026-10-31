@@ -60,6 +60,11 @@ def _resolve_env_ref(value: str) -> str:
     return value
 
 
+# The environment variables a suggestion request may name as its API key. Any other
+# name could hand one of the server's secrets to the provider (and back in its error).
+_LLM_KEY_VARS = frozenset({"OPENAI_API_KEY", "ANTHROPIC_API_KEY"})
+
+
 def _redact_dlq_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Mask source-row VALUES in a DLQ entry returned to API clients.
 
@@ -1600,12 +1605,29 @@ def create_app(
 
     def _suggestion_key(body: Any) -> str | None:
         """The API key a suggestion is made with. A ``$VAR`` key names one of the server's
-        environment variables. Under a control plane, where the caller is any user with a
-        context, the server's environment is not read on a request's behalf: no ``$VAR``,
-        and no ``base_url`` without the request's own key, since the provider would send
-        the server's key there (P14.12)."""
+        LLM keys (``_LLM_KEY_VARS``), and goes only to the provider's own address: with a
+        ``base_url`` of the request's choosing, only the request's own key travels, and the
+        provider does not fall back to the server's (``key_from_env``). Under a control
+        plane, where the caller is any user with a context, the server's environment is
+        not read on a request's behalf at all: no ``$VAR``, and no ``base_url`` without the
+        request's own key (P14.12)."""
         if not governed:
-            return _resolve_env_ref(body.api_key) if body.api_key else None
+            from r2g.llm import normalize_llm_type
+
+            key: str | None = body.api_key or None
+            named = bool(key and key.startswith("$"))
+            if key and named and key[1:] not in _LLM_KEY_VARS:
+                raise HTTPException(status_code=400, detail=(
+                    "An API key may name only "
+                    + " or ".join(f"${v}" for v in sorted(_LLM_KEY_VARS))))
+            # A keyless call to a local OpenAI-compatible server stays allowed.
+            keyless = not key and normalize_llm_type(body.provider) == "openai-compatible"
+            if body.base_url and (named or not (key or keyless)):
+                raise HTTPException(status_code=400, detail=(
+                    "The server's API key is sent only to the provider's own address "
+                    "(or the server's $OPENAI_BASE_URL); with base_url, pass the key "
+                    "itself"))
+            return _resolve_env_ref(key) if key and named else key
         if body.api_key and body.api_key.startswith("$"):
             raise HTTPException(status_code=403, detail=(
                 "Not available under the control plane: an API key may not name the "
@@ -1740,7 +1762,8 @@ def create_app(
         params = {"base_url": body.base_url} if body.base_url else None
         try:
             llm = create_llm_provider(
-                body.provider, model=body.model, api_key=resolved_key, params=params
+                body.provider, model=body.model, api_key=resolved_key, params=params,
+                key_from_env=not body.base_url,
             )
         except (ValueError, ImportError) as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -2372,7 +2395,8 @@ class SuggestOntologyRequest(BaseModel):
     engine: str = "llm"
     provider: str = "openai"
     model: str | None = None
-    # API key or $ENV_VAR reference; when omitted the provider reads it from the
+    # API key, or $OPENAI_API_KEY / $ANTHROPIC_API_KEY (to the provider's own address
+    # only); when omitted, and with no base_url, the provider reads it from the
     # environment ($OPENAI_API_KEY). Never persisted.
     api_key: str | None = None
     # Endpoint base URL (required for openai-compatible / local providers).
