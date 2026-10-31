@@ -184,6 +184,12 @@ class FakeControlPlane:
     def project(self, identity: control_plane.Identity) -> control_plane.Project:
         return control_plane.Project("library", "Library", "library-catalog")
 
+    def decide(self, identity, action, term):  # tests/test_governed_changes.py covers this
+        return control_plane.Decision("permitted", "permitted by rule 'all'", 1)
+
+    def record(self, token, entry):
+        pass
+
 
 @pytest.fixture
 def catalog_dir(tmp_path: Path) -> Path:

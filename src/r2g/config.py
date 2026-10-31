@@ -420,15 +420,18 @@ class ConfigManager:
         return MappingConfig.model_validate(data)
 
     @staticmethod
+    def dump_config(config: MappingConfig) -> str:
+        """The text :meth:`save_config` writes for ``config``."""
+        return yaml.safe_dump(
+            config.model_dump(mode="python"),
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+        )
+
+    @staticmethod
     def save_config(config: MappingConfig, path: str | Path) -> None:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        payload = config.model_dump(mode="python")
         with p.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                payload,
-                f,
-                default_flow_style=False,
-                allow_unicode=True,
-                sort_keys=False,
-            )
+            f.write(ConfigManager.dump_config(config))

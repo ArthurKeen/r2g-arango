@@ -11,7 +11,9 @@ as ``Authorization: Bearer`` (or as ``?token=`` on the load-progress stream, whi
 * the project's ontology is read from AOE, with the same token, so the user sees the
   classes the project works on;
 * storage is per tenant (``R2G_CATALOG_DIR``), and a context for another tenant is
-  refused.
+  refused;
+* every change is checked against the control plane's policy before it happens, and
+  recorded in the project's history after (P14.9-P14.13, :mod:`r2g.governed`).
 
 The control plane's SDK (``control_plane_sdk``) does the verification, offline, against
 the control plane's published keys. It is imported only in this mode, so r2g installs and
@@ -28,6 +30,16 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 TOOL_ID = "r2g"
+
+#: The actions r2g declares to the control plane (P14.13), as a policy's ``actions`` names
+#: them. An item that names no class asks without a term, which the control plane's SDK
+#: decides by the rules with no target (its FR-5.8; older SDKs reject such a policy).
+ACTIONS: dict[str, dict[str, str | None]] = {
+    "mapping.update": {"tool": TOOL_ID, "version": "1", "targets": "optional-ontology-term"},
+    "data.load": {"tool": TOOL_ID, "version": "1", "targets": "optional-ontology-term"},
+    "data.migrate": {"tool": TOOL_ID, "version": "1", "targets": "optional-ontology-term"},
+    "transformation.update": {"tool": TOOL_ID, "version": "1", "targets": None},
+}
 
 
 class ContextRejected(Exception):  # noqa: N818 - mirrors the SDK's TokenRejected
@@ -63,10 +75,47 @@ class Project:
     opens: str | None
 
 
+@dataclass(frozen=True)
+class Decision:
+    """The policy's answer to one question, as the history records it."""
+
+    outcome: str  # "permitted" or "denied"
+    reason: str
+    policy_version: int
+
+    @property
+    def permitted(self) -> bool:
+        return self.outcome == "permitted"
+
+
+@dataclass(frozen=True)
+class Entry:
+    """One entry for the project's history: what changed, or what was refused."""
+
+    event_id: str
+    action: str
+    entity: str
+    term: str | None
+    decision: Decision
+    occurred_at: int
+    before: str | None = None
+    after: str | None = None
+    diff: str | None = None
+
+
 class ControlPlane(Protocol):
     def verify(self, token: str) -> Identity: ...
 
     def project(self, identity: Identity) -> Project: ...
+
+    def decide(self, identity: Identity, action: str, term: str | None) -> Decision:
+        """Never raises: anything that prevents a decision is a denial saying why."""
+        ...
+
+    def record(self, token: str, entry: Entry) -> None:
+        """Send ``entry``, attributed by ``token``. Raises :class:`ContextRejected` when
+        the token can no longer attribute it, :class:`ContextUnavailable` to retry later."""
+        ...
 
 
 def mode() -> bool:
@@ -133,6 +182,45 @@ class _Sdk:
         with self._lock:
             self._projects[key] = (now, project)
         return project
+
+    def decide(self, identity: Identity, action: str, term: str | None) -> Decision:
+        d = self.client.decide(identity.verified, action, term)
+        return Decision(d.outcome, d.reason, d.policy_version)
+
+    def record(self, token: str, entry: Entry) -> None:
+        from control_plane_sdk import (
+            Action,
+            Change,
+            ContextError,
+            EventConflict,
+            InvalidEvent,
+            NotPermitted,
+            ProjectNotFound,
+            Target,
+            TokenRejected,
+            Unavailable,
+        )
+        from control_plane_sdk import Decision as SdkDecision
+
+        try:  # a queued entry is resent later, so its token is checked again here
+            verified = self.client.verify(token)
+            self.client.record(
+                verified,
+                action=Action(entry.action),
+                target=Target(entry.entity, type=entry.term),
+                change=Change(before=entry.before, after=entry.after, diff=entry.diff),
+                # Version 0: no policy could be read. The history caps a reason at 500.
+                decision=SdkDecision("permitted" if entry.decision.permitted else "denied",
+                                     str(entry.decision.policy_version or "") or None,
+                                     entry.decision.reason[:500]),
+                occurred_at=entry.occurred_at,
+                event_id=entry.event_id,
+            )
+        except (TokenRejected, ContextError, NotPermitted, ProjectNotFound, EventConflict,
+                InvalidEvent) as exc:
+            raise ContextRejected(str(exc)) from exc  # resending would not help
+        except Unavailable as exc:
+            raise ContextUnavailable(str(exc)) from exc
 
 
 _instance: ControlPlane | None = None

@@ -62,6 +62,12 @@ class FakeControlPlane:
     def project(self, identity: control_plane.Identity) -> control_plane.Project:
         return control_plane.Project("equity", "Equity research", "customer-360")
 
+    def decide(self, identity, action, term):  # tests/test_governed_changes.py covers this
+        return control_plane.Decision("permitted", "permitted by rule 'all'", 1)
+
+    def record(self, token, entry):
+        pass
+
 
 @pytest.fixture
 def governed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -366,32 +372,32 @@ class TestCreatingIsScopedToo:
     middleware's route check cannot see them (P14.3)."""
 
     def test_creating_another_project_is_not_found(self, governed, tmp_path):
+        class OpensANewOne(FakeControlPlane):
+            def project(self, identity):
+                return control_plane.Project("equity", "Equity research", "not-created-yet")
+
+        control_plane.set_instance(OpensANewOne())
         r = governed.post("/api/projects", headers=bearer(),
                           json={"name": "not-named-here", "source_name": "src"})
         assert r.status_code == 404
         assert CatalogManager(tmp_path).get_project("not-named-here") is None
         # Positive control: the one it opens can be created.
-        assert governed.delete("/api/projects/customer-360", headers=bearer()).status_code == 200
         r = governed.post("/api/projects", headers=bearer(),
-                          json={"name": "customer-360", "source_name": "src"})
+                          json={"name": "not-created-yet", "source_name": "src"})
         assert r.status_code == 201
 
-    def test_a_demo_preset_for_another_project_is_not_found(self, governed, monkeypatch):
-        path = "/api/demo-presets/snowflake-customer-360/install"
-        assert governed.post(path, headers=bearer(), json={}).status_code == 404
-
-        # Positive control: when the preset's project is the one opened, the route runs
-        # (and stops at the Snowflake settings this test does not have).
+    def test_a_demo_preset_is_refused_even_for_the_project_opened(self, governed):
+        """It adds a source, which every project in the tenant shares (P14.12, which
+        supersedes P14.3's preset case under a control plane)."""
         class OpensThePreset(FakeControlPlane):
             def project(self, identity):
                 return control_plane.Project("equity", "Equity research",
                                              "snowflake_customer_360")
 
-        for name in ("SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER"):
-            monkeypatch.delenv(name, raising=False)
         control_plane.set_instance(OpensThePreset())
-        r = governed.post(path, headers=bearer(), json={})
-        assert r.status_code == 400 and "snowflake_environment_incomplete" in r.text
+        r = governed.post("/api/demo-presets/snowflake-customer-360/install",
+                          headers=bearer(), json={})
+        assert r.status_code == 403 and "adds a source" in r.json()["detail"]
 
 
 class TestTheMcpServerDoesNotRunHere:
