@@ -92,7 +92,13 @@ and this project aspires to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bare, and Ontop resolves a bare name in the connection's first schema only, so a
   mapping over tables in two or more schemas failed at start-up. A Postgres source read
   with `--pg-schema X` (not `public`) now writes `schema_name` in its snapshot and
-  `"X"."table"` in its R2RML. `public`-only snapshots and mappings are unchanged.
+  `"X"."table"` in its R2RML. `public`-only snapshots and mappings are unchanged
+  (PRD P12.1).
+  - Such a source gets a **new schema fingerprint once**, at its next snapshot, with no
+    schema change: the recorded schema is now part of what is fingerprinted.
+  - A schema produced outside r2g's connectors that records a schema other than `public`
+    (for example `dbo`, or Snowflake's `PUBLIC`) now gets `"dbo"."t"` in its R2RML. That
+    resolves in its own dialect; only the text changes.
 
 ## [0.8.2] — 2026-10-29
 
